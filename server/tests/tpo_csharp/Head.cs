@@ -1,5 +1,5 @@
-// Parity harness for chartsrv/tpo.py: the NinjaTrader-free parts of TatankaTpoProfile.cs v1.0.0 (pasted in
-// by build.sh), compiled with stand-ins for the NinjaTrader members they read.
+// Parity harness for chartsrv/tpo.py: the NinjaTrader-free parts of TatankaTpoProfile.cs v1.0.0 or v1.1.0 (pasted
+// in by build.sh; HOURS: v1.1.0's Use Instrument Hours), compiled with stand-ins for the NinjaTrader members they read.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -53,5 +53,6 @@ public class TatankaTpoProfile : Indicator
     public bool AutoRowHeight { get; set; }
     public int TargetRows { get; set; }
     public int RowHeightTicks { get; set; }
+    public bool UseInstrumentHours { get; set; }
 
     // ---- pasted from TatankaTpoProfile.cs ----

@@ -189,8 +189,8 @@ var applyAll = async () => { await root.sel['.ind-all'].onclick(); };
 var preset = async (v) => { await root.sel['.ind-tpl'].onchange({ target: { value: v } }); };
 var hello = async () => { await loadAmtServer(); await loadGapAlerts(); };
 """
-PAGE_PARTS = ["LVL_TEXT", "IND_NOTES", "same", "amtShared", "amtBySymbol", "pickSet", "amtOwn", "amtStart", "amtEff", "amtValue",
-              "amtMinutes", "renderAmtMenu", "amtPatch", "indDefaults", "indAdapter", "amtHeard", "loadAmtServer", "GAP_SWITCH",
+PAGE_PARTS = ["INST_RE", "baseOf", "instNo", "LVL_TEXT", "IND_NOTES", "same", "amtShared", "amtBySymbol", "pickSet", "amtOwn", "amtStart", "amtEff", "amtValue",
+              "amtMinutes", "renderAmtMenu", "amtPatch", "indDefaults", "instFreeze", "indSym", "llShared", "IF_INPUT", "IF_BAR_INPUTS", "ifInputName", "ifInputChoices", "indAdapter", "amtHeard", "loadAmtServer", "GAP_SWITCH",
               "GAP_SHARED", "gapShown", "hhmm", "gapRth",
               "gapRthOk", "GAP_RTH_BAD", "gapAlertsPut", "renderGapInfo", "renderGapMenu", "loadGapAlerts", "gapAlertsFollow",
               "sharedMoved", "moveSharedOut", "onMessage"]
@@ -382,8 +382,8 @@ def test_gap_alert_switches_show_and_save_as_the_symbols():
   out.own = A.own.gap;
 """)
     assert out["shows"] is False
-    assert out["sent"] == [{"RthStart": 90000, "RthEnd": 150000, "MinimumGapPoints": 2},
-                           {"new": False, "RthStart": 90000, "RthEnd": 150000, "MinimumGapPoints": 2}]
+    assert out["sent"] == [{"RthStart": 90000, "RthEnd": 150000, "MinimumGapPoints": 2, "UseInstrumentHours": True},
+                           {"new": False, "RthStart": 90000, "RthEnd": 150000, "MinimumGapPoints": 2, "UseInstrumentHours": True}]
     assert out["paths"] == ["/api/gaps/alerts?symbol=ES"] * 2
     assert out["server"] == [{"ES": {"new": False, "fill": False}, "NQ": {"new": True, "fill": True}}, False, 2,
                              {"on": True, "new": True, "fill": True, "rth": False, "MinimumGapPoints": 0}]

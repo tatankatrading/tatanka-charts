@@ -1,10 +1,10 @@
 """Keeping the database lean, once a day while CME is shut (the 16:00-17:00 CT break, or a weekend): trades older
 than the retention (Connections > Backups; 5 years unless changed) deleted a slice at a time, the fired-alert history
-cut to the newest EVENTS_KEPT, the write-ahead log folded back in and trimmed, and SQLite's planner statistics
-refreshed. 1-minute bars are always kept, so candle charts reach as far back as ever; tick, footprint and tape detail
-goes for the older days. The file doesn't shrink: the freed space is reused for new trades, so it stops growing. All
-on the server's own connection, so charts get their turn between slices and the database watcher (app.watch_db)
-doesn't take it for an import."""
+cut to the newest EVENTS_KEPT, the Session VP sessions kept past any chart's reach dropped (VpService.prune), the
+write-ahead log folded back in and trimmed, and SQLite's planner statistics refreshed. 1-minute bars are always kept,
+so candle charts reach as far back as ever; tick, footprint and tape detail goes for the older days. The file doesn't
+shrink: the freed space is reused for new trades, so it stops growing. All on the server's own connection, so charts
+get their turn between slices and the database watcher (app.watch_db) doesn't take it for an import."""
 import asyncio
 import logging
 import sqlite3
@@ -70,6 +70,9 @@ class Upkeep:
             with db:   # the fired-alert history: the newest EVENTS_KEPT
                 db.execute("DELETE FROM alert_events WHERE id <= "
                            "(SELECT id FROM alert_events ORDER BY id DESC LIMIT 1 OFFSET ?)", (EVENTS_KEPT,))
+            vps = getattr(self.m, "vp", None)
+            if vps is not None:
+                vps.prune(now)
             # On the server's loop: it never waits for a reader still in the log (a chart's history load); with one
             # in, the log is folded back in as far as it can be and trimmed at a later run.
             busy = db.execute("PRAGMA busy_timeout").fetchone()[0]

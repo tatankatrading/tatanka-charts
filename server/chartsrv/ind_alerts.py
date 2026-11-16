@@ -287,6 +287,12 @@ class IndicatorAlerts:
         self._looked = None                      # the trade the last first look on the event loop was made on
         # first looks put off to the loop's next passes: alert id -> its trade, or the state of one a little short
         self._later: dict[int, Tick | _State] = {}
+        self.roll_t: dict[str, int] = {}         # symbol -> when it last rolled to another contract
+
+    def rolled(self, sym: str, ts: int):
+        """`sym` moved to another contract: no alert compares a bar of the old one with the new one's prices (the
+        jump by the roll's spread crosses nothing). Each forgets what it last saw once, from its next trade."""
+        self.roll_t[sym] = ts
 
     def ensure(self):
         """Loads the series the enabled indicator alerts need (on the event loop, after alerts change)."""
@@ -384,6 +390,11 @@ class IndicatorAlerts:
                 st.fired_t = bar.t
                 out = self._message(a, side, now, bar)
         st.catch_up = False
+        rt = self.roll_t.get(a.symbol)
+        if rt is not None and getattr(st, "roll_seen", None) != rt:   # a roll since: from its first bar after it
+            st.roll_seen = rt
+            if st.done_t is None or st.done_t < rt:
+                st.pa = st.pb = None
         # the forming bar against the last closed one, as TradingView's crossover; an RTH chart's bars take no
         # overnight trade, so neither does its intrabar check
         if p["on"] == "bar" and w.series.in_hours(tk.ts):
@@ -468,13 +479,15 @@ class IndicatorAlerts:
             log.info("indicator alert %s ready in %.1fs", aid, time.perf_counter() - t0)
 
     def _message(self, a, side: str, now: tuple, bar) -> str:
-        p, dec = a.params, self.m.instruments[a.symbol].decimals
+        p, inst = a.params, self.m.instruments[a.symbol]
 
         def f(d, v):
             kind = d.get("ind", "")
             if kind in VOLUME:
                 return f"{v:.0f}"
-            return f"{v:.2f}" if kind in TWO_DECIMALS or kind.startswith(("rsi", "macd")) else f"{v:.{dec}f}"
+            # on the price scale: as the chart writes prices (a Treasury's in 32nds: 110'165)
+            return f"{v:.2f}" if kind in TWO_DECIMALS or kind.startswith(("rsi", "macd")) else inst.fmt(v)
         verb = {"gt": "above", "lt": "below"}.get(p["direction"], f"crossed {side}")
-        return (f"{a.symbol} {p['spec']}: {line_name(p['a'])} {f(p['a'], now[0])} {verb} {line_name(p['b'])}"
+        b = f(p["a"], p["b"]["value"]) if "value" in p["b"] else line_name(p["b"])   # a value on the price scale as a price
+        return (f"{a.symbol} {p['spec']}: {line_name(p['a'])} {f(p['a'], now[0])} {verb} {b}"
                 f"{'' if 'value' in p['b'] or p['b'].get('ind') == 'price' else ' ' + f(p['b'], now[1])}")

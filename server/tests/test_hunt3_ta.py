@@ -50,7 +50,7 @@ const known = {
   },
 };
 const S = { seqTime: new Map(), fp: new Map(), dsmaLive: new Map(), instruments: { ES: {}, CL: { calendar: 'energy' } },
-  holidays: JSON.parse(process.argv[3]) };
+  holidays: JSON.parse(process.argv[3]), st: {} };
 Object.assign(known, { S, bars });
 with (new Proxy(known, { has: (t, k) => k in t || !(k in globalThis), get: (t, k) => (k in t ? t[k] : k === Symbol.unscopables ? undefined : stub) })) {
   (function () {

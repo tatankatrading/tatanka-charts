@@ -102,11 +102,12 @@ def test_a_journal_trade_clicked_on_a_layouts_page_scrolls_the_active_chart_to_i
 
 # openAlertDialog as written: the price a new alert starts at
 ALERT_JS = CLASSES_JS + """
-const els = {}, $ = (s) => (els[s] ||= { ...elOf(), value: '', focus() {}, select() {} });
+const els = {}, $ = (s) => (els[s] ||= { ...elOf(), value: '', focus() {}, select() {}, querySelectorAll: () => [] });
 const noop = () => {};
 const [closeCtx, toast, indDlgFill, setExp, syncDlg] = Array(5).fill(noop);
 const CHANNEL = new Set(['inside', 'outside']), dlg = {}, ax = { input: { toInput: () => '' }, short: 'CT' };
 const wlKey = (sym) => `${sym}1!`, indBase = (x) => x, snap = (p) => p, fmtSym = (sym, p) => p.toFixed(2);
+const symQuote = (sym) => S.quotes[wlKey(sym)];
 const S = { symbol: 'NQ', ext: null, lastBar: null, quotes: { 'NQ1!': { last: 25005.25 }, 'ES1!': { last: 6901.5 } }, instruments: { ES: {}, NQ: {} } };
 /*APP*/
 const out = [];

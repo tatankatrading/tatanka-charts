@@ -19,7 +19,7 @@ import time
 import httpx
 
 from . import stopping, symbol_data as D
-from .watchlists import SYM_RE, only_futures
+from .watchlists import PREFIX_RE, SYM_RE, only_futures
 
 log = logging.getLogger(__name__)
 LISTINGS = ("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
@@ -238,6 +238,8 @@ class SymbolDB:
         """Symbol first (exact, then starting with it), then names starting with it or with a word of it; every word
         typed must match the symbol or the name."""
         q = q.strip()[:60]
+        if ":" in q:   # an exchange's prefix ("NASDAQ:AAPL", "CME_MINI:ES1!", as TradingView writes them): the symbol
+            q = PREFIX_RE.sub("", q).strip()   # (FRED:, EIA: and DATA: are the source, kept)
         if kind and kind not in TYPES:
             raise ValueError(f"type: one of {', '.join(TYPES)}")
         where, args = [], {"limit": max(1, min(limit, 200))}

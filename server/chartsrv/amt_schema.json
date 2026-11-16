@@ -73,6 +73,14 @@
   "type": "bool"
  },
  {
+  "name": "inst_hours",
+  "group": "1. Global Settings",
+  "order": 8,
+  "label": "Use Instrument Hours",
+  "type": "bool",
+  "description": "Session fields are written for ES's regular hours (08:30-15:00 CT). On another market they move to its own (GC 07:20-12:30, CL 08:00-13:30): a time nearer the open moves with the open, one nearer the close with the close. Off: every field as typed on every market."
+ },
+ {
   "name": "lvl_text",
   "group": "2. Daily Levels",
   "order": 9,
@@ -935,7 +943,7 @@
   "name": "cc_showOpen",
   "group": "8. Daily & Weekly Open",
   "order": 114,
-  "label": "Show RTH Open (8:30)",
+  "label": "Show RTH Open",
   "type": "bool"
  },
  {

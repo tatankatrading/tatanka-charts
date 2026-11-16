@@ -242,7 +242,7 @@ def test_an_instrument_put_back_during_rth_sends_no_alert_before_the_add_ons_fil
         trade(now + 120_000, 22000.0)
         trade(now + 180_000, 19900.0)
         ema, gap = sent()
-        assert ema == "NQ 5m: EMA(9) 21200.00 crossed above 21100 (last 22000.00)"
+        assert ema == "NQ 5m: EMA(9) 21200.00 crossed above 21100.00 (last 22000.00)"
         assert gap.startswith("[NQ] GAP UP FILLED | 1100.00 pts in "), gap
         m.feed_objs.remove(nt)
 

@@ -31,8 +31,9 @@ function createSymbolSearch({ input, list, chips, api, onPick }) {
       const row = el('div', `ss-row${i === S.at ? ' on' : ''}`);
       row.dataset.i = String(i);
       row.append(el('b', 'ss-sym', r.symbol), el('span', 'ss-name', r.name), el('span', 'ss-ex', r.exchange || ''),
-        el('span', `ss-type${r.live ? ' live' : ''}`, r.live ? 'Live' : SS_LABEL[r.type] || r.type));
-      row.title = r.live ? 'Live chart from NinjaTrader' : r.type === 'economic' ? 'FRED economic series' : 'Delayed, free data';
+        el('span', `ss-type${r.live ? ' live' : ''}`, r.live ? 'Live' : r.symbol.startsWith('EIA:') ? 'EIA' : SS_LABEL[r.type] || r.type));
+      row.title = r.live ? 'Live chart from NinjaTrader' : r.symbol.startsWith('EIA:') ? 'EIA energy series'
+        : r.type === 'economic' ? 'FRED economic series' : 'Delayed, free data';
       return row;
     }));
     if (!S.results.length && S.q != null) list.append(el('div', 'ss-none', S.q ? 'No symbol found. Try its ticker, FRED:ID for a FRED series, or DATA:SYMBOL for your own data.' : ''));

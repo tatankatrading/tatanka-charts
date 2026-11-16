@@ -3,7 +3,8 @@
 price: TradingView's conditions on `price`: cross, above (crossing up), below (crossing down), gt and lt (greater
        or less than: true while price is past it), enter and exit (a channel `price`..`price2`). One-shot, or with
        repeat at most once a minute. An alert created while the last print sits exactly on its price fires on the
-       first move off it. Any alert with params.expires (epoch ms) switches itself off then.
+       first move off it. Any alert with params.expires (epoch ms) switches itself off then (expire: with no trade
+       too). params.free: a stock's, a series' or a formula's (free_alerts.py), checked on its own values alone.
 line:  the same for a drawn line, ray or trend line (drawings.line_price), whose level can move with market time (or
        as the chart its alert was switched on from lays the line out: drawings.LAYOUT).
 ind:   an indicator series crossing, or above or below, a value or another series (ind_alerts), on bar close or
@@ -20,6 +21,7 @@ from typing import Callable
 
 from . import drawings, study_alerts
 from .config import Instrument
+from .free_alerts import free_fmt
 from .levels import Levels
 from .models import Tick
 from .store import Store
@@ -54,6 +56,7 @@ class AlertEngine:
         self.alerts: dict[int, Alert] = {}
         self.last_px: dict[str, float] = {}
         self.last_ts: dict[str, int] = {}     # ...and its time: where a sloped line was then
+        self.free_px: dict[str, float] = {}   # a free alert symbol's last value (free_alerts): apart from any trade's
         self.armed: dict[tuple[int, str], bool] = {}
         self.seen: set[int] = set()        # price and line alerts evaluated at least once since (re)enabled
         self.at_price: set[int] = set()    # ...whose first look found the last print exactly on their price
@@ -63,7 +66,9 @@ class AlertEngine:
         self.on_change: Callable[[], None] | None = None   # an alert switched itself off (expired)
         self.reload()
 
-    def reload(self):
+    def reload(self) -> set[int]:
+        """The alerts as stored. Returns the ids of those on that start afresh: new, edited, or back on (after a pause,
+        a one-shot's firing or an expiration, each switched off here first)."""
         old = self.alerts
         self.alerts = {r["id"]: Alert(**r) for r in self.store.list_alerts()}
         # turned back on or edited, an alert starts afresh with a first look: nothing kept from while it was off
@@ -72,6 +77,7 @@ class AlertEngine:
         self.study_session = {k: v for k, v in self.study_session.items() if k in steady}
         self.seen &= steady
         self.at_price &= steady
+        return {i for i, a in self.alerts.items() if a.enabled and i not in steady}
 
     def list(self) -> list[dict]:
         return [a.to_dict() for a in self.alerts.values()]
@@ -81,33 +87,38 @@ class AlertEngine:
         ids = {a.id for a in self.alerts.values() if a.symbol == symbol and a.kind == "level"}
         self.armed = {k: v for k, v in self.armed.items() if k[0] not in ids}
 
-    def rolled(self, symbol: str):
+    def rolled(self, symbol: str, free: bool = False):
         """The feed now sends another contract for `symbol` (market.on_contract): prices jump by the spread between the
         two, through no line or level between. Its alerts start afresh, as at a first start: the new contract's first
-        trade is only where they look from."""
-        self.last_px.pop(symbol, None)
-        self.last_ts.pop(symbol, None)
-        ids = {i for i, a in self.alerts.items() if a.symbol == symbol}
+        trade is only where they look from. free: a free alert symbol's (free_alerts.rolled), not a trade's."""
+        if free:
+            self.free_px.pop(symbol, None)
+        else:
+            self.last_px.pop(symbol, None)
+            self.last_ts.pop(symbol, None)
+        ids = {i for i, a in self.alerts.items() if a.symbol == symbol and bool(a.params.get("free")) == free}
         self.armed = {k: v for k, v in self.armed.items() if k[0] not in ids}
         self.study_session = {k: v for k, v in self.study_session.items() if k not in ids}
         self.seen -= ids
         self.at_price -= ids
 
-    def on_tick(self, tk: Tick):
-        prev = self.last_px.get(tk.symbol)
-        prev_ts = self.last_ts.get(tk.symbol, tk.ts)
-        self.last_px[tk.symbol] = tk.price
-        self.last_ts[tk.symbol] = tk.ts
+    def on_tick(self, tk: Tick, free: bool = False):
+        """A live future's trade; free: a free alert symbol's value (free_alerts.moved), which only its free alerts
+        see, with a previous value of its own: a stock's alert never sees the trades of a future with its ticker for a
+        root (MetLife's MET, Micro Ether's MET), nor that future's alerts the stock's quotes."""
+        if free:
+            prev, prev_ts = self.free_px.get(tk.symbol), tk.ts
+            self.free_px[tk.symbol] = tk.price
+        else:
+            prev, prev_ts = self.last_px.get(tk.symbol), self.last_ts.get(tk.symbol, tk.ts)
+            self.last_px[tk.symbol] = tk.price
+            self.last_ts[tk.symbol] = tk.ts
         for a in list(self.alerts.values()):
-            if a.symbol != tk.symbol or not a.enabled:
+            if a.symbol != tk.symbol or not a.enabled or bool(a.params.get("free")) != free:
                 continue
             exp = a.params.get("expires")
             if exp and tk.ts >= exp:
-                a.enabled = False
-                try:
-                    self.store.update_alert(a.id, enabled=False)
-                except sqlite3.Error as e:   # not written (a full disk): off all the same, and the trades go on
-                    log.warning("alert %s expired, not saved: %s", a.id, e)
+                self._expire(a)
                 if self.on_change:
                     self.on_change()
                 continue
@@ -129,6 +140,22 @@ class AlertEngine:
             except Exception:  # one bad alert must not stop the others
                 log.exception("alert %s failed", a.id)
 
+    def expire(self, now: int):
+        """Switches off each alert whose expiration has passed, with no trade or value to check it on (market's
+        housekeeping, once a minute): a series' alert (a new value days or weeks apart), a future's over a weekend."""
+        gone = [a for a in list(self.alerts.values()) if a.enabled and (exp := a.params.get("expires")) and now >= exp]
+        for a in gone:
+            self._expire(a)
+        if gone and self.on_change:
+            self.on_change()
+
+    def _expire(self, a: Alert):
+        a.enabled = False
+        try:
+            self.store.update_alert(a.id, enabled=False)
+        except sqlite3.Error as e:   # not written (a full disk): off all the same, and the trades go on
+            log.warning("alert %s expired, not saved: %s", a.id, e)
+
     def on_shut(self, tk: Tick):
         """The market is shut (16:00-17:00 CT, a weekend, a holiday): no trade will close the session's last bar, so
         bar-close indicator alerts check it now. tk: this moment, at the last trade's price."""
@@ -146,18 +173,20 @@ class AlertEngine:
                 log.exception("alert %s failed", a.id)
 
     def _check_price(self, a: Alert, prev: float | None, tk: Tick):
-        if prev is None:
-            return
         p, d, px = a.params["price"], a.params.get("direction", "cross"), tk.price
+        # gt and lt are true while price is past it: they need no previous price (a stock's first quote, a series'
+        # value that stays the same for weeks)
         if d in ("gt", "lt"):
             if px > p if d == "gt" else px < p:
-                self._fire(a, tk, f"{a.symbol} {'above' if d == 'gt' else 'below'} {self._fmt(a.symbol, p)}")
+                self._fire(a, tk, f"{a.symbol} {'above' if d == 'gt' else 'below'} {self._fmt(a, p)}")
+            return
+        if prev is None:
             return
         if d in ("enter", "exit"):
             lo, hi = p, a.params["price2"]
             was, now = lo <= prev <= hi, lo <= px <= hi
             if (d == "enter" and now and not was) or (d == "exit" and was and not now):
-                self._fire(a, tk, f"{a.symbol} {'entered' if d == 'enter' else 'left'} {self._fmt(a.symbol, lo)}–{self._fmt(a.symbol, hi)}")
+                self._fire(a, tk, f"{a.symbol} {'entered' if d == 'enter' else 'left'} {self._fmt(a, lo)}–{self._fmt(a, hi)}")
             return
         if a.id not in self.seen:
             self.seen.add(a.id)
@@ -172,7 +201,7 @@ class AlertEngine:
             up, down = prev < p <= px, prev > p >= px
         if (up and d in ("cross", "above")) or (down and d in ("cross", "below")):
             word = "crossed above" if up else "crossed below"
-            self._fire(a, tk, f"{a.symbol} {word} {self._fmt(a.symbol, p)}")
+            self._fire(a, tk, f"{a.symbol} {word} {self._fmt(a, p)}")
 
     def _check_line(self, a: Alert, prev: float | None, prev_ts: int, tk: Tick):
         if prev is None:
@@ -198,7 +227,7 @@ class AlertEngine:
             up, down = was < 0 <= now, was > 0 >= now
         if (up and d in ("cross", "above")) or (down and d in ("cross", "below")):
             what = {"hline": "line", "hray": "ray", "trend": "trend line"}.get(a.params.get("type"), "line")
-            self._fire(a, tk, f"{a.symbol} crossed {'above' if up else 'below'} {what} {self._fmt(a.symbol, lvl)}")
+            self._fire(a, tk, f"{a.symbol} crossed {'above' if up else 'below'} {what} {self._fmt(a, lvl)}")
 
     def _check_study(self, a: Alert, prev: float | None, tk: Tick):
         got = self.studies(a.symbol, a.params, tk.ts) if self.studies else None
@@ -220,7 +249,7 @@ class AlertEngine:
             lo, hi = (px, px) if prev is None else (min(prev, px), max(prev, px))
             if lo <= lvl + tol + eps and hi >= lvl - tol - eps:
                 self.armed[key] = False
-                self._fire(a, tk, f"{a.symbol} touched {study_alerts.describe(a.params)} {self._fmt(a.symbol, lvl)}")
+                self._fire(a, tk, f"{a.symbol} touched {study_alerts.describe(a.params)} {self._fmt(a, lvl)}")
         elif abs(px - lvl) >= tol + rearm - eps:    # re-arm measured from the band edge
             self.armed[key] = True
 
@@ -247,14 +276,15 @@ class AlertEngine:
                 lo, hi = (px, px) if prev is None else (min(prev, px), max(prev, px))
                 if lo <= lvl + tol + eps and hi >= lvl - tol - eps:
                     self.armed[key] = False
-                    self._fire(a, tk, f"{a.symbol} touched {name} {self._fmt(a.symbol, lvl)}")
+                    self._fire(a, tk, f"{a.symbol} touched {name} {self._fmt(a, lvl)}")
                     if not a.enabled:
                         return
             elif dist >= tol + rearm - eps:   # re-arm measured from the band edge
                 self.armed[key] = True
 
-    def _fmt(self, symbol, price):
-        return self.instruments[symbol].fmt(price)
+    def _fmt(self, a: Alert, price):
+        inst = None if a.params.get("free") else self.instruments.get(a.symbol)
+        return inst.fmt(price) if inst else free_fmt(price)   # a stock's, a series' or a formula's (free_alerts)
 
     def _fire(self, a: Alert, tk: Tick, msg: str):
         a.last_fired = tk.ts
@@ -263,7 +293,7 @@ class AlertEngine:
         if a.note:
             msg = f"{msg} · {a.note}"
         ev = {"alert_id": a.id, "symbol": a.symbol, "ts": tk.ts, "price": tk.price,
-              "message": f"{msg} (last {self._fmt(a.symbol, tk.price)})"}
+              "message": f"{msg} (last {self._fmt(a, tk.price)})"}
         try:
             self.store.update_alert(a.id, last_fired=tk.ts, enabled=a.enabled)
             ev["id"] = self.store.add_event(ev)

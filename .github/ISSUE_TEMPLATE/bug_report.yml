@@ -1,0 +1,68 @@
+name: Bug report
+description: Something doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting it. Leave out keys, tokens, passwords, webhook URLs and account numbers. A security
+        problem goes privately to the Security tab > Report a vulnerability, not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw. A screenshot helps.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ES 5m
+        2. Turn on ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      multiple: true
+      options:
+        - Browser on Windows
+        - Browser on Mac or Linux
+        - Installed app on a PC (Edge or Chrome)
+        - iPhone (Home Screen app or Safari)
+        - Android
+  - type: dropdown
+    id: feed
+    attributes:
+      label: Futures data from
+      multiple: true
+      options:
+        - The simulator
+        - NinjaTrader add-on
+        - Interactive Brokers
+        - Databento
+        - Another feed plugin
+        - Not about futures data
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: In the tatanka-charts folder, `git log -1 --oneline`; or the date you last ran update.cmd / update.sh.
+  - type: textarea
+    id: report
+    attributes:
+      label: Report and logs
+      description: |
+        Connections > Check all > Copy report (it has no keys or URLs in it), and if the server misbehaved, the end
+        of its log: `docker compose logs --tail 200 chart`. Read it through before pasting.
+      render: text

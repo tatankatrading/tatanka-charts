@@ -72,8 +72,8 @@ connected) and a short setup guide:
 
 1. A password.
 2. Where your futures trades come from: keep the simulator, or **Leave the simulator**. That deletes its invented
-   trades (a copy of the database is kept next to it, so the disk needs room for one) and restarts on NinjaTrader and
-   the feeds under Futures feed.
+   trades and the prices it made up for your alerts (a copy of the database is kept next to it, so the disk needs room
+   for one) and restarts on NinjaTrader and the feeds under Futures feed.
 3. Alerts and quotes.
 
 **Not now** ends it; every step is in Connections too. An install that already has data or settings never sees it.

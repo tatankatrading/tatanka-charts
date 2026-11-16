@@ -13,9 +13,12 @@ It reads, from the folders or files given (folders are searched through):
   - Databento CSV, compressed or not: glbx-mdp3-20250318.trades.csv.zst, *.trades.csv
   - Databento DBN: *.trades.dbn.zst (needs the databento-dbn package, in the image)
   - Databento batch downloads (.zip) holding either, with their symbology.json
-  - NinjaTrader tick exports, "NQ 03-24.Last.txt" (yyyyMMdd HHmmss fffffff;price;volume): no aggressor side, so
-    their footprints show volume only. Times are in --last-tz; "auto" (the default) finds the clock that matches the
-    1-minute bars already stored: a UTC offset, or a zone like America/New_York when the file spans a DST switch.
+  - NinjaTrader tick exports, "NQ 03-24.Last.txt" (yyyyMMdd HHmmss fffffff;price;volume, or ;price;bid;ask;volume):
+    the aggressor side from the bid and ask when the file has them. Without them a trade has no side: footprints
+    split it by the tick rule (an uptick is a buy, a downtick a sell, an unchanged price the side before it), and
+    its 1-minute bars get no buy/sell split. Times are in --last-tz; "auto" (the default) finds the clock that
+    matches the 1-minute bars already stored: a UTC offset, or a zone like America/New_York when the file spans a
+    DST switch.
 
 Which contract: each trade date, per symbol, the outright whose prices match the 1-minute bars already stored for
 that day (your NinjaTrader continuous contract, so the roll happens on the same day), or with no stored bars, the

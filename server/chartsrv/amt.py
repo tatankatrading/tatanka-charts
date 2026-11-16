@@ -2,7 +2,7 @@
 # This Source Code Form is subject to the Mozilla Public License, v. 2.0.
 # If a copy of the MPL was not distributed with this file, obtain one at https://mozilla.org/MPL/2.0/.
 """Tatanka AMT Toolkit calculation engine, ported from the NinjaTrader 8 source
-(tatankatrading/tatanka-indicators, ninjatrader/TatankaAmtToolkit.cs, v1.2.1).
+(tatankatrading/tatanka-indicators, ninjatrader/TatankaAmtToolkit.cs, v1.2.4).
 
 The Engine mirrors the C# Engine statement for statement and keeps its names, so the two can be read side
 by side: CT sessions, profile row rules, prior-day/month value, initial balance, overnight inventory and
@@ -19,7 +19,7 @@ from functools import lru_cache
 
 from . import sessions
 
-VERSION = "1.2.2"
+VERSION = "1.2.4"
 NAN = float("nan")
 DMIN = datetime.min
 
@@ -31,6 +31,7 @@ ALERT_RED, PINK, GREEN_SOFT, RED_SOFT = 0xFFFF1744, 0xFFEA80FC, 0xB34CAF50, 0xB3
 # Every setting with the NinjaTrader defaults, generated from the C# Settings class.
 DEFAULTS = {
     'tzguard_enable': True,
+    'inst_hours': True,
     'row_scale': "Auto",
     'tick_auto': True,
     'tick_manual_val': 0.25,
@@ -128,7 +129,7 @@ DEFAULTS = {
     'ib_col_mid': 0xFFFFCC80,
     'ib_extend': "None",
     'ib_limit_ext': True,
-    'ib_stop_time': "0830-1500",   # 1515 in the NinjaTrader original, from before ES's RTH ended at 15:00
+    'ib_stop_time': "0830-1515",
     'ib_style_main': "Solid",
     'ib_style_int': "Dotted",
     'ib_txt_c': 0x00FFFFFF,
@@ -157,7 +158,7 @@ DEFAULTS = {
     'wk_alert_open': True,
     'amt_enable': True,
     'amt_sess': "1700-0830:123456",
-    'amt_del_sess': "1700-1705",   # 1500-1505 in the NinjaTrader original: here the OVN lines stay to the 17:00 open
+    'amt_del_sess': "1500-1505",   # the OVN lines go, and their alerts end, at the RTH close (NinjaTrader 1.2.2)
     'amt_showLb': True,
     'amt_width': 1,
     'amt_style_in': "Solid",
@@ -932,10 +933,13 @@ class Engine:
     def Was(self, session):
         return self.previous is not None and self.Ins(self.previous.Start, session)
 
-    # The instrument's own calendar and regular hours (the runner sets them; the NinjaTrader original has neither:
-    # its RTH is ES's 08:30-15:00 and a holiday's short session is a day of its own).
+    # The instrument's own calendar and regular hours (the runner sets them), and the minutes its TPO Session moved to
+    # them (AmtHub.tpo_shift: GC's 0830-1500 -70, a 1200-1500 one -150), which its TPO periods move by. The NinjaTrader
+    # original has the hours and the shift too since v1.2.4 (Settings.RthSession and TpoShift, set by
+    # InstrumentHours.Apply with Use Instrument Hours on), but no calendar: a holiday's short session is a day of its own.
     Calendar: str | None = None
     RthSession = "0830-1500"
+    TpoShift = 0
 
     def TradeDate(self, t: datetime) -> datetime:
         d = trading_date(t)
@@ -944,6 +948,25 @@ class Engine:
             if f != d.date():
                 return datetime(f.year, f.month, f.day)
         return d
+
+    def WeekFirstOpen(self, t: datetime) -> bool:
+        """A 17:00 bar that opens its week: Sunday's; with a calendar, a weekday's when no earlier session of its week
+        trades (Thursday's before a Friday holiday halt, Monday's after a Monday closure), not any weekday's (history
+        starting at a Wednesday's open is no whole week)."""
+        if minute_of(t) != 1020:
+            return False
+        if t.weekday() == 6:
+            return True
+        if not self.Calendar:
+            return False
+        w = week(self.TradeDate(t))
+        for back in range(1, 7):
+            c = t - timedelta(days=back)
+            if week(self.TradeDate(c)) != w:
+                return True
+            if sessions.is_open(int(c.replace(tzinfo=sessions.CT).timestamp() * 1000) + 60_000, self.Calendar):
+                return False
+        return True
 
     def Halted(self, t: datetime) -> bool:
         """A holiday halt's short session (MLK Day before 12:00): no RTH, IB or settlement; it counts as overnight."""
@@ -993,7 +1016,9 @@ class Engine:
             return month(d)
         if mode == "Yearly":
             return datetime(d.year, 1, 1)
-        return datetime(b.Start.year, b.Start.month, b.Start.day)
+        # Session: the date its Session Time window began, so a window through midnight (1700-1600) is one profile
+        s = b.Start - timedelta(minutes=_session(self.S.mvp_sess_time)[0])
+        return datetime(s.year, s.month, s.day)
 
     @staticmethod
     def Aggregate(inp: list[Bar], size: int) -> list[Bar]:
@@ -1074,7 +1099,7 @@ class Engine:
             if self.weekFull:
                 self.pwH, self.pwL = self.weekH, self.weekL
             self.NakedRoll(self.nw, "Weekly", self.weekFull, S.npoc_w_show, S.npoc_w_w, b.Start)
-            sunday_open = minute_of(b.Start) == 1020 and (b.Start.weekday() == 6 or bool(self.Calendar))   # a week's first open
+            sunday_open = self.WeekFirstOpen(b.Start)   # a week's first open
             self.weekFull = self.week != DMIN or sunday_open
             self.week, self.weekStart, self.weekH, self.weekL = w, b.Start, b.High, b.Low
             self.nw = Profile(self.NakedStep(self.rowMult), lim)
@@ -1208,7 +1233,11 @@ class Engine:
             self.main = Profile(self.RowStep(self.rowMult), lim)
             self.mainKey, self.mainStart, self.mainStats = pk, b.Start, None
         # Prior-day value is built from the RTH session for VA only (08:30-15:00 CT by default).
-        trade_rows = self.MinuteTrades is not None and S.mvp_tf_mode in ("Session", "Weekly") and bool(subbars)
+        # the current Session or Weekly profile from its minutes' trades where they are known; a bar with none keeps
+        # Calc Precision's bars, as every past profile without trades
+        rows = [self.MinuteTrades(one.Start, one.Volume) for one in subbars] \
+            if mainWindow and self.MinuteTrades is not None and S.mvp_tf_mode in ("Session", "Weekly") and subbars else []
+        trade_rows = any(rows)
         for q in self.Aggregate(raw, calc):
             self.mm.Add(q, True)
             if mainWindow and not trade_rows:
@@ -1218,9 +1247,8 @@ class Engine:
                 if self.vaFirst == DMIN:
                     self.vaFirst = q.Start
                 self.vaEnd = q.End
-        if mainWindow and trade_rows:
-            for one in subbars:
-                trades = self.MinuteTrades(one.Start, one.Volume)
+        if trade_rows:
+            for one, trades in zip(subbars, rows):
                 if trades:
                     self.main.AddPrices(trades)
                 else:
@@ -1339,7 +1367,10 @@ class Engine:
             self.tpoPeriod = -1
             self.spStep = self.BlockStep(self.rowMult)
             self.tpoH = self.tpoL = NAN
-        pid = minute_of(b.Start) // max(1, S.sp_tpo_minutes)
+        # periods on the clock (:00/:30) on ES's hours; on an instrument's own they move as its TPO Session
+        # did (TpoShift), so they fall in it as on ES's: GC's 0830-1500 runs 07:20-07:50, 07:50-08:20... (not a
+        # 10-minute first period), a 1200-1500 one, moved with the close, 09:30-10:00...
+        pid = (minute_of(b.Start) - self.TpoShift) % 1440 // max(1, S.sp_tpo_minutes)
         newPeriod = active and pid != self.tpoPeriod
         if active:
             self.tpoH, self.tpoL = _max(self.tpoH, b.High), _min(self.tpoL, b.Low)
@@ -1396,8 +1427,11 @@ class Engine:
                              or (b.High > x.Price if x.High else b.Low < x.Price))]
 
     def Classify(self, b: Bar, vwap: float, dailyAtr: float):
-        h = self.ibH if valid(self.ibH) else self.ovnH
-        l = self.ibL if valid(self.ibL) else self.ovnL
+        # today's IB, once complete; until then the overnight range (an IB Calc Period from 09:00 still held
+        # yesterday's IB at 08:30-08:59, and outside its window read as complete: Non-Trend Day before it began)
+        ibToday = valid(self.ibH) and self.ibStart >= self.dayStart
+        h = self.ibH if ibToday else self.ovnH
+        l = self.ibL if ibToday else self.ovnL
         self.dayH, self.dayL = _max(self.dayH, b.High), _min(self.dayL, b.Low)
         if self.previous is not None:
             self.otfUp = self.otfUp + 1 if b.Low > self.previous.Low else 0
@@ -1435,7 +1469,7 @@ class Engine:
             elif bd:
                 candidate = "Normal Variation (Down)" if id_ or ext > 1.2 or cvl else "Normal Day (Balance)"
                 color = MAROON if "Down" in candidate else GRAY
-            elif not self.Ins(b.Start, self.S.ib_session) or valid(self.ibH):
+            elif ibToday:   # the day inside today's IB; held before it starts and while it forms
                 candidate = "Non-Trend Day"
             else:
                 real = False

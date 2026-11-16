@@ -172,3 +172,46 @@ def test_a_hole_the_plugin_had_nothing_for_is_asked_of_ninjatrader_once_it_suppl
         c.portal.call(lambda: m.gapfill.requests(hello, live=True, minutes=True, contracts=True))
         assert m.gapfill.queue["CL"] == [(ct(day, 9, 0, 1), ct(day, 9, 30))]
         m.feed_objs.remove(nt)
+
+
+def test_a_plugin_taking_a_symbol_mid_answer_fills_its_holes_and_ninjatraders_answer_is_dropped(tmp_path, monkeypatch, in_session):
+    """NinjaTrader asked for CL's hole (unanswered) when Your own program takes CL: the plugin fills the hole itself (no
+    window of NinjaTrader's in its way), NinjaTrader's late Z is dropped, and nothing stays held or waiting for it."""
+    import asyncio
+
+    from chartsrv.gapfill import PROBE_MS
+    from test_feed_plugins import _port
+    from test_hunt7_drawings import _client
+    from test_hunt10_hold import add_on, wait_for
+    day = datetime.fromtimestamp(in_session / 1000, sessions.CT).date()
+    stored_with_hole(tmp_path, day)
+    app, client = _client(tmp_path, monkeypatch)
+    with client as c:
+        m = app.state.market
+        nt = add_on(m)
+        hello = int(time.time() * 1000)
+        c.portal.call(lambda: m.gapfill.requests(hello, live=True, minutes=True, contracts=True))
+        c.portal.call(nt._line, m, b"Z|CL|ticks|0|ok\n")
+        assert nt.writer.lines[-1] == f"GAP|CL|{ct(day, 9, 0, 1) - PROBE_MS}|{ct(day, 9, 30)}"   # the hole, unanswered
+        c.portal.call(nt._line, m, f"T|CL|{int(time.time() * 1000)}|65.0|1|1\n".encode())
+        c.portal.call(m.flush_for_read)
+        assert c.put("/api/connections/lines", json={"enabled": True, "port": _port(), "symbols": "CL"}).status_code == 200
+        lines = next(f for f in m.feed_objs if f.name == "lines")
+        assert wait_for(c, lambda: lines.stats.get("note", "").startswith("Listening"))
+        got = []
+
+        async def history(self, sym, start, end):
+            got.append(sym)
+            t = (start // 60_000 + 1) * 60_000
+            while t < end:
+                yield ("trade", t + 1000, 65.0, 1)
+                t += 60_000
+        monkeypatch.setattr(type(lines), "history", history)
+        assert "CL" in m.gapfill.nt_out and "CL" not in m.gapfill.windows
+        c.portal.call(lines.connected)
+        c.portal.call(asyncio.sleep, 1.0)
+        assert got == ["CL"]
+        c.portal.call(nt._line, m, b"X|CL|1|65.0|1\n")   # NinjaTrader's answer, late: dropped
+        c.portal.call(nt._line, m, b"Z|CL|ticks|1|ok\n")
+        assert "CL" not in m.gapfill.nt_out and "CL" not in m.gapfill.windows and not filling(m, "CL")
+        m.feed_objs.remove(nt)

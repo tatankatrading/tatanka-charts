@@ -92,6 +92,7 @@ def test_a_full_copy_by_name_goes_in_the_backups_folder(tmp_path, monkeypatch, c
 def test_low_disk_is_said(tmp_path, monkeypatch):
     m, _ = build_market(tmp_path, monkeypatch, CHART_BACKUP_DIR=str(tmp_path / "bk"))
     running = {f.name: f for f in m.feed_objs}
+    monkeypatch.setattr(backup, "LOW_DISK", 0)   # no disk is "almost full", whatever this computer has free
     st = m.connections._status("backup", m, running)
     assert st["state"] == "warn" and "database 0.0 GB" in st["status"] and "GB free" in st["status"]
     monkeypatch.setattr(backup, "LOW_DISK", 10 ** 18)   # every disk is "almost full"

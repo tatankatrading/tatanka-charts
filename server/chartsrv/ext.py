@@ -27,7 +27,7 @@ import httpx
 from . import watchlists as wl
 from .bars import calendar_bucket, parse_spec
 from .feeds import alpaca, ibkr
-from .feeds.fred import source_of
+from .feeds.fred import SourceDown, source_of
 from .feeds.yahoo import UA, ticker_for
 from .sessions import day_open, to_ct
 
@@ -282,8 +282,8 @@ class ExtBars:
                 try:
                     bars, meta = await self._yahoo(y, base, not rth and base not in CALENDAR)
                 except ValueError as e:
-                    if why:
-                        raise ValueError(no_bars(sym, why, f"Yahoo: {e}")) from None
+                    if why:   # (Yahoo not answering stays a passing failure)
+                        raise (SourceDown if isinstance(e, SourceDown) else ValueError)(no_bars(sym, why, f"Yahoo: {e}")) from None
                     raise
                 exch = exchange_of(meta)
                 if base != spec:
@@ -445,6 +445,6 @@ class ExtBars:
         except (httpx.HTTPError, asyncio.TimeoutError) as e:
             if hit:   # the last answer, stale, beats none
                 return [dict(b) for b in hit[1]["bars"]], hit[1]["meta"]
-            raise ValueError(f"Yahoo did not answer ({type(e).__name__})") from None
+            raise SourceDown(f"Yahoo did not answer ({type(e).__name__})") from None
         self._keep(key, time.monotonic() + keep, {"bars": bars, "meta": meta})
         return [dict(b) for b in bars], meta

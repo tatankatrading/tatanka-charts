@@ -1,13 +1,26 @@
 // Parity harness for chartsrv/vp.py: drives the unchanged calculation cores of TatankaAutoAnchoredVolumeProfile 1.1.0,
-// TatankaPeriodicVolumeProfile 1.0.0 and TatankaSessionVolumeProfile 1.0.0 (pasted in after this file by build.sh)
-// the way each indicator's OnBarUpdate does, and prints every number of their snapshots as raw double bits.
+// TatankaPeriodicVolumeProfile 1.0.1 and TatankaSessionVolumeProfile 1.1.0 (or 1.0.0; pasted in after this file by
+// build.sh) the way each indicator's OnBarUpdate does, and prints every number of their snapshots as raw double bits,
+// and PVP's touches (Touches.Observe on the chart bars given) as epoch ms.
 //
-// Input lines (stdin), times as epoch ms in one time zone (the harness treats chart and session time as the same):
+// Input lines (stdin), times as epoch ms in one time zone (chart and session time the same, unless a V line names zones):
 //   A|anchor|tick|numberOfRows|rowSize|percent|atLeast           AAVP: then M lines, then E
 //   P|period|multiple|keep|tick|numberOfRows|rowSize|percent|atLeast   PVP: then M lines, then E
 //   M|tradingDay yyyy-MM-dd|sessionBegin|index|low|high|volume|up|time
-//   V|start HH:mm|end HH:mm|tick|ticksPerRow|keep|percent|atLeast  SVP: then T lines, then E
+//   C|low|high|time   PVP: a chart bar (BarsInProgress 0, its close stamp): ObserveTouches, as OnBarUpdate calls it there
+//     and after each M line from then on (with the latest chart bar); each profile's touches are then printed (TOUCH lines)
+//   V|start HH:mm|end HH:mm|tick|ticksPerRow|keep|percent|atLeast[|root|useInstrumentHours[|sessionZone|chartZone]]
+//     SVP: then T lines, then E
+//     (HOURS, SVP 1.1.0: with useInstrumentHours 1 the window moves to the root's own hours, as DataLoaded moves a window
+//     in Central time, and an H line prints it; without them, or 0: as typed, printing what 1.0.0 does)
+//     (sessionZone, chartZone: IANA names, or UTC as NinjaTrader's UTC; the chart's defaults to the session's. The T
+//     times are then in chart time, put in session time as OnBarUpdate does, and each session's start and end back in
+//     chart time. America/Chicago is NinjaTrader's Central time: the window moves as above. ZONES, SVP 1.1.0 with
+//     ZoneWindows: in another zone each date's window moves at that date's offset from Central time, and a W line
+//     prints the window after each session that runs another; without ZONES that window runs as typed)
 //   T|index|price|volume|time
+//   B|time   SVP: a chart bar (BarsInProgress 0, its close stamp): PublishLevels, as OnBarUpdate calls it on a new bar,
+//     prints the POC, VAH and VAL its plots take there (PLOT lines; "-" before any session)
 //   S   print the snapshot(s) now         E   print them and end the run
 using System;
 using System.Collections.Generic;
@@ -24,6 +37,7 @@ namespace VpHarness
         static long Ms(DateTime t) { return (long)Math.Round((t - Epoch).TotalMilliseconds); }
         static double D(string s) { return double.Parse(s, CultureInfo.InvariantCulture); }
         static string B(double x) { return BitConverter.DoubleToInt64Bits(x).ToString(CultureInfo.InvariantCulture); }
+        static TimeZoneInfo Zone(string id) { return id == "UTC" ? TimeZoneInfo.Utc : TimeZoneInfo.FindSystemTimeZoneById(id); }
         static StringBuilder Out = new StringBuilder();
 
         static void Minute(string tag, TatankaAavpCore.Profile p)
@@ -58,6 +72,18 @@ namespace VpHarness
                 Out.Append(r.LowTick).Append(",").Append(r.HighTick).Append(",").Append(B(r.Up)).Append(",").Append(B(r.Down)).Append("\n");
         }
 
+        // TatankaPeriodicVolumeProfile.ObserveTouches with ExtendPoc, ExtendVah and ExtendVal on (the defaults)
+        static void Observe(List<TatankaPvpCore.Profile> profiles, double low, double high, DateTime time)
+        {
+            foreach (TatankaPvpCore.Profile p in profiles)
+            {
+                if (!p.Closed || time <= p.LastChart) continue;
+                p.Touch.Observe(low, high, time, p.GetSnapshot(false), true, true, true);
+            }
+        }
+
+        static string Touch(DateTime? t) { return t.HasValue ? Ms(t.Value).ToString(CultureInfo.InvariantCulture) : "-"; }
+
         static void Session(string tag, TatankaVpCore.Session s, double percent, bool atLeast)
         {
             TatankaVpCore.Snapshot p = s.GetSnapshot(percent, atLeast, true);
@@ -84,6 +110,14 @@ namespace VpHarness
             TatankaVpCore.Session session = null;
             TatankaVpCore.TickCounter counter = new TatankaVpCore.TickCounter();
             TimeSpan start = TimeSpan.Zero, end = TimeSpan.Zero;
+            TimeZoneInfo sessionZone = null, chartZone = null;
+            bool touches = false;                       // C lines seen: the chart bar ObserveTouches reads
+            double chartLow = 0, chartHigh = 0;
+            DateTime chartTime = DateTime.MinValue;
+#if ZONES
+            TatankaVpCore.ZoneWindows zoneWindows = null;
+            string label = null;
+#endif
             while ((line = Console.ReadLine()) != null)
             {
                 string[] f = line.Split('|');
@@ -100,12 +134,28 @@ namespace VpHarness
                         period = (NinjaTrader.NinjaScript.TatankaPvpPeriod)Enum.Parse(typeof(NinjaTrader.NinjaScript.TatankaPvpPeriod), f[1]);
                         multiple = int.Parse(f[2]); keep = int.Parse(f[3]); tick = D(f[4]); numberOfRows = f[5] == "1";
                         rowSize = int.Parse(f[6]); percent = D(f[7]); atLeast = f[8] == "1";
-                        profiles.Clear(); current = null;
+                        profiles.Clear(); current = null; touches = false;
                         break;
                     case "V":
                         mode = "V";
                         start = TatankaVpCore.SessionClock.ParseTime(f[1]); end = TatankaVpCore.SessionClock.ParseTime(f[2]);
                         tick = D(f[3]); tpr = int.Parse(f[4]); keep = int.Parse(f[5]); percent = D(f[6]); atLeast = f[7] == "1";
+                        sessionZone = f.Length > 10 ? Zone(f[10]) : null;
+                        chartZone = f.Length > 11 ? Zone(f[11]) : sessionZone;
+#if HOURS
+#if ZONES
+                        zoneWindows = null; label = null;
+                        if (f.Length > 10 && f[10] != "America/Chicago" && f[9] == "1")
+                            zoneWindows = TatankaVpCore.ZoneWindows.For(start, end, f[8], sessionZone, Zone("America/Chicago"));
+                        else
+#endif
+                        if (f.Length > 9 && f[9] == "1" && (f.Length < 11 || f[10] == "America/Chicago"))
+                        {
+                            bool moved = TatankaVpCore.InstrumentHours.MoveTimes(ref start, ref end, f[8]);
+                            Out.Append("H|").Append(moved ? TatankaVpCore.InstrumentHours.Clock(start) + "-" + TatankaVpCore.InstrumentHours.Clock(end)
+                                : f[1] + "-" + f[2]).Append("\n");
+                        }
+#endif
                         sessions.Clear(); session = null; counter.Reset();
                         break;
                     case "M":
@@ -129,32 +179,72 @@ namespace VpHarness
                                 while (profiles.Count > keep) profiles.RemoveAt(0);
                             }
                             current.Upsert(index, low, high, vol, up, time);
+                            if (touches) Observe(profiles, chartLow, chartHigh, chartTime);
                         }
                         break;
                     }
+                    case "C":
+                        touches = true; chartLow = D(f[1]); chartHigh = D(f[2]); chartTime = T(f[3]);
+                        Observe(profiles, chartLow, chartHigh, chartTime);
+                        break;
                     case "T":
-                    {   // TatankaSessionVolumeProfile.OnBarUpdate, BarsInProgress 1 (chart time = session time)
+                    {   // TatankaSessionVolumeProfile.OnBarUpdate, BarsInProgress 1 (chart time = session time without zones)
                         double volume = counter.Consume(int.Parse(f[1]), D(f[3]));
                         if (volume <= 0) break;
                         DateTime time = T(f[4]), ws, we;
-                        if (TatankaVpCore.SessionClock.TryWindow(time, start, end, out ws, out we))
+                        DateTime local = sessionZone == null ? time : TimeZoneInfo.ConvertTime(time, chartZone, sessionZone);
+                        bool inWindow;
+#if ZONES
+                        if (zoneWindows != null) inWindow = zoneWindows.TryWindow(local, out ws, out we);
+                        else
+#endif
+                        inWindow = TatankaVpCore.SessionClock.TryWindow(local, start, end, out ws, out we);
+                        if (inWindow)
                         {
                             if (session == null || session.StartLocal != ws)
                             {
                                 if (session != null && ws < session.StartLocal) break;
                                 if (session != null) session.GetSnapshot(percent, atLeast, true);
-                                session = new TatankaVpCore.Session(ws, ws, we, tick, tpr);
+                                session = new TatankaVpCore.Session(ws, sessionZone == null ? ws : TimeZoneInfo.ConvertTime(ws, sessionZone, chartZone),
+                                    sessionZone == null ? we : TimeZoneInfo.ConvertTime(we, sessionZone, chartZone), tick, tpr);
                                 sessions.Add(session);
                                 while (sessions.Count > keep) sessions.RemoveAt(0);
+#if ZONES
+                                if (zoneWindows != null && TatankaVpCore.ZoneWindows.Label(ws, we) != label)
+                                {
+                                    label = TatankaVpCore.ZoneWindows.Label(ws, we);
+                                    Out.Append("W|").Append(label).Append("\n");
+                                }
+#endif
                             }
                             session.Add(D(f[2]), volume, time);
+                        }
+                        break;
+                    }
+                    case "B":
+                    {   // TatankaSessionVolumeProfile.PublishLevels(true): the current session's snapshot, else none yet
+                        Out.Append("PLOT|").Append(f[1]);
+                        if (session == null) Out.Append("|-\n");
+                        else
+                        {
+                            TatankaVpCore.Snapshot p = session.GetSnapshot(percent, atLeast, true);
+                            Out.Append("|").Append(B(p.Poc)).Append("|").Append(B(p.Vah)).Append("|").Append(B(p.Val)).Append("\n");
                         }
                         break;
                     }
                     case "S":
                     case "E":
                         if (mode == "A") { if (aavp.Current != null) Minute("AAVP", aavp.Current); else Out.Append("AAVP|none\n"); }
-                        else if (mode == "P") { Out.Append("PVP|").Append(profiles.Count).Append("\n"); foreach (TatankaPvpCore.Profile p in profiles) Minute("PROFILE", p); }
+                        else if (mode == "P")
+                        {
+                            Out.Append("PVP|").Append(profiles.Count).Append("\n");
+                            foreach (TatankaPvpCore.Profile p in profiles)
+                            {
+                                Minute("PROFILE", p);
+                                if (touches) Out.Append("TOUCH|").Append(Touch(p.Touch.Poc)).Append("|").Append(Touch(p.Touch.Vah)).Append("|")
+                                    .Append(Touch(p.Touch.Val)).Append("\n");
+                            }
+                        }
                         else if (mode == "V") { Out.Append("SVP|").Append(sessions.Count).Append("\n"); foreach (TatankaVpCore.Session s in sessions) Session("SESSION", s, percent, atLeast); }
                         if (f[0] == "E") Out.Append("END\n");
                         break;

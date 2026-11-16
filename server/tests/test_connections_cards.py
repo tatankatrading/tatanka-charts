@@ -111,10 +111,12 @@ const out = (v) => say('OUT', v);
     return outs
 
 
-def test_an_added_plugin_stays_listed_on_or_off_until_removed(server):
+def test_an_added_plugin_stays_listed_on_or_off_until_removed(server, in_session):
     """Its draft's Add with On unticked saves it off: it was then off the list (listed only while on), gone from the
     dialog at once and after a restart, with no Remove; the + offered it as new again. An off one takes no future
-    from NinjaTrader. Remove deletes what is saved for it (it left {"enabled": false} behind)."""
+    from NinjaTrader. Remove deletes what is saved for it (it left {"enabled": false} behind). (r21m-06: its RTY trades
+    on a clock in a session, in_session: in CME's break the server's closed-market check read the database from the
+    test's thread, and the trade was lost.)"""
     app, c = server()
     m = app.state.market
     by = _by(c)

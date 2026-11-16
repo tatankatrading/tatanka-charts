@@ -2,11 +2,12 @@
 The drawing is in web/studies.js; vp_service.py feeds them this server's 1-minute bars and trades.
 
 - TatankaAutoAnchoredVolumeProfile 1.1.0 (AAVP): one profile from a calendar anchor (default the year) to now.
-- TatankaPeriodicVolumeProfile 1.0.0 (PVP): one profile per day, week, month or year (default the week).
+- TatankaPeriodicVolumeProfile 1.0.1 (PVP): one profile per day, week, month or year (default the week).
   Both read 1-minute bars and spread each bar's volume evenly over the ticks from its low to its high, as up volume
   (close >= open) or down. Their Profile classes are the same code.
-- TatankaSessionVolumeProfile 1.0.0 (SVP): one profile per custom session (default 08:30-15:00) from every trade,
-  split into up and down volume by the tick rule.
+- TatankaSessionVolumeProfile 1.1.0 (SVP): one profile per custom session (default 08:30-15:00) from every trade,
+  split into up and down volume by the tick rule. Its window at the instrument's own hours (Use Instrument Hours) is
+  vp_service.svp_hours in CT, and vp_service.ZoneWindows (each date's) in other zones (Eastern, UTC, a chart's).
 
 The C# sources are kept unchanged in tests/vp_csharp; tests/vp_parity.py compiles their cores and compares every
 number with these."""
@@ -26,6 +27,13 @@ def round_away(x: float) -> int:
     if abs(frac) >= 0.5:
         whole += math.copysign(1.0, frac)
     return int(whole)
+
+
+def holds(low: float, high: float, level: float) -> bool:
+    """TatankaPvpCore.Touches.Holds (PVP 1.0.1): a bar's range holds a level, a billionth of the level either way (a
+    level is a tick count times the tick size, 2600.1000000000004 on GC: a bar whose high is 2600.1 touches it)."""
+    e = 1e-9 * max(1.0, abs(level))
+    return low <= level + e and high >= level - e
 
 
 def _finite(*xs) -> bool:

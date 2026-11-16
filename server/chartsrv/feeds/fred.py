@@ -55,6 +55,11 @@ class NotReady(ValueError):
     """The source can't be asked yet (no API key): not remembered as a missing series."""
 
 
+class SourceDown(ValueError):
+    """The source didn't answer (no connection, a timeout, its server failing or rate limiting): a passing failure,
+    so a chart asks again (the API answers 503), not a symbol or timeframe it can't have (400)."""
+
+
 class SeriesData:
     """Economic series kept in the database (one table per source), asked again after FRESH_S; the stored copy when
     the source can't be reached. A subclass fetches: _fetch(id) -> (observations, decimals)."""
@@ -106,7 +111,7 @@ class SeriesData:
                 if have:
                     log.info("%s %s not refreshed (%s): the stored copy", self.name, sid, type(e).__name__)
                     return [tuple(x) for x in have[0]], have[1]
-                raise ValueError(f"{self.name} did not answer ({type(e).__name__})") from None
+                raise SourceDown(f"{self.name} did not answer ({type(e).__name__})") from None
             with self.store.db:
                 self.store.db.execute(f"INSERT OR REPLACE INTO {self.table} (id, fetched, decimals, data) VALUES (?,?,?,?)",
                                       (sid, int(time.time() * 1000), dec, json.dumps(obs, separators=(",", ":"))))

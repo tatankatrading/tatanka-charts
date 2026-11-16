@@ -61,7 +61,8 @@ def test_apply_to_all_charts_gives_the_gap_alerts_the_new_settings():
     sent = [c for c in out["calls"] if c.startswith("PUT /api/gaps/alerts")]
     assert len(sent) == 1 and sent[0].startswith("PUT /api/gaps/alerts?symbol=ES "), out["calls"]
     # the alert switches are the symbol's: only the one changed here is sent (over the server's)
-    assert json.loads(sent[0].split(" ", 2)[2]) == {"fill": False, "RthStart": 90000, "RthEnd": 150000, "MinimumGapPoints": 5}
+    assert json.loads(sent[0].split(" ", 2)[2]) == {"fill": False, "RthStart": 90000, "RthEnd": 150000, "MinimumGapPoints": 5,
+                                                    "UseInstrumentHours": True}
     (asked,) = [c for c in out["calls"] if c.startswith("ASK ")]
     assert asked.endswith(" The alert switches go to every ES chart only, and only ES's gap alerts take the RTH times "
                           "and minimum gap size: each symbol keeps its own.")

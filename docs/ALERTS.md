@@ -7,6 +7,35 @@ Price, level, drawing, indicator and news alerts, and where they go: app notific
 All alerts are evaluated on the server on every tick, so they fire with no chart open. Setting one works as on
 TradingView:
 
+On a stock's, an index's, an economic series' or a formula's chart (`AAPL`, `VIX`, `FRED:DGS10`, `VIXM/VIXY`) only
+price alerts can be set (the dialog offers Price alone; the watchlist's **Create alert…** too): they run on the
+symbol's quotes, as the watchlist shows them, so as often as its feed quotes it (IBKR or Alpaca live, Yahoo every
+15 s and delayed, FRED and EIA every 15 minutes). A formula's is worked out from its parts' last quotes (a live
+future's from its last trade) each time one moves. The symbol is quoted while its alert is on, listed or not.
+Level, study, indicator and drawn-line alerts need a live future's trades.
+
+Each value is checked when it arrives. A FRED or EIA value is dated by its observation, often days or weeks before it
+is published: its alert fires, expires and is stamped at the time the value came in. A new, edited or restarted alert
+(**Restart** after it fired Only once, or after a pause) is checked at once on the value shown now, so **Greater than**
+or **Less than** already true fires then, not at the next value that differs (weeks away for a monthly series). An
+alert turned back on, or set again, starts afresh: a cross while it was off never fires it. A cross while the server
+was restarting does fire on the first value after, as for a future, unless the symbol or formula has a future only
+quoted (on a list, not charted): its contract may have rolled meanwhile, so its first value after is only where the
+alert looks from.
+
+A future's roll crosses nothing. For a future only quoted, NinjaTrader says when its quote rolls (by NinjaTrader's roll
+dates). Add-on 22 also names the contract it quotes each time it connects, so a roll while NinjaTrader was closed
+counts too, and it sends none of the old contract's prices after the roll. Yahoo and IBKR never say when their quote of
+a future rolls, so an alert on one only they quote can fire on the jump. A formula with a rolled future waits for the
+new contract's first trade (a quote-only one's first price), so no other part's move is set against the old
+contract's last price.
+
+A stock whose ticker is also a future's root (MetLife's MET, Micro Ether's MET) is the future's once that future runs
+live here, and the stock is quoted no more. Its alert, alone or in a formula, is then paused with a notice, and can't
+be turned back on: set it again on the future, or delete it. A future added while the server runs pauses it at once.
+One added while it was off (an Instruments change that needs a restart, a restored backup, an update) pauses it at
+the next start, and the notice comes as the server starts.
+
 - **Quick alert**: right-click the chart (or hover it and click the **+** just left of the price axis) and pick
   **Add alert at …**: price crossing that level, once. `+ Alert` in the header then a tap (Esc or a right-click
   backs out), or Alt+click, does the same. Phone: hold a finger on the chart until the crosshair shows, lift it, then tap the **+** (it stays 3 s; the crosshair
@@ -31,7 +60,8 @@ TradingView:
   - **Trigger**: Only once (it stops after firing) or Every time (price alerts at most once a minute, indicator
     alerts at most once a bar).
   - **Expiration**: **Open-ended** (the default: it stays armed until you delete it) or **Until…** a date and time
-    (the chart's time zone) when it switches itself off. **Message** is added to the notification.
+    (the chart's time zone) when it switches itself off, within a minute, with no trade or new value needed.
+    **Message** is added to the notification.
 - **On the chart**: each active price alert is a dashed line with a 🔔 label and an axis tag (a channel shows both
   edges, shaded). Drag a line to move the alert (it re-arms); click it to edit.
 - **Sound** (bottom of the Alerts tab, this device): a chime here when an alert fires: two notes for price alerts
@@ -78,6 +108,9 @@ Delivery, set under **Connections > Alerts and Discord** (or in `.env`):
 - **Discord: chart posts** (`CHART_DISCORD_CHARTS_WEBHOOK`): where **Post to Discord** sends chart pictures.
   Its own webhook, separate from the alert channel; mentions in a caption never ping anyone. **Check all** shows its
   state without posting in the channel; **Test** posts one line there.
+
+Alerts that come together (the open: gaps, AMT and level alerts within a second) go to each channel one at a time,
+waiting when Discord or ntfy says to slow down, and are tried again if it fails for a moment, so each one arrives.
 
 Each one's **Test** button sends a test message (`POST /api/notify-test` sends one to all). The server also alerts when a symbol stops ticking for
 `CHART_STALE_AFTER_S` during Globex hours, and again when it recovers. Weekends, the daily break and exchange

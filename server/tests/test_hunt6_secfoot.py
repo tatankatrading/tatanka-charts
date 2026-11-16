@@ -158,12 +158,13 @@ const chart = { timeScale: () => ({ getVisibleLogicalRange: () => ({ from: 0, to
 const FP_MIN_SPACING = 40, fpPrim = { update() {} }, isTime = () => S.kind === 'time', TK_MULTI = false, extTimer = 0, extStop = null;
 const VP_KINDS = [], WL_FUT = /^$/, ax = { pick: '' }, drawings = { state: { loadedFor: 'ES' }, load() {} };
 const vol = { applyOptions() {}, setData() {} }, candles = { setData() {} }, toPoints = () => [{}, {}];
-const viewKey = () => 'k', viewApply = () => true, bigOn = () => false, calSpec = () => false, exch = () => ({}), inst = () => ({});
+const viewKey = () => 'k', viewApply = () => true, anchorMs = () => null, bigOn = () => false, calSpec = () => false, exch = () => ({}), inst = () => ({});
 const noop = () => {};
+const vpKeys = () => [];   // no volume profiles on
 const [replayUi, studiesChanged, isExtSym, renderTf, renderStudiesMenu, barsLayout, specLabel, watermarkLayout, tapeSymbol,
   amtRequest, tpoRequest, vpAll, gapRequest, amtLayout, ifRequest, renderPlanIf, setSessionClock, setSessionHolidays, cmpClear,
-  altSetData, setStudyData, indsUpdate, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo, scheduleRange,
-  priceLineLayout, fillsSchedule, cmpLoad, legend, header, loadNote, barsClear] = Array(35).fill(noop);
+  altSetData, setStudyData, indsUpdate, hemaClear, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo, scheduleRange,
+  priceLineLayout, fillsSchedule, cmpLoad, legend, header, loadNote, barsClear, vpLiveTick] = Array(37).fill(noop);
 const sent = [], send = (m) => sent.push(m), asked = [];
 const api = async (method, path, body) => { asked.push({ starts: body.starts, end: body.end, at: stage }); return { bars: body.starts.map((t) => ({ t, rows: [] })) }; };
 let stage = '';

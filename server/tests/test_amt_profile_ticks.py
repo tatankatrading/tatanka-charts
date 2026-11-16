@@ -145,3 +145,55 @@ def test_the_hub_loads_the_weeks_trades_and_takes_live_ones(tmp_path, monkeypatc
         m.on_tick(Tick("ES", t, 6800.0, 7, 1))                                   # a live trade
         assert r.minute_trades[t // MIN * MIN] == {6800.0: 7}
     asyncio.run(go())
+
+
+def test_the_hub_keeps_the_trades_of_the_minute_it_loads_in(tmp_path, monkeypatch):
+    now = {"t": ct(15, 11, 2) + 40_000}   # Thursday 11:02:40 CT
+    monkeypatch.setattr(time, "time", lambda: now["t"] / 1000)
+    monkeypatch.setenv("CHART_WORKERS", "0")
+    sessions.set_calendar({"days": []})
+
+    async def go():
+        m, _ = build_market(tmp_path, monkeypatch)
+        tk, bars = stored("ES", .25, 6800.0, ct(8, 17), ct(15, 11, 2))
+        m.store.write(tk, bars)
+        for i, (px, sz) in enumerate([(6800.0, 5), (6800.25, 9), (6799.75, 4)]):   # before any chart asked for it
+            m.on_tick(Tick("ES", ct(15, 11, 2) + 1_000 + i * 10_000, px, sz, 1))
+        r = (await m.amt.entry("ES", 5)).runner
+        assert r.minute_trades[ct(15, 11, 2)] == {6800.0: 5, 6800.25: 9, 6799.75: 4}
+    asyncio.run(go())
+
+
+def test_the_current_profile_starts_where_its_trading_did():
+    """Session: Friday's window over the weekend (Monday 07:00 too); Weekly: a Friday holiday halt's session (Thursday
+    17:00 on) counts toward the next week."""
+    r = AmtRunner("ES", .25, 5, amt.Settings({"mvp_tf_mode": "Session"}))
+    sessions.set_calendar({"days": []})
+    for t in (ct(17, 10), ct(18, 12), ct(19, 7)):   # Saturday, Sunday, Monday before the window
+        assert r.period_start(t) == ct(16, 8, 30)
+    assert r.period_start(ct(19, 9)) == ct(19, 8, 30)
+    from chartsrv.config import ROOT, load_holidays
+    sessions.set_calendar(load_holidays(ROOT / "config"))
+    try:
+        w = AmtRunner("ES", .25, 5, amt.Settings({}), calendar="equity")
+        june = lambda d, h: int(datetime(2026, 6, d, h, tzinfo=CT).timestamp() * 1000)   # noqa: E731
+        assert w.period_start(june(22, 10)) == w.period_start(june(19, 10)) == june(18, 17)   # Juneteenth's
+        assert w.period_start(june(17, 10)) == june(14, 17)                                    # an ordinary week
+    finally:
+        sessions.set_calendar({"days": []})
+
+
+def test_calc_precision_holds_where_no_trades_are_known():
+    bars = synth(20, 5, END, .25, 6800.0)
+
+    def past(hook):
+        r = AmtRunner("ES", .25, 15, amt.Settings({"mvp_calc_tf": "5"}))
+        for m in bars:
+            r.add_minute(m)
+        r._ensure_engine()
+        if not hook:
+            r.engine.MinuteTrades = None
+        r.commit_ready()
+        r.preview()
+        return [p.Profile.Rows for p in r.engine.profiles]
+    assert past(True) == past(False)

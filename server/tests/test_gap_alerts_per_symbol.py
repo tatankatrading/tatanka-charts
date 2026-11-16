@@ -17,7 +17,7 @@ from test_hunt13_amt import client, needs_node, pages  # noqa: F401  (client: th
 from test_review_fixes import build_market
 
 TIMES = {"RthStart": 83000, "RthEnd": 150000}
-ON = {"on": True, "rth": False, **TIMES, "MinimumGapPoints": 0.0}
+ON = {"on": True, "rth": False, **TIMES, "MinimumGapPoints": 0.0, "UseInstrumentHours": True}   # (GapAlertsIn's default)
 MIDDAY = {"RthStart": 110000, "RthEnd": 120000}   # fine on ES; 10:30-10:30 on CL's 08:00-13:30
 
 
@@ -238,7 +238,8 @@ def test_gap_switch_edits_stay_with_the_symbol_they_were_made_for():
 """)
     assert out["shows"] is True
     assert out["server"] == [{"ES": {"new": True, "fill": True}, "NQ": {"new": True, "fill": True}}, 0, 3]
-    assert out["sent"] == [["/api/gaps/alerts?symbol=NQ", {"RthStart": 83000, "RthEnd": 150000, "MinimumGapPoints": 3}]]
+    assert out["sent"] == [["/api/gaps/alerts?symbol=NQ", {"RthStart": 83000, "RthEnd": 150000, "MinimumGapPoints": 3,
+                                                             "UseInstrumentHours": True}]]
     assert out["own"] == {"MinimumGapPoints": 3}
 
 

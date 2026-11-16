@@ -12,7 +12,7 @@ import pytest
 
 from chartsrv import sessions
 from chartsrv.feeds.ninjatrader import NinjaTraderFeed
-from chartsrv.gapfill import DAY_MS, OLDER_LIMIT, OLDER_SPAN_MS
+from chartsrv.gapfill import DAY_MS, OLDER_LIMIT, OLDER_SPAN_MS, OLDER_TRIES
 from chartsrv.models import Bar
 from test_app import client  # noqa: F401  (the app on a database of the test's own)
 from test_hunt10_hold import Writer
@@ -122,19 +122,29 @@ def test_a_chart_scrolled_back_goes_first_with_the_span_it_wants(market, monkeyp
     assert m.reloads[-1] == ("ES", False)                # ...but after (the watchdog's pass)
 
 
-def test_an_unanswered_request_is_dropped_and_asked_again_later(market):
+def test_a_late_answer_counts_and_nothing_else_is_asked_for_the_symbol_meanwhile(market):
     m = market
     now = int(time.time() * 1000)
-    store(m, "ES", [open_minutes(now - 5 * DAY_MS, 1)[0]])
+    first = open_minutes(now - 5 * DAY_MS, 1)[0]
+    store(m, "ES", [first])
+    store(m, "NQ", [open_minutes(now - 5 * DAY_MS, 1)[0]])
     nt = connect(m)
-    assert len(older_lines(nt)) == 1
     gf = m.gapfill
-    gf.older_busy = ("ES", time.monotonic() - 1000)   # asked long ago, never answered
+    asked = older_lines(nt)
+    assert len(asked) == 1 and asked[0].split("|")[1] == "ES"
+    gf.older_busy = ("ES", time.monotonic() - 1000)   # no answer in time (NinjaTrader's data connection down, say)
     gf.kick_older()
-    assert "ES" not in gf.windows and gf.status["ES"]["state"] == "dropped" and len(older_lines(nt)) == 1
-    assert gf.want_older("ES", 0) == "wait"
-    nt._line(m, b"Z|ES|minutes|5|ok\n")   # a late answer: no window, nothing kept
-    assert m.store.db.execute("SELECT COUNT(*) FROM bars_1m WHERE symbol='ES'").fetchone()[0] == 1
+    assert gf.windows["ES"].late and gf.status["ES"]["state"] == "late"
+    assert gf.want_older("ES", 0) == "wait"   # a chart at its first bar told so, not kept polling: asked again on its Z
+    assert [ln.split("|")[1] for ln in older_lines(nt)] == ["ES", "NQ"]   # the others go on; ES not asked again
+    gf.older_busy = ("NQ", time.monotonic() - 1000)
+    for _ in range(OLDER_TRIES + 1):   # however long: not NinjaTrader's limit, no second request for it (two would mix)
+        gf.kick_older()
+    assert len(older_lines(nt)) == 2 and m.store.get_setting(OLDER_LIMIT) is None
+    got = open_minutes(first - 10 * DAY_MS, 3)
+    answer(m, nt, asked[0], got)   # the late answer: kept
+    assert m.store.db.execute("SELECT COUNT(*) FROM bars_1m WHERE symbol='ES'").fetchone()[0] == 4
+    assert older_lines(nt)[-1] == f"GAP|ES|{got[0] - OLDER_SPAN_MS}|{got[0]}|older"   # on back from it
 
 
 def test_an_error_is_not_ninjatraders_limit_unless_it_keeps_failing(market):
@@ -143,18 +153,33 @@ def test_an_error_is_not_ninjatraders_limit_unless_it_keeps_failing(market):
     floor = open_minutes(now - 5 * DAY_MS, 1)[0]
     store(m, "ES", [floor])
     nt = connect(m)
-    nt._line(m, b"Z|ES|error|0|no data connection\n")
     gf = m.gapfill
-    assert m.store.get_setting(OLDER_LIMIT) is None and gf.want_older("ES", 0) == "wait"
-    gf.older_wait.clear()
-    gf.kick_older()
-    nt._line(m, b"Z|ES|error|0|no data connection\n")   # twice
-    gf.older_wait.clear()
-    gf.kick_older()
-    gf.older_busy = ("ES", time.monotonic() - 1000)        # and no answer: the third in a row
-    gf.kick_older()
+    for i in range(OLDER_TRIES):
+        # an error after part of it: none of it kept (the first stored minute would hide the rest)
+        sym = older_lines(nt)[-1].split("|")[1]
+        for t in open_minutes(floor - 20 * DAY_MS, 2):
+            nt._line(m, f"Y|{sym}|{t}|6100|6101|6099|6100.5|7\n".encode())
+        nt._line(m, b"Z|ES|error|0|no data connection\n")
+        assert m.store.db.execute("SELECT COUNT(*) FROM bars_1m WHERE symbol='ES'").fetchone()[0] == 1
+        if i < OLDER_TRIES - 1:
+            assert m.store.get_setting(OLDER_LIMIT) is None and gf.want_older("ES", 0) == "wait"
+            gf.older_wait.clear()
+            gf.kick_older()
     assert m.store.get_setting(OLDER_LIMIT)["ES"][0] == floor and gf.want_older("ES", 0) == "limit"
-    assert len(older_lines(nt)) == 3
+    assert len(older_lines(nt)) == OLDER_TRIES
+
+
+def test_a_lost_data_connections_hole_waits_for_the_older_request(market):
+    m = market
+    now = int(time.time() * 1000)
+    store(m, "ES", [open_minutes(now - 20 * DAY_MS, 1)[0], now // MIN * MIN - 10 * MIN])
+    nt = connect(m)
+    gf = m.gapfill
+    assert gf.windows["ES"].older
+    gf.holes = lambda sym, now: [(now - 30 * MIN, now - 5 * MIN)]   # the hole the lost connection left
+    assert gf.again("ES", now) is None and gf.queue["ES"]   # queued, not dropped
+    answer(m, nt, older_lines(nt)[0], [])
+    assert nt.writer.lines[-1].startswith("GAP|ES|") and not nt.writer.lines[-1].endswith("older")   # sent after it
 
 
 def test_an_older_add_on_is_never_asked(market):
@@ -180,6 +205,9 @@ def test_the_api_says_fetching_and_asks_ninjatrader(client, tmp_path):
     assert older_lines(nt) == [f"GAP|ES|{first - OLDER_SPAN_MS}|{first}|older"]
     d = client.get(f"/api/older?symbol=ES&spec=500t&before={first}&count=100").json()   # tick bars: trades only
     assert not d["more"] and d["why"] == "stored"
+    n = len(older_lines(nt))
+    d = client.get(f"/api/older?symbol=ES&spec=1D&before={first - 400 * DAY_MS}&count=100").json()
+    assert d["why"] == "stored" and len(older_lines(nt)) == n   # a D chart's free-data days before them: not asked
     m.gapfill.older_ok = False   # no add-on that answers
     d = client.get(f"/api/older?symbol=ES&spec=30m&before={first}&count=100").json()
     assert not d["more"] and d["why"] == "stored"
@@ -198,3 +226,45 @@ def test_the_add_on_asks_each_older_month_from_its_contract(tmp_path):
     assert names(out["gap"]) == ["ES 09-26", "ES 12-26"]                 # a gap: never older than the one charted last
     assert names(out["older"]) == ["ES 06-26", "ES 09-26", "ES 12-26"]   # older: each by the roll dates, none before the first
     assert names(out["before"]) == []                                         # all before the first roll date it knows: none
+
+
+def test_an_amt_request_that_times_out_keeps_its_window_till_its_answer(market, monkeypatch):
+    """The AMT's prior day asked of NinjaTrader times out (its data connection down) while the add-on still waits to
+    answer it: nothing else is asked for that symbol until its Z (the add-on's lines name the symbol only: before, the
+    hole asked once data came back took the AMT's Z, was marked filled with nothing, and never asked again). The hole
+    is asked after it, and filled."""
+    import asyncio
+
+    from chartsrv import amt_hub
+    from chartsrv.gapfill import ASKED
+    m = market
+    now = int(time.time() * 1000)
+    mins = open_minutes(now - 2 * DAY_MS, 400)
+    hole = mins[200:260]
+    store(m, "ES", [t for t in mins if t not in hole])
+    nt = connect(m)
+    gf = m.gapfill
+    for _ in range(50):
+        if gf.windows.get("ES") is None:
+            break
+        nt._line(m, b"Z|ES|minutes|0|ok\n")
+    m.store.set_setting(ASKED, {})
+    gf.queue.clear()
+    monkeypatch.setattr(amt_hub, "PD_NT_WAIT_S", 0.05)
+    n0 = len(nt.writer.lines)
+    b = mins[0]
+    assert asyncio.run(m.amt._nt_value("ES", b, b + 6 * 60 * MIN, nt)) is None   # timed out: the stored trades
+    assert "ES" not in gf.windows and "ES" in gf.nt_out   # its answer still owed: dropped when it comes
+    nt.ticking_again(m, "ES")   # data back: its holes queued behind the AMT's request
+    assert len(nt.writer.lines) == n0 + 1 and gf.queue.get("ES")
+    for i in range(5):   # the AMT's answer, late: dropped
+        nt._line(m, f"X|ES|{b + i * MIN + 1000}|6000.25|1\n".encode())
+    nt._line(m, b"Z|ES|ticks|5|ok\n")
+    hole_line = nt.writer.lines[-1]
+    assert len(nt.writer.lines) == n0 + 2 and hole_line.startswith("GAP|ES|")
+    for t in hole:
+        nt._line(m, f"X|ES|{t + 5000}|6001.25|2\n".encode())
+    nt._line(m, f"Z|ES|ticks|{len(hole)}|ok\n".encode())
+    m.flush_for_read()
+    got = m.store.db.execute("SELECT COUNT(*) FROM bars_1m WHERE symbol='ES' AND t>=? AND t<=?", (hole[0], hole[-1])).fetchone()[0]
+    assert got == len(hole)

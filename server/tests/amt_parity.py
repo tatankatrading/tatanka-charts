@@ -6,7 +6,18 @@
 Generates synthetic 1-minute Globex data, drives AmtRunner (recording every engine input), replays the
 record through both engines, and diffs their per-frame dumps. Each day's RTH trades (synthetic: each minute's volume at
 its close, a fifth at its high) go to both engines' TradeValue (T records), as NinjaTrader's tick history or the
-trades stored here do: the prior day's value, and its drawn profile in Session mode, come from them."""
+trades stored here do: the prior day's value, and its drawn profile in Session mode, come from them.
+
+Both run the settings (settings_file: one name=value a line, as typed in NinjaTrader) as the instrument `root` does:
+here amt_hub.instrument_hours at its regular hours in config/futures.json, there the C# InstrumentHours.Apply at its
+own table (Use Instrument Hours; inst_hours=False: as typed, on ES's hours). Value From Ticks (Sessions) and Profile From
+Ticks (PdTickSessions, ProfileTicks; NinjaTrader's 5 and True by default) pick which trades each engine gets: the load
+is two days before the data ends (the N record), and the sessions whose trades count are this port's TickDays here and
+the indicator's own RequestTickDays, RequestClosedSession and TickValue there (copied from its source by build.sh).
+
+The recording AmtRunner has the same trades (its pd_values, and each minute's through add_trade): its own frames, as it
+draws them, must be the record's replayed in Python, so its own wiring of the tick settings (trade_value, the live bars'
+RequestClosedSession in _process, _minute_rows) is compared too, not a copy of it."""
 import math
 import random
 import subprocess
@@ -16,7 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from chartsrv import amt                      # noqa: E402
-from chartsrv.amt_runner import AmtRunner, epoch_ms   # noqa: E402
+from chartsrv.amt_hub import instrument_hours  # noqa: E402
+from chartsrv.config import futures_catalog   # noqa: E402
+from chartsrv.amt_runner import AmtRunner, TickDays, ct, epoch_ms   # noqa: E402
 from chartsrv.models import Bar as MBar       # noqa: E402
 from chartsrv.sessions import CT, is_open     # noqa: E402
 
@@ -82,6 +95,8 @@ def write_record(rec, path):
             lines.append(f"T|{r[1]}|" + ";".join(f"{D(p)},{D(v)}" for p, v in r[2]))
         elif k == "Q":
             lines.append(f"Q|{T(r[1])}|" + ";".join(f"{D(p)},{D(v)}" for p, v in r[2]))
+        elif k == "N":
+            lines.append(f"N|{T(r[1])}")
     Path(path).write_text("\n".join(lines) + "\n")
 
 
@@ -100,8 +115,9 @@ def trades_by_day(bars, tick):
 
 
 def trades_by_minute(bars, tick, days):
-    """Synthetic trades of each minute of the last `days` days (the current period's, as downloaded or live): its
-    volume at its close and a third more at its low. {minute start (CT, naive): [(price, volume)]}"""
+    """Synthetic trades of each minute of the last `days` days (the current period's, as downloaded or live): a third of
+    its volume at its low, the rest at its close, so they add up to its volume (as NinjaTrader and the runner check).
+    {minute start (CT, naive): [(price, volume)]}"""
     last = bars[-1].t
     out = {}
     for m in bars:
@@ -109,11 +125,23 @@ def trades_by_minute(bars, tick, days):
             continue
         t = datetime.fromtimestamp(m.t / 1000, CT).replace(tzinfo=None)
         rows: dict = {}
-        for px, v in ((m.c, m.v), (m.l, max(1, m.v // 3))):
+        for px, v in ((m.c, m.v - m.v // 3), (m.l, m.v // 3)):
             px = round(round(px / tick) * tick, 10)
-            rows[px] = rows.get(px, 0) + v
+            if v > 0:
+                rows[px] = rows.get(px, 0) + v
         out[t] = sorted(rows.items())
     return out
+
+
+class ByDay(dict):
+    """The recording runner's pd_values: a window's trades by its date, as the record's T lines are looked up."""
+
+    def __init__(self, by_day: dict):
+        super().__init__()
+        self.by_day = by_day
+
+    def get(self, key, default=None):
+        return self.by_day.get(ct(key[0]).strftime("%Y-%m-%d"), default)
 
 
 def dump(o, f):
@@ -134,11 +162,15 @@ def dump(o, f):
     o.append(f"X|{D(f.RthVwap)}|{D(f.DailyAtr)}|{int(f.RuleActive)}|{int(f.RuleConfirmed)}|{D(f.VaHigh)}|{D(f.VaLow)}|{f.Warning}")
 
 
-def replay_python(rec_path, settings=None):
+def replay_python(rec_path, settings=None, rth_session="0830-1500", tpo_shift=0, pd_sessions=5, profile_ticks=True):
+    """settings, rth_session, tpo_shift: as the instrument runs them (instrument_hours). pd_sessions, profile_ticks: Value
+    From Ticks (Sessions) and Profile From Ticks. From the record's N line (the load) the trades of the sessions TickDays
+    picks count, as AmtRunner.trade_value takes them; a record without one gives every day's."""
     s = amt.Settings(settings)
     e, daily, tracker, last, out = None, amt.DailyHistory(s.daily_atr_length), amt.LevelAlertTracker(), None, []
     trades: dict = {}
     minute_trades: dict = {}
+    days: list = []   # [TickDays, load time] from the N line
     P = lambda x: float(x)
     PT = lambda x: datetime.strptime(x, "%Y-%m-%dT%H:%M:%S")
     PB = lambda p, o: amt.Bar(PT(p[o]), PT(p[o + 1]), P(p[o + 2]), P(p[o + 3]), P(p[o + 4]), P(p[o + 5]), P(p[o + 6]))
@@ -149,8 +181,11 @@ def replay_python(rec_path, settings=None):
         k = p[0]
         if k == "E":
             e = amt.Engine(s, p[1], P(p[2]), P(p[3]), int(p[4]))
-            e.TradeValue = lambda first, end: trades.get(first.strftime("%Y-%m-%d"))
-            e.MinuteTrades = lambda start, volume: minute_trades.get(start)
+            e.RthSession, e.TpoShift = rth_session, tpo_shift
+            e.TradeValue = lambda first, end: trades.get(first.strftime("%Y-%m-%d")) if not days or days[0].has(first, end) else None
+            e.MinuteTrades = (lambda start, volume: minute_trades.get(start)) if profile_ticks else None
+        elif k == "N":
+            days[:] = [TickDays(pd_sessions, s.cc_sess_def, PT(p[1]), s.cc_enable), PT(p[1])]
         elif k == "Q":
             minute_trades[PT(p[1])] = [(P(x), P(y)) for x, y in (q.split(",") for q in p[2].split(";"))] if p[2] else []
         elif k == "T":
@@ -169,6 +204,8 @@ def replay_python(rec_path, settings=None):
             b.Index = int(p[1])
             subs = [PB(lines[i + j + 1].split("|"), 1) for j in range(int(p[9]))]
             i += int(p[9])
+            if days and b.Start >= days[1]:   # a bar after the load: the session it follows is asked for
+                days[0].closed(b.Start)
             target = e.Clone() if p[10] == "1" else e
             last = target.Process(b, subs, daily.Before(amt.trading_date(b.Start)))
             dump(out, last)
@@ -184,18 +221,46 @@ def main():
     root = sys.argv[5] if len(sys.argv) > 5 else "ES"
     settings_file = sys.argv[6] if len(sys.argv) > 6 else None
     overrides = {}
+    ticks = {"PdTickSessions": 5, "ProfileTicks": True}   # the indicator's, not the engine's (NinjaTrader's defaults)
     if settings_file:
         for kv in Path(settings_file).read_text().split():
             k, v = kv.split("=", 1)
-            dv = amt.DEFAULTS[k]
-            overrides[k] = (v == "True") if isinstance(dv, bool) else type(dv)(v)
-    overrides.setdefault("ib_stop_time", "0830-1515")   # the C# defaults (this port's: 0830-1500, ES's RTH close,
-    overrides.setdefault("amt_del_sess", "1500-1505")   # and the OVN lines kept to the 17:00 open)
-    tick, price = {"ES": (0.25, 6800.0), "NQ": (0.25, 25000.0), "CL": (0.01, 65.0), "GC": (0.10, 3500.0)}[root]
-    bars = synth(days, seed, datetime(2026, 10, 16, 15, 30), tick, price)
+            dv = ticks[k] if k in ticks else amt.DEFAULTS[k]
+            (ticks if k in ticks else overrides)[k] = (v == "True") if isinstance(dv, bool) else type(dv)(v)
+    overrides.setdefault("ib_stop_time", "0830-1515")   # the C# defaults (this port's since they match NinjaTrader's;
+    overrides.setdefault("amt_del_sess", "1500-1505")   # kept here for a run against an older port)
+    listed = {x["symbol"]: x for x in futures_catalog(Path(__file__).resolve().parents[2] / "config")}
+    tick, price = {"ES": (0.25, 6800.0), "NQ": (0.25, 25000.0), "CL": (0.01, 65.0), "GC": (0.10, 3500.0)}.get(
+        root, (listed[root]["tick_size"], float(listed[root]["sim_price"])))
+    # the settings as the instrument runs them (its regular hours, Use Instrument Hours): the C# moves them itself
+    moved, rth_session, tpo_shift = instrument_hours(listed.get(root, {}).get("rth"), overrides)
+    runs = overrides if moved is None else moved
+    end = datetime(2026, 10, 16, 15, 30)
+    bars = synth(days, seed, end, tick, price)
     rec = []
-    r = AmtRunner(root, tick, minutes, amt.Settings(overrides), record=rec)
+    r = AmtRunner(root, tick, minutes, amt.Settings(runs), record=rec, rth_session=rth_session, tpo_shift=tpo_shift)
     r.commit_visuals = True
+    own = []   # the runner's own frames, each dumped as it is made
+    process = r._process
+
+    def drawn(engine, *a):
+        f = process(engine, *a)
+        dump(own, f)
+        return f
+    r._process = drawn
+    env = __import__("os").environ
+    by_day = trades_by_day(bars, tick) if env.get("AMT_TICKS", "1") == "1" else {}
+    by_minute = trades_by_minute(bars, tick, 6) if env.get("AMT_MINUTE_TRADES", "1") == "1" else {}
+    r.pd_values = ByDay(by_day)
+    for t, rows in by_minute.items():
+        for px, v in rows:
+            r.add_trade(epoch_ms(t), px, v)
+    # loaded two days before the data ends: the sessions closed by then, then the two that close after it (AMT_LOADED,
+    # e.g. 2026-10-16T09:00:00: another time)
+    loaded = end - timedelta(days=2)
+    if __import__("os").environ.get("AMT_LOADED"):
+        loaded = datetime.fromisoformat(__import__("os").environ["AMT_LOADED"])
+    r.pd_sessions, r.profile_ticks, r.loaded_at = ticks["PdTickSessions"], ticks["ProfileTicks"], epoch_ms(loaded)
     r.set_levels(round(price * 1.002 / tick) * tick, [round(price * (1 + k / 400) / tick) * tick for k in (-6, -4, -2, 2, 4, 6)],
                  None, None)
     rng = random.Random(seed)
@@ -209,18 +274,34 @@ def main():
                 rec.append(("O", m.c + rng.choice([-2, -1, 0, 1, 2]) * tick * 4, rng.choice(["Cross", "Zone Entry", "Both"])))
     r.commit_ready()
     r.preview()
+    # committed bars replay on each side's own engine, carrying state (IB, settle, prior day, the 80% Rule, profiles)
+    # from bar to bar; only previews run on a clone. A record without them would compare first bars only.
+    if not any(x[0] == "B" and not x[3] for x in rec):
+        print("record has no committed bars: nothing carried between bars would be compared")
+        return 1
     rec_path, cs_out = work / "record.txt", work / "cs.txt"
-    if __import__("os").environ.get("AMT_TICKS", "1") == "1":   # the trades right after the engine (E)
+    if by_day:   # the trades right after the engine (E)
         at = next(i for i, x in enumerate(rec) if x[0] == "E") + 1
-        rec[at:at] = [("T", d, rows) for d, rows in trades_by_day(bars, tick).items()]
-    if __import__("os").environ.get("AMT_MINUTE_TRADES", "1") == "1":   # the last 6 days' minutes' trades (Q)
+        rec[at:at] = [("T", d, rows) for d, rows in by_day.items()]
+    if by_minute:   # the last 6 days' minutes' trades (Q)
         at = next(i for i, x in enumerate(rec) if x[0] == "E") + 1
-        rec[at:at] = [("Q", t, rows) for t, rows in trades_by_minute(bars, tick, 6).items()]
+        rec[at:at] = [("Q", t, rows) for t, rows in by_minute.items()]
+    at = next(i for i, x in enumerate(rec) if x[0] == "E") + 1   # the load, after the trades it can ask for
+    while at < len(rec) and rec[at][0] in ("T", "Q"):
+        at += 1
+    rec.insert(at, ("N", loaded))
     write_record(rec, rec_path)
     subprocess.run(["mono"] + (["--optimize=-all"] if __import__("os").environ.get("MONO_NOOPT") else []) + [str(work / "harness.exe"), str(rec_path), str(cs_out)] + ([settings_file] if settings_file else []), check=True)
-    py = replay_python(rec_path, overrides)
+    py = replay_python(rec_path, runs, rth_session, tpo_shift, ticks["PdTickSessions"], ticks["ProfileTicks"])
     cs = cs_out.read_text().rstrip("\n").split("\n")
     frames = sum(1 for x in py if x.startswith("F|"))
+    replayed = [x for x in py if not x.startswith("O|")]   # the alerts observed: not the runner's (main adds them)
+    if own != replayed:
+        n = next((i for i, (a, b) in enumerate(zip(own, replayed)) if a != b), min(len(own), len(replayed)))
+        ctx = next((x for x in reversed(replayed[:n]) if x.startswith("F|")), "")
+        print(f"RUNNER DIFF at line {n} ({ctx}): the runner's own frames are not the record's\n"
+              f"  runner: {own[n] if n < len(own) else '(none)'}\n  record: {replayed[n] if n < len(replayed) else '(none)'}")
+        return 1
 
     def tok(line):
         return [t for part in line.split("|") for t in part.split(";")]
@@ -239,7 +320,9 @@ def main():
         return len(ta) == len(tb) and all(same_token(x, y) for x, y in zip(ta, tb))
 
     if len(py) == len(cs) and all(same(a, b) for a, b in zip(py, cs)):
-        print(f"PARITY OK: {root} {minutes}m, {days} days, {len(bars)} minutes, {frames} frames, {len(py)} output lines; every value equal")
+        print(f"PARITY OK: {root} {minutes}m, {days} days, {len(bars)} minutes, {frames} frames, {len(py)} output lines; every value equal"
+              f" (RTH {rth_session}, TPO shift {tpo_shift}; Value From Ticks {ticks['PdTickSessions']} sessions,"
+              f" Profile From Ticks {ticks['ProfileTicks']})")
         return 0
     for n, (a, b) in enumerate(zip(py, cs)):
         if not same(a, b):

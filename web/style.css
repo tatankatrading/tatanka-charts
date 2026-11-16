@@ -137,7 +137,7 @@ input::placeholder { color: var(--fg-dim); }
 #draw-paste textarea { width: 100%; box-sizing: border-box; font: 12px/1.35 var(--code); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
 #draw-paste .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 #draw-paste label { display: inline-flex; gap: 4px; align-items: center; color: var(--fg-dim); }
-#draw-paste input[type=number] { width: 90px; }
+#draw-paste [data-k=top], #draw-paste [data-k=bottom] { width: 90px; }
 #draw-btn.on { border-color: var(--accent); color: var(--accent); }
 /* over an empty chart, below the watermark (the symbol in the middle): its bars loading, or why there are none */
 #chart-msg { position: absolute; left: 0; right: 0; top: 62%; z-index: 2; padding: 0 24px; text-align: center; line-height: 1.5; color: var(--fg-dim); font-size: 13px; pointer-events: none; }
@@ -388,6 +388,7 @@ body.cell-over #fired { visibility: hidden; }
   #ind-dlg .ind-left { display: none; }
   #ind-dlg .set { padding-left: 4px; grid-template-columns: minmax(0, 1fr) auto 24px; }
   #ind-dlg .set input[type=text] { width: 100%; grid-column: 1 / 3; }
+  #ind-dlg .set .col.wide { grid-column: 1 / 3; flex-wrap: wrap; }   /* a stroke with opacity, a font: under the label */
 }
 
 /* chart controls: price-scale corner, navigation, go to live, quick switch, chart settings */
@@ -461,7 +462,8 @@ body.ios-short .modal { padding-bottom: 0; }   /* the home indicator is below th
 #al-dlg .sheet, #ask-dlg .sheet { display: flex; flex-direction: column; width: min(420px, calc(100vw - 24px)); max-height: calc(100% - 32px); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, .6); }
 #al-dlg .sheet-hd, #ask-dlg .sheet-hd { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 #al-dlg .al-body, #ask-dlg .al-body { padding: 10px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-#al-dlg .fld { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; }
+#al-dlg .fld { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; }
+#al-dlg .fld > select, #al-dlg .fld > input, #al-dlg .pair > select, #al-dlg .pair > input { min-width: 0; max-width: 100%; box-sizing: border-box; }   /* a long indicator name never spills past the dialog */
 #al-dlg .fld[hidden] { display: none; }
 #al-dlg .fld > span:first-child { color: var(--fg-dim); font-size: 13px; }
 #al-dlg .pair { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -683,8 +685,10 @@ input[type=checkbox] { accent-color: var(--accent); }
 .plan-card .ib:hover { color: var(--accent-hi); background: var(--panel-2); }
 .plan-card textarea { width: 100%; box-sizing: border-box; font: 12px/1.4 var(--code); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; resize: vertical; }
 .plan-card .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.plan-card .pl-left { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.plan-card .pl-left textarea { margin-top: 4px; }
 .plan-card .row .inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--fg-dim); }
-.plan-card input[type=number] { width: 96px; }
+#pl-ll-top, #pl-ll-bot { width: 96px; }
 .plan-card .hint { color: var(--fg-dim); font-size: 11.5px; margin: 4px 0 0; line-height: 1.4; }
 .plan-src { margin: 0 0 6px; font-size: 12px; color: var(--fg-dim); }
 .plan-src b { color: var(--fg); font-weight: 600; }
@@ -937,6 +941,7 @@ body.cell #cs-menu { left: auto; right: 6px; }
 .st-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
 @media (hover: none) { .st-row .st-name { padding: 9px 6px; } }
 .st-row .stp .row .dim { min-width: 0; }
+.stp .inst-del[hidden] { display: none; }   /* Remove: only on another of a study (pvp_2) */
 .st-row .stp .seg button { padding: 3px 7px; }
 
 /* drawing settings: a small bar on the chart; ⚙ or a double-click opens every setting */

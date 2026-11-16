@@ -22,7 +22,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -308,6 +308,7 @@ def _own_ts_name(headers, host: str, store) -> bool:
 
 
 OPEN_BODY_MAX = 16_384   # an open route's body (a sign-in: a password and a device name), read before any login
+BODY_MAX = 16_000_000    # a signed-in one's: the largest is a chart picture for Discord (12 MB in base64)
 
 
 async def _small_body(request, most: int = OPEN_BODY_MAX) -> bool:
@@ -347,11 +348,15 @@ async def _login(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": "Set a password on the PC first", "need_password": True})
     local = request.headers.get("x-local-token")
     if not a.enabled or (local and hmac.compare_digest(local.encode(), (getattr(app.state, "local_token", "") or "-").encode())):
+        if request.method in ("POST", "PUT", "PATCH") and not await _small_body(request, BODY_MAX):
+            return JSONResponse(status_code=413, content={"detail": "too big"})
         return await call_next(request)
     sess = a.session(request.cookies.get(auth.COOKIE), touch=bool(_page_scheme(request)))   # renewed from its page only
     if sess is None:
         return JSONResponse(status_code=401, content={"detail": "sign in"})
     request.state.session = sess
+    if request.method in ("POST", "PUT", "PATCH") and not await _small_body(request, BODY_MAX):
+        return JSONResponse(status_code=413, content={"detail": "too big"})
     response = await call_next(request)
     sets = any(c.startswith(f"{auth.COOKIE}=") for c in response.headers.getlist("set-cookie"))
     if sess["renew"] and not sets:   # a device in use stays signed in (not over a cookie the request itself set)
@@ -368,6 +373,7 @@ class PasswordIn(BaseModel):
     current: str = Field("", max_length=auth.MAX_LEN)
     new: str | None = Field(None, max_length=auth.MAX_LEN)   # None: login off
     label: str = Field("", max_length=60)                     # this device, which stays signed in
+    push: str | None = Field(None, max_length=1000)           # its app notifications' endpoint: they stay with it
 
 
 def _same_password(a, cfg: dict) -> bool:
@@ -394,7 +400,7 @@ async def auth_login(body: LoginIn, request: Request):
     a, who = M().auth, _who(request)
     if not a.enabled:
         raise HTTPException(400, "no password is set")
-    wait = a.attempt(who)
+    wait = a.attempt(who, every=not setup.is_local(request.headers, None))   # the PC: only its own limit
     if wait:
         raise HTTPException(429, f"too many wrong passwords: try again in {wait // 60 + 1} min")
     cfg = a.cfg()
@@ -413,6 +419,7 @@ async def auth_login(body: LoginIn, request: Request):
 async def auth_logout(request: Request):
     token = request.cookies.get(auth.COOKIE)
     if token and M().auth.end(token):
+        M().push.signed_out(auth.session_id(token))   # its app notifications too
         M().drop_clients()
     response = JSONResponse({"ok": True})
     response.delete_cookie(auth.COOKIE, path="/")
@@ -422,11 +429,13 @@ async def auth_logout(request: Request):
 @app.put("/api/auth/password")
 async def auth_password(body: PasswordIn, request: Request):
     """Sets, changes (the current one needed) or with new=null turns off the password. Setting it signs this device
-    in and every other device out."""
+    in and every other device out, and ends their app notifications; this device's stay (push: its page's endpoint,
+    which the server can't tell otherwise when login was off)."""
     a, who = M().auth, _who(request)
     cfg = a.cfg()
-    if a.enabled:
-        wait = a.attempt(who)
+    if a.enabled:   # a signed-in device, or the PC: someone guessing from many addresses doesn't lock it out
+        mine = getattr(request.state, "session", None) is not None or setup.is_local(request.headers, None)
+        wait = a.attempt(who, every=not mine)
         if wait:
             raise HTTPException(429, f"too many wrong passwords: try again in {wait // 60 + 1} min")
         if not await asyncio.to_thread(auth.verify, body.current, cfg):
@@ -450,9 +459,12 @@ async def auth_password(body: PasswordIn, request: Request):
         raise HTTPException(409, "the password changed meanwhile: try again")
     a.save(new)
     a.end_all()
+    token = a.start(body.label)
+    mine = getattr(request.state, "session", None)   # this device's app notifications stay, with its new sign-in:
+    M().push.signed_out(keep=mine and mine["id"], now=auth.session_id(token), endpoint=body.push)   # every other's go
     M().drop_clients()
     response = JSONResponse({"enabled": True})
-    _set_cookie(response, request, a.start(body.label))
+    _set_cookie(response, request, token)
     return response
 
 
@@ -466,12 +478,15 @@ async def auth_sessions(request: Request):
 async def auth_session_end(sid: str):
     if not M().auth.end_id(sid):
         raise HTTPException(404, "no such session")
+    M().push.signed_out(sid)   # its app notifications too: a lost phone signed out gets no more alerts
     M().drop_clients()
 
 
 @app.post("/api/auth/sessions/end-others")
 async def auth_end_others(request: Request):
-    n = M().auth.end_all(keep=request.cookies.get(auth.COOKIE))
+    keep = request.cookies.get(auth.COOKIE)
+    n = M().auth.end_all(keep=keep)
+    M().push.signed_out(keep=keep and auth.session_id(keep))   # their app notifications too
     M().drop_clients()
     return {"ended": n}
 
@@ -483,10 +498,10 @@ class AlertIn(BaseModel):
     band: int = Field(0, ge=-3, le=3)               # VWAP sigma band; 0 = the VWAP itself
     profile: Literal["eth", "rth"] = "eth"          # POC/VAH/VAL of the ETH (17:00) or RTH session
     which: Literal["current", "previous"] = "current"
-    price: float | None = Field(None, allow_inf_nan=False)
+    price: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)
     direction: Literal["cross", "above", "below", "gt", "lt", "enter", "exit"] = "cross"
-    price2: float | None = Field(None, allow_inf_nan=False)   # the channel's other edge (enter, exit)
-    expires: int | None = None                      # epoch ms; the alert switches itself off then
+    price2: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)   # the channel's other edge (enter, exit)
+    expires: int | None = Field(None, ge=0, le=4_102_444_800_000)   # epoch ms; the alert switches itself off then
     levels: list[str] | Literal["all"] = "all"
     tolerance_ticks: int = Field(0, ge=0, le=200)
     rearm_ticks: int = Field(8, ge=1, le=2000)
@@ -497,25 +512,29 @@ class AlertIn(BaseModel):
     spec: str = "5m"                                # ...on these bars
     on: Literal["close", "bar"] = "close"           # ...checked on bar close, or intrabar once a bar
     rth: bool = False                               # ...regular-hours bars only, as an RTH chart
+    replaces: int | None = Field(None, ge=1, le=2 ** 53)   # an edit: the alert this one takes the place of
 
 
 class AlertPatch(BaseModel):
     enabled: bool | None = None
     repeat: bool | None = None
     note: str | None = Field(None, max_length=200)
-    price: float | None = Field(None, allow_inf_nan=False)   # price alerts: moved (re-arms it)
-    price2: float | None = Field(None, allow_inf_nan=False)
+    price: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)   # price alerts: moved (re-arms it)
+    price2: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)
     direction: Literal["cross", "above", "below", "gt", "lt", "enter", "exit"] | None = None
-    expires: int | None = None                      # 0 = never
+    expires: int | None = Field(None, ge=0, le=4_102_444_800_000)   # 0 = never
     tolerance_ticks: int | None = Field(None, ge=0, le=200)
 
 
 def _price_params(inst, price: float, direction: str, price2: float | None) -> dict:
-    params = {"price": inst.round(price), "direction": direction}
+    """inst None: a stock's, a series' or a formula's alert (free_alerts), its prices as given."""
+    from .free_alerts import free_round
+    rnd = inst.round if inst else free_round
+    params = {"price": rnd(price), "direction": direction}
     if direction in ("enter", "exit"):
         if price2 is None:
             raise HTTPException(400, "a channel needs both edges")
-        lo, hi = sorted((inst.round(price), inst.round(price2)))
+        lo, hi = sorted((rnd(price), rnd(price2)))
         if lo == hi:
             raise HTTPException(400, "a channel's edges must differ")
         params.update(price=lo, price2=hi)
@@ -684,13 +703,15 @@ async def levels(symbol: str, until: int | None = None):
 
 @app.get("/api/vp/{kind}")
 async def volume_profile(kind: str, symbol: str, key: str = "", have: str = "", s: str = "", until: int | None = None,
-                         rid: str = "", rth: bool = False):
+                         rid: str = "", rth: bool = False, tz: str = "", nodev: str = ""):
     """The Session (prof), Auto Anchored (aavp) or Periodic (pvp) volume profile of a symbol, ported from the Tatanka
     NinjaTrader indicators, with their saved settings (/api/indicators). key and have: the build named by an earlier
     answer and the starts (epoch ms, comma-separated) of the finished profiles held from it, sent back without rows.
     s: the settings to use (JSON, as the chart shows them: a chart tab can have its own) instead of the saved ones.
     until: bar replay's clock (epoch ms): the profiles as they stood then; rid: the replaying chart (its own build).
-    rth: an RTH chart's AAVP or PVP, from its regular hours' minutes (touches too), as NinjaTrader's on its template."""
+    rth: an RTH chart's, from its regular hours' minutes or trades, as NinjaTrader's on its template. tz: the chart's time
+    zone (an IANA name), the Session VP's window's with Session time zone on Chart. nodev: of the held sessions (have),
+    those the chart has no per-bar values of yet (Session VP): sent with them once they are worked out."""
     from .vp_service import KINDS
     m = M()
     sym = symbol.upper()
@@ -700,8 +721,9 @@ async def volume_profile(kind: str, symbol: str, key: str = "", have: str = "", 
         raise HTTPException(404, f"unknown symbol {symbol}")
     try:
         held = {int(x) for x in have.split(",")[:200] if x}
+        lack = {int(x) for x in nodev.split(",")[:200] if x}
     except ValueError:
-        raise HTTPException(400, "have: epoch ms, comma-separated") from None
+        raise HTTPException(400, "have, nodev: epoch ms, comma-separated") from None
     settings = None
     if s:
         from .indicators import clean
@@ -709,7 +731,8 @@ async def volume_profile(kind: str, symbol: str, key: str = "", have: str = "", 
             settings = clean(kind, json.loads(s[:20_000]))
         except (ValueError, TypeError) as e:
             raise HTTPException(400, f"s: {e}") from None
-    return await m.vp.get(kind, sym, key[:64], held, settings, _until(until), rid[:40], rth)
+    zone = tz[:64] if re.fullmatch(r"[A-Za-z0-9_+\-/]{1,64}", tz) else ""
+    return await m.vp.get(kind, sym, key[:64], held, settings, _until(until), rid[:40], rth, zone, lack & held)
 
 
 @app.get("/api/profile")
@@ -885,19 +908,20 @@ async def tpo_profile(request: Request, symbol: str, spec: str, rth: bool = Fals
         s = tpo.settings(overrides)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    s["SessionTime"] = sessions.move_session(s["SessionTime"], sessions.rth_mover(m.instruments[sym].rth))   # its own hours
-    return await m.tpo.get(sym, minutes, s, rth, _until(until))
+    from .tpo_service import own_hours
+    return await m.tpo.get(sym, minutes, own_hours(s, m.instruments[sym].rth), rth, _until(until))   # its own hours
 
 
 @app.get("/api/older")
-async def older_bars(symbol: str, spec: str, before: int, count: int = 1000, rth: bool = False):
+async def older_bars(request: Request, symbol: str, spec: str, before: int = Query(ge=0, le=4_102_444_800_000),
+                     count: int = 1000, rth: bool = False, have: int = 0):
     """Bars before `before` (a chart's first bar's open, epoch ms) for a chart scrolled or zoomed out past it: up to
     `count`, built as the chart's own are (older.py). more: older ones are stored still; approx: some were built from
     1-minute bars (volume, range and Renko bars where no trades are stored). Past the stored minutes, NinjaTrader is
     asked for older ones (gapfill.want_older, add-on 20+): fetching, and the page asks again; why, when there are no
     more: limit (NinjaTrader has none older), wait (it didn't answer: asked again in a few minutes) or stored."""
     from .bars import parse_spec
-    from .older import FALLBACK, MAX_COUNT
+    from .older import CAL_DAYS, FALLBACK, MAX_COUNT
     m = M()
     sym = symbol.upper()
     if sym not in m.instruments:
@@ -910,11 +934,24 @@ async def older_bars(symbol: str, spec: str, before: int, count: int = 1000, rth
         raise HTTPException(400, f"count: 1 to {MAX_COUNT}")
     inst = m.instruments[sym]
     rth = bool(rth and inst.rth)
-    d = await workers.run("chart", workers.build_older, m.store.path, sym, sp, inst.tick_size, inst.decimals, inst.rth,
-                          rth, inst.calendar, before, count, m.store.max_tick_rowid())
+    e = m.series.get((sym, sp.text + ("@rth" if rth else ""))) if hasattr(m, "series") else None   # the chart's own bars
+    gate = getattr(m, "older_gate", None)
+    if gate is None:
+        gate = m.older_gate = asyncio.Semaphore(1)
+    async with gate:   # one at a time for every chart: a chart's history (the same workers) never waits behind several
+        if await request.is_disconnected():   # gone while it waited (scrolled on, another symbol): not built for none
+            return {"bars": [], "more": True, "approx": False, "next": None}
+        d = await workers.run("chart", workers.build_older, m.store.path, sym, sp, inst.tick_size, inst.decimals,
+                              inst.rth, rth, inst.calendar, before, count, m.store.max_tick_rowid(),
+                              max(0, min(have, MAX_COUNT)), getattr(e, "built", None))
     if not d["more"]:
         d["why"] = "stored"
-        if sp.from_minutes or sp.kind in FALLBACK:   # (seconds and tick bars need trades: NinjaTrader sends minutes)
+        # only for a chart whose first bar is at the stored minutes' first (a D/W/M chart's older days can be the free
+        # data's, from before anything stored: NinjaTrader's minutes would land after those, never shown)
+        floor = m.gapfill.floor(sym) if hasattr(m, "gapfill") else None
+        edge = floor is not None and before >= floor - (int(CAL_DAYS[sp.cal] * sp.mult * DAY_MS) if sp.cal
+                                                       else sp.size * 1000 if sp.kind == "time" else DAY_MS)
+        if edge and (sp.from_minutes or sp.kind in FALLBACK):   # (seconds and tick bars need trades: NinjaTrader sends minutes)
             # as far back as the chart wants, a month at least: a bar's span (a volume bar's: a month) times the count
             span = int(sp.size * 1000 * count * 1.5) if sp.kind == "time" else 0
             got = m.gapfill.want_older(sym, span) if hasattr(m, "gapfill") else "off"
@@ -943,25 +980,40 @@ def _time_chart(spec: str):
 
 @app.get("/api/gaps")
 async def gap_analysis(symbol: str, spec: str, RthStart: int = 83000, RthEnd: int = 150000,
-                       MinimumGapPoints: float = 0.0, days: int = 90, rth: bool = False, until: int | None = None):
+                       MinimumGapPoints: float = 0.0, UseInstrumentHours: bool = True, days: int = 90, rth: bool = False,
+                       until: int | None = None, start: int | None = Query(None, ge=0, le=4_102_444_800_000)):
     """Tatanka Gap Analysis over the last `days` of the chart's bars, forming bar included. rth: an RTH-only
-    chart's bars (the gap opens at its first regular-hours bar). until: bar replay's clock: the gaps as they stood
-    then."""
+    chart's bars (the gap opens at its first regular-hours bar). UseInstrumentHours: the RTH times at the instrument's
+    own regular hours (the default), or as typed. until: bar replay's clock: the gaps as they stood then. A seconds
+    chart (1s-59s, as NinjaTrader allows Second charts): over its own bars from `start` (its first bar's open; none:
+    its last 3000 bars' time) on, built from the stored trades."""
     from . import gaps
+    from .bars import parse_spec
     from .gaps_service import DAYS_MAX
     m = M()
     sym = symbol.upper()
     if sym not in m.instruments:
         raise HTTPException(404, f"unknown symbol {symbol}")
-    minutes = _time_chart(spec)
+    try:
+        sp = parse_spec(spec)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    seconds = sp.kind == "time" and not sp.cal and sp.size < 60
+    if not seconds and (sp.kind != "time" or sp.cal or sp.size % 60):
+        raise HTTPException(400, "use a minute, hour or second chart")   # NinjaTrader's Minute or Second
+    minutes = None if seconds else sp.size // 60
     if not 1 <= days <= DAYS_MAX:
         raise HTTPException(400, f"days must be 1-{DAYS_MAX}")
     from .gaps_service import check_hours, own_hours
     try:
-        s = gaps.settings({"RthStart": RthStart, "RthEnd": RthEnd, "MinimumGapPoints": MinimumGapPoints})
+        s = gaps.settings({"RthStart": RthStart, "RthEnd": RthEnd, "MinimumGapPoints": MinimumGapPoints,
+                           "UseInstrumentHours": UseInstrumentHours})
         check_hours(s, {sym: m.instruments[sym]})   # times its own hours make no session of
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if seconds:
+        first = start if start is not None else (_until(until) or now_ms()) - 3000 * sp.size * 1000
+        return await m.gaps.get_seconds(sym, sp, own_hours(s, m.instruments[sym].rth), first, rth, _until(until))
     return await m.gaps.get(sym, minutes, own_hours(s, m.instruments[sym].rth), days, rth, _until(until))
 
 
@@ -971,6 +1023,7 @@ class GapSettingsIn(BaseModel):                     # what is left out stays as 
     RthStart: int | None = None
     RthEnd: int | None = None
     MinimumGapPoints: float | None = Field(None, ge=0)
+    UseInstrumentHours: bool | None = None
 
 
 class GapAlertsIn(BaseModel):                       # the alert switches are the symbol's (PUT /api/gaps/alerts?symbol=)
@@ -980,6 +1033,7 @@ class GapAlertsIn(BaseModel):                       # the alert switches are the
     RthStart: int = 83000
     RthEnd: int = 150000
     MinimumGapPoints: float = Field(0.0, ge=0)
+    UseInstrumentHours: bool = True                 # the RTH times at the instrument's own hours (off: as typed)
 
 
 def _gaps_said(m):
@@ -1037,17 +1091,17 @@ async def gap_alerts(symbol: str, body: GapAlertsIn):
 
 
 @app.get("/api/htfema")
-async def htf_ema(symbol: str, spec: str, start: int, HtfPeriodType: str = "Minute", HtfPeriod: int = 60,
+async def htf_ema(symbol: str, spec: str, start: int = Query(ge=0, le=4_102_444_800_000), HtfPeriodType: str = "Minute", HtfPeriod: int = 60,
                   EmaLength: int = 21, Mode: str = "SmoothScaled", rth: bool = False):
     """Tatanka 1hr 21 EMA: the higher-timeframe EMA and, for time charts, the chart EMA up to `start` (the
     chart's first bar, epoch ms; on seconds charts partly from stored trades). The browser computes the line from
     these and its own bars. rth: an RTH-only chart's (both from the regular hours, the sessions ending at the RTH
-    close)."""
+    close). Second sources come from the stored trades, Day, Week, Month and Year sources from the daily bars."""
     from itertools import chain
 
-    from . import htfema
+    from . import dsma, htfema
     from .bars import make_series, parse_spec
-    from .store import iter_bars_1m
+    from .store import iter_bars_1m, iter_closes_1m
     m = M()
     sym = symbol.upper()
     if sym not in m.instruments:
@@ -1057,18 +1111,36 @@ async def htf_ema(symbol: str, spec: str, start: int, HtfPeriodType: str = "Minu
         s = htfema.settings({"HtfPeriodType": HtfPeriodType, "HtfPeriod": HtfPeriod, "EmaLength": EmaLength, "Mode": Mode})
     except ValueError as e:
         raise HTTPException(400, str(e))
+    kind = htfema.source(s)[0]
+    if kind == "second" and (sp.kind != "time" or sp.cal not in ("", "D") or sp.mult > 1):
+        raise HTTPException(400, "A Second source works on seconds, minute, hour and 1D charts. On this chart each bar "
+                                 "would need every source bar of its span sent; use a Minute or longer source here.")
     scaled = htfema.GetScaledLength(s, *htfema.chart_period_spec(sp))
     chart_minutes = sp.size // 60 if sp.kind == "time" and sp.cal not in ("W", "M") and sp.size >= 60 else None
     chart_seconds = sp.size if sp.kind == "time" and sp.size < 60 else None   # 1s-59s: bars built from trades
     now = now_ms()
     inst = m.instruments[sym]
     hours = inst.rth if rth else None   # an RTH chart: its regular hours only (none for an instrument without them)
-    since = htfema.history_ms(s, chart_minutes, scaled, start, now, chart_seconds, hours)
+    calendar_source = kind not in ("second", "minute")
+    since = htfema.history_ms(s, chart_minutes, scaled, start, now, chart_seconds, hours, source_bars=not calendar_source)
     split, live = m.recent_minutes(sym)
     db = m.store.path
     bucket = make_series(sp, inst.tick_size, inst.decimals, 1, inst.rth, rth_only=bool(hours),
                          group=inst.calendar).bucket if sp.cal else None
-    if chart_seconds and s["Mode"] == "SmoothScaled":
+    days = None
+    if calendar_source:   # the daily bars, kept per symbol (Daily SMA x4's): years of them for a Month source
+        _, ends, closes = await asyncio.to_thread(
+            dsma.daily_bars, db, sym, inst.calendar, hours, htfema.calendar_history_ms(s, start, now), split,
+            [(b.t, b.c) for b in live], iter_closes_1m)
+        days = [(htfema.trade_date(e), c) for e, c in zip(ends, closes)]
+    if kind == "second":
+        # from stored trades, seconds of CPU: in a chart worker, once for frames and devices asking the same, and each
+        # time from where the last answer for this chart stood (only the source bars since)
+        key, whole = (sym, sp.text, bool(hours), start, *s.values()), getattr(m, "write_failed_at", None) is None
+        d = await htfema.shared(key, now, lambda: htfema.resumed(key, lambda r: workers.run(
+            "chart", htfema.source_job, db, sym, s, since, split, live, scaled, start, now, inst.calendar, chart_minutes,
+            chart_seconds, hours, r if whole else None, whole)))
+    elif chart_seconds and s["Mode"] == "SmoothScaled":
         # the seed from stored trades, seconds of CPU: in a chart worker, once for frames and devices asking the same
         d = await htfema.shared((sym, sp.text, bool(hours), start, *s.values()), now, lambda: workers.run(
             "chart", htfema.seconds_job, db, sym, s, since, split, live, scaled, start, now, inst.calendar, chart_seconds,
@@ -1076,7 +1148,7 @@ async def htf_ema(symbol: str, spec: str, start: int, HtfPeriodType: str = "Minu
     else:
         d = await asyncio.to_thread(lambda: htfema.compute(
             s, chain(iter_bars_1m(db, sym, since, split), live), chart_minutes, scaled, start, now, inst.calendar,
-            bucket, chart_seconds, rth=hours))
+            bucket, chart_seconds, rth=hours, days=days))
     nxt = (htfema.next_open(bucket, now, hours)
            if sp.cal and sp.text != "1D" else None)   # 2D, 3D, W, M: the next bar's open, once the last is over
     return {**d, "next": nxt}   # a copy: a seconds chart's answer is shared
@@ -1120,7 +1192,7 @@ async def footprint(body: FootprintIn):
     stored trades plus those not yet written."""
     from . import footprint as fp
     from .bars import make_series, parse_spec
-    from .store import iter_ticks_range
+    from .store import iter_ticks_back, iter_ticks_range
     from .studies import RthClock
     m = M()
     sym = body.symbol.upper()
@@ -1149,16 +1221,26 @@ async def footprint(body: FootprintIn):
             lo = first
     # Same cut as chart history: rows written so far from the database, the rest from the write buffer.
     cutoff = m.store.max_tick_rowid()
-    buf = [tk for tk in m.tick_buf if tk.symbol == sym and lo <= tk.ts < body.end]
+    buf = [tk for tk in m.tick_buf if tk.symbol == sym and tk.ts < body.end]
     db = m.store.path
+    ts = lambda tk: tk.ts   # noqa: E731
 
     def work():   # streamed in time order: a day of trades never sits in memory at once
-        ticks = heapq.merge(iter_ticks_range(db, sym, lo, body.end, cutoff), sorted(buf, key=lambda tk: tk.ts),
-                            key=lambda tk: tk.ts)
+        buf.sort(key=ts)
+        # A trade with no side takes the tick rule from the trades before it: read from where they set it, so a bar
+        # gets the same split whichever bars it is asked with (the chart keeps what each answer gave it).
+        back = iter_ticks_back(db, sym, lo, cutoff)
+        try:
+            seed = fp.tick_rule_start(heapq.merge([tk for tk in reversed(buf) if tk.ts < lo], back, key=ts, reverse=True))
+        finally:
+            back.close()
+        start = lo if seed is None else seed
+        ticks = heapq.merge(iter_ticks_range(db, sym, start, body.end, cutoff), [tk for tk in buf if tk.ts >= start], key=ts)
+        keep = None
         if body.rth and inst.rth:   # the night between two sessions is no bar's (the last one's would take it)
             clock = RthClock(inst.rth)
-            ticks = (tk for tk in ticks if clock.day(tk.ts) is not None)
-        return fp.compute(ticks, s, body.end, inst.tick_size, body.vols, body.pre, bucket)
+            keep = lambda t: clock.day(t) is not None   # noqa: E731
+        return fp.compute(ticks, s, body.end, inst.tick_size, body.vols, body.pre, bucket, keep)
     return {"tick": inst.tick_size, "bars": await asyncio.to_thread(work)}
 
 
@@ -1194,7 +1276,8 @@ async def replay(symbol: str, spec: str, at: int, rth: bool = False):
 
 
 @app.get("/api/fills")
-async def fills(start: int, end: int, symbol: str | None = None, account: str | None = None):
+async def fills(start: int = Query(ge=0, le=4_102_444_800_000), end: int = Query(ge=0, le=4_102_444_800_000),
+                symbol: str | None = None, account: str | None = None):
     """Your NinjaTrader fills (read from the add-on; this app places no orders) for chart markers."""
     m = M()
     return {"fills": m.store.fills(start, end, symbol.upper() if symbol else None, account or None),
@@ -1202,8 +1285,8 @@ async def fills(start: int, end: int, symbol: str | None = None, account: str | 
 
 
 @app.get("/api/journal")
-async def journal_get(start: int, end: int, account: str | None = None, symbol: str | None = None,
-                      excursions: bool = True, flat: bool = False):
+async def journal_get(start: int = Query(ge=0, le=4_102_444_800_000), end: int = Query(ge=0, le=4_102_444_800_000),
+                      account: str | None = None, symbol: str | None = None, excursions: bool = True, flat: bool = False):
     """Your trades from start to end (ms), flat to flat, with P&L, MAE/MFE (excursions=false: without, as the
     chart's lines need) and daily totals, and `open_since`: the entry of the oldest trade still open (null: none).
     flat=true: every position was flat at `start` (the chart asking again from there after a new fill). NinjaTrader's
@@ -1225,7 +1308,8 @@ async def journal_get(start: int, end: int, account: str | None = None, symbol: 
             q = (start, end, sym, account or None)
             fl, pos = (m.store.fills(*q, db=db), m.store.positions(*q, db=db)) if flat else m.store.from_flat(*q, db=db)
             every = journal.trades(fl, pos)
-            trs = [t for t in every if (t["exit_ts"] or t["entry_ts"]) >= start]
+            # in the range: closed in it, or still open at its end (held through it, however long ago it began)
+            trs = [t for t in every if t["open"] or (t["exit_ts"] or t["entry_ts"]) >= start]
             if excursions:
                 for t in trs:
                     if t["symbol"] in ticks:
@@ -1268,22 +1352,43 @@ def _ifthen_symbol(symbol: str) -> str:
 
 
 @app.get("/api/ifthen/{symbol}")
-async def ifthen_get(symbol: str, atr: int = 14, rth: bool = False):
+async def ifthen_get(symbol: str, atr: int = 14, rth: bool = False, until: int | None = None):
     """The symbol's pasted If/Then block and the previous day's ATR(atr) for the Position colors and zones. rth: an
-    RTH chart's, from its regular-hours days (NinjaTrader's daily series on the chart's template), as the Daily SMA."""
+    RTH chart's, from its regular-hours days (NinjaTrader's daily series on the chart's template), as the Daily SMA.
+    until: bar replay's clock, the ATR as it stood then (the days before it). today: today's trade date had traded (by
+    then): the ATR is the last completed day's, else the day's before it."""
     from . import ifthen
     m = M()
     sym = _ifthen_symbol(symbol)
     if not 1 <= atr <= 500:
         raise HTTPException(400, "atr must be 1-500")
-    now = now_ms()
-    cur = session_start(now)
-    last = m.m1[sym].last
-    today = bool(last and last.t >= sessions.trade_key(cur, m.instruments[sym].calendar))   # today's trade date
-    daily = await asyncio.to_thread(m.tpo.daily_for, sym, cur, bool(rth and m.instruments[sym].rth))
+    until = _until(until)
+    rth_flag = bool(rth and m.instruments[sym].rth)
+    if until is None:
+        cur = session_start(now_ms())
+        last = m.m1[sym].last
+        today = bool(last and last.t >= sessions.trade_key(cur, m.instruments[sym].calendar))   # today's trade date
+        hlc = (await asyncio.to_thread(m.tpo.daily_for, sym, cur, rth_flag)).hlc
+    else:   # to its minute, as the other studies: none of a minute's trades after it
+        clock = until // 60_000 * 60_000
+        cur = session_start(clock)
+        key = sessions.trade_key(cur, m.instruments[sym].calendar)
+        m.flush_for_read()
+
+        def asof():
+            from .store import connect
+            daily = m.tpo.daily_for(sym, cur, rth_flag, True)   # replay's can run past its day: only the ones before
+            db = connect(m.store.path, readonly=True)
+            try:   # today's trade date had traded by then
+                traded = db.execute("SELECT 1 FROM bars_1m WHERE symbol=? AND t>=? AND t<? LIMIT 1",
+                                    (sym, key, clock)).fetchone()
+            finally:
+                db.close()
+            return daily.hlc[:daily.before(cur)], traded is not None
+        hlc, today = await asyncio.to_thread(asof)
     block = m.store.get_setting("ifthen", {}).get(sym) or {}
     return {"version": ifthen.VERSION, "rows": block.get("rows", ""), "updated": block.get("updated"),
-            "atr": ifthen.previous_atr(daily.hlc, atr, today)}
+            "atr": ifthen.previous_atr(hlc, atr, today), "today": today}
 
 
 @app.put("/api/ifthen/{symbol}")
@@ -1450,13 +1555,24 @@ async def list_alerts():
 async def create_alert(a: AlertIn):
     m = M()
     sym = a.symbol.upper()
+    old = m.alerts.alerts.get(a.replaces) if a.replaces is not None else None
+    if old is not None and old.kind == "line":   # a drawn line's alert is edited on the line (its drawing has it too)
+        raise HTTPException(400, "a drawn line's alert is edited on the line")
     inst = m.instruments.get(sym)
-    if not inst:
-        raise HTTPException(400, f"unknown symbol {a.symbol}")
+    if not inst:   # a stock, a series or a formula: price alerts, on its quotes (free_alerts)
+        from .free_alerts import free_symbol
+        try:
+            sym = free_symbol(a.symbol, m.instruments, m.symbols.only_futures)
+        except ValueError as e:
+            raise HTTPException(400, f"unknown symbol {a.symbol}: {e}") from None
+        if a.kind != "price":
+            raise HTTPException(400, f"only price alerts run on {sym}: the others need a live future's trades")
     if a.kind == "price":
         if a.price is None:
             raise HTTPException(400, "price alerts need a price")
         params = _price_params(inst, a.price, a.direction, a.price2)
+        if not inst:
+            params["free"] = True
         repeat = bool(a.repeat)
     elif a.kind == "ind":
         from .ind_alerts import clean_params
@@ -1483,7 +1599,7 @@ async def create_alert(a: AlertIn):
         repeat = True if a.repeat is None else a.repeat
     if _expiry(a.expires):
         params["expires"] = a.expires
-    alert_id = m.store.add_alert(sym, a.kind, params, repeat, a.note)
+    alert_id = m.store.add_alert(sym, a.kind, params, repeat, a.note, a.replaces)
     m.alerts_changed()
     return next(x for x in m.alerts.list() if x["id"] == alert_id)
 
@@ -1505,11 +1621,23 @@ async def indicators_put(key: str, overrides: dict):
     return saved
 
 
+def _share_symbol(key: str, symbol: str) -> str:
+    """Whose per-symbol values of `key` a chart of `symbol` edits (indicators.share_symbol: a micro's Level Lines, its
+    full-size contract's), 404 for a symbol not here. The full-size root itself is taken when only its micro is an
+    instrument here (an MES chart opened on its own: ES's levels are what it shows)."""
+    from .indicators import SHARE, share_symbol
+    sym = symbol.upper()
+    if sym not in M().instruments and any(full == sym and micro in M().instruments for micro, full in SHARE.get(key, {}).items()):
+        return sym
+    return share_symbol(key, _ifthen_symbol(symbol))
+
+
 @app.put("/api/indicators/{key}/{symbol}")
 async def indicators_put_symbol(key: str, symbol: str, values: dict):
-    """A symbol's own values: the If/Then block and instrument label, Level Lines' range and levels."""
+    """A symbol's own values: the If/Then block and instrument label, Level Lines' range and levels (a micro's are
+    its full-size contract's, as NinjaTrader's Sharing: saved and announced as those)."""
     m = M()
-    sym = _ifthen_symbol(symbol)
+    sym = _share_symbol(key, symbol)
     try:
         saved = m.ind.put_symbol(key, sym, values, now_ms())
     except ValueError as e:
@@ -1518,6 +1646,17 @@ async def indicators_put_symbol(key: str, symbol: str, values: dict):
     if key == "ifthen" and "RowsBlock" in values:
         m.broadcast({"type": "ifthen", "symbol": sym, **m.store.get_setting("ifthen", {})[sym]})
     return saved
+
+
+@app.delete("/api/indicators/{key}/{symbol}/left")
+async def indicators_forget_left(key: str, symbol: str):
+    """A micro's own Level Lines levels set aside when it began to share its full-size contract's (that one had its
+    own): dismissed from its Plan tab."""
+    m = M()
+    if not m.ind.forget_left(key, symbol.upper()):
+        raise HTTPException(404, f"no levels set aside for {symbol}")
+    m.broadcast({"type": "indicators_left", "left": m.ind.left})
+    return {"left": m.ind.left}
 
 
 @app.get("/api/symbols/search")
@@ -1592,7 +1731,7 @@ async def ext_bars(symbol: str, spec: str = "1D", rth: bool = True):
     """Bars for a symbol with no live chart here: Alpaca (US stocks intraday, real time, with its keys), Yahoo
     (delayed), FRED or EIA; or for a formula of symbols ("VIXM/VIXY", formula.py). rth=false: with a stock's pre- and
     post-market."""
-    from .ext import chart_symbol
+    from .ext import SourceDown, chart_symbol
     from .formula import canonical, formula_bars, is_formula
     from .watchlists import _clean_item
     m = M()
@@ -1600,6 +1739,8 @@ async def ext_bars(symbol: str, spec: str = "1D", rth: bool = True):
         if is_formula(symbol):   # "VIXM/VIXY": worked out from its parts' bars
             return await formula_bars(m, canonical(_clean_item(symbol, m.symbols.only_futures), m.instruments), spec, rth)
         return await m.ext.bars(chart_symbol(symbol, m.instruments, m.symbols.only_futures), spec, rth)
+    except SourceDown as e:   # the source didn't answer this time: 503, asked again (a refusal stays 400, not asked again)
+        raise HTTPException(503, str(e)) from None
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
@@ -1680,9 +1821,11 @@ async def patch_alert(alert_id: int, p: AlertPatch):
     if p.price is not None or p.direction is not None or p.price2 is not None:
         if a.kind != "price":
             raise HTTPException(400, "only price alerts move")
+        if a.symbol not in m.instruments and not params.get("free"):
+            raise HTTPException(400, f"{a.symbol} is no longer an instrument: this alert can't fire, delete it")
         d = p.direction or params.get("direction", "cross")
         price2 = p.price2 if p.price2 is not None else params.get("price2")
-        params.update(_price_params(m.instruments[a.symbol], p.price if p.price is not None else params["price"], d, price2))
+        params.update(_price_params(m.instruments.get(a.symbol), p.price if p.price is not None else params["price"], d, price2))
         if d not in ("enter", "exit"):
             params.pop("price2", None)
         fields.setdefault("enabled", True)
@@ -1694,6 +1837,8 @@ async def patch_alert(alert_id: int, p: AlertPatch):
         else:
             params["expires"] = _expiry(p.expires)
             fields.setdefault("enabled", True)
+    if fields.get("enabled") and params.get("free") and (root := m.free_alerts.shadowed(a)):
+        raise HTTPException(400, f"{root} is a live future here now, not the stock this alert was set on: delete it")
     if fields.get("enabled") and params.get("expires", float("inf")) <= int(time.time() * 1000):
         params.pop("expires")                       # restarting an expired alert: it no longer expires
     if params != a.params:
@@ -1707,6 +1852,8 @@ async def patch_alert(alert_id: int, p: AlertPatch):
 @app.delete("/api/alerts/{alert_id}", status_code=204)
 async def delete_alert(alert_id: int):
     m = M()
+    if not 0 < alert_id <= 2 ** 53:
+        raise HTTPException(404, "no such alert")
     a = m.alerts.alerts.get(alert_id)
     if not m.store.delete_alert(alert_id):
         raise HTTPException(404, "no such alert")
@@ -1971,15 +2118,29 @@ async def templates_delete(kind: str, name: str):
 
 
 @app.post("/api/push/subscribe")
-async def push_subscribe(body: dict):
-    """This device's push subscription ({subscription, label}): alerts then reach it as notifications."""
+async def push_subscribe(body: dict, request: Request):
+    """This device's push subscription ({subscription, label}): alerts then reach it as notifications, until the
+    device is signed out (its sign-in's, if login is on)."""
     m = M()
+    sess = getattr(request.state, "session", None)
     try:
-        did = m.push.subscribe(body.get("subscription"), body.get("label", ""))
+        did = m.push.subscribe(body.get("subscription"), body.get("label", ""), sess["id"] if sess else None)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     m.broadcast({"type": "connections", "notify": m.notifier.channels, "feeds": m.feed_names})
     return {"id": did}
+
+
+@app.post("/api/push/mine")
+async def push_mine(body: dict, request: Request):
+    """{endpoint}: this device's subscription's id, or null when the server no longer has it. The app asks once a
+    page; signed in, the subscription goes with this sign-in from then on, so signing the device out ends it (one
+    turned on with login off, before subscriptions had a sign-in, or before its sign-in ran out)."""
+    endpoint = body.get("endpoint")
+    if not isinstance(endpoint, str) or len(endpoint) > 1000:
+        raise HTTPException(400, "expected this device's push endpoint")
+    sess = getattr(request.state, "session", None)
+    return {"id": M().push.mine(endpoint, sess["id"] if sess else None)}
 
 
 @app.post("/api/push/unsubscribe")

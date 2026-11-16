@@ -5,6 +5,7 @@ PC (the app installed from Edge or Chrome), with no other app or account. Each d
 The server signs with its own key pair (VAPID, made once and kept in the database) and encrypts each message for the
 device (RFC 8291, aes128gcm), so Apple's, Google's or Microsoft's push service only carries it. Device addresses are
 secrets: never logged or sent back to a browser."""
+import asyncio
 import base64
 import json
 import logging
@@ -25,14 +26,17 @@ log = logging.getLogger(__name__)
 SETTING = "push_vapid"
 SUBJECT = os.environ.get("CHART_PUSH_SUBJECT", "").strip() or "https://github.com/tatankatrading/tatanka-charts"   # the push services' contact
 TTL_S = 4 * 3600   # an alert older than this is no news
+PUSH_TRIES = 3          # a device's push service refusing (429) or failing (5xx): tried again, 1 then 2 s on
+PUSH_RETRY_S = 1.0
 SERVICES = {   # push service hosts a subscription may point at: the browsers' own, nothing else
     "push.apple.com": "Apple", "fcm.googleapis.com": "Google", "push.services.mozilla.com": "Firefox",
     "notify.windows.com": "Windows",
 }
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS push_subs (id INTEGER PRIMARY KEY, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL,
-    auth TEXT NOT NULL, label TEXT NOT NULL, created INTEGER NOT NULL, last_ok INTEGER, last_error TEXT NOT NULL DEFAULT '');
-"""
+    auth TEXT NOT NULL, label TEXT NOT NULL, created INTEGER NOT NULL, last_ok INTEGER, last_error TEXT NOT NULL DEFAULT '',
+    session TEXT);
+"""   # session: the sign-in (auth's session id) that turned it on; signing that out removes it (none: login was off)
 
 
 def b64u(b: bytes) -> str:
@@ -77,6 +81,9 @@ class Push:
     def __init__(self, store, http: httpx.AsyncClient | None):
         self.store, self.http = store, http
         store.db.executescript(SCHEMA)
+        if "session" not in {r[1] for r in store.db.execute("PRAGMA table_info(push_subs)")}:
+            with store.db:   # a database from before: those turned on then belong to no sign-in
+                store.db.execute("ALTER TABLE push_subs ADD COLUMN session TEXT")
         keys = store.get_setting(SETTING, None)
         if keys:
             self.key = serialization.load_pem_private_key(keys["private"].encode(), None)
@@ -96,8 +103,9 @@ class Push:
         return [{"id": i, "service": service_of(e) or "", "label": lb, "created": c, "last_ok": ok, "last_error": err}
                 for i, e, lb, c, ok, err in rows]
 
-    def subscribe(self, sub: dict, label: str) -> int:
-        """Keeps a device's subscription (the browser's PushSubscription as JSON); ValueError if it isn't one."""
+    def subscribe(self, sub: dict, label: str, session: str | None = None) -> int:
+        """Keeps a device's subscription (the browser's PushSubscription as JSON); ValueError if it isn't one.
+        session: the id of the sign-in it came with (None: login off), whose sign-out removes it (signed_out)."""
         if not isinstance(sub, dict) or not isinstance(sub.get("endpoint"), str) or not isinstance(sub.get("keys"), dict):
             raise ValueError("expected the browser's push subscription")
         endpoint, keys = sub["endpoint"], sub["keys"]
@@ -111,9 +119,10 @@ class Push:
             raise ValueError("the subscription's keys are not valid") from None
         label = (label if isinstance(label, str) else "")[:60].strip() or service_of(endpoint)
         with self.store.db:
-            self.store.db.execute("INSERT INTO push_subs (endpoint, p256dh, auth, label, created) VALUES (?,?,?,?,?) "
-                                  "ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth, label=excluded.label",
-                                  (endpoint, keys["p256dh"], keys["auth"], label, int(time.time() * 1000)))
+            self.store.db.execute("INSERT INTO push_subs (endpoint, p256dh, auth, label, created, session) VALUES (?,?,?,?,?,?) "
+                                  "ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth, "
+                                  "label=excluded.label, session=excluded.session",
+                                  (endpoint, keys["p256dh"], keys["auth"], label, int(time.time() * 1000), session))
         return self.store.db.execute("SELECT id FROM push_subs WHERE endpoint=?", (endpoint,)).fetchone()[0]
 
     def remove(self, *, id: int | None = None, endpoint: str | None = None) -> bool:
@@ -121,6 +130,37 @@ class Push:
             cur = self.store.db.execute("DELETE FROM push_subs WHERE id=?", (id,)) if id is not None else \
                 self.store.db.execute("DELETE FROM push_subs WHERE endpoint=?", (endpoint,))
         return cur.rowcount > 0
+
+    def mine(self, endpoint: str, session: str | None = None) -> int | None:
+        """The id of a device's subscription (its endpoint), or None when it is no longer kept. session: the sign-in
+        the device opens the app with (the app asks once a page): the subscription goes with that one from then on, so
+        signing the device out ends it. That ties a subscription to the device's current sign-in when the one it was
+        turned on with is gone: turned on with login off, before subscriptions had a sign-in, or before the device's
+        sign-in ran out and it signed in again."""
+        row = self.store.db.execute("SELECT id FROM push_subs WHERE endpoint=?", (endpoint,)).fetchone()
+        if row and session:
+            with self.store.db:
+                self.store.db.execute("UPDATE push_subs SET session=? WHERE id=?", (session, row[0]))
+        return row[0] if row else None
+
+    def signed_out(self, sid: str | None = None, keep: str | None = None, now: str | None = None,
+                   endpoint: str | None = None) -> int:
+        """Devices signed out get no more alerts: the devices turned on from sign-in `sid` are removed, or with no
+        sid, those of every sign-in but `keep` (Sign out everywhere else, a new password). The device that set a new
+        password keeps its own, which go with its new sign-in `now`: those of its sign-in `keep`, and the one its page
+        names (`endpoint`), whichever sign-in that was turned on with (a password set while login was off has no
+        sign-in to keep). Those turned on with login off belong to no sign-in and stay (removed by hand, or tied to the
+        device's sign-in when it opens the app: mine()). A sign-in that ran out by itself (auth.SESSION_DAYS) leaves
+        its devices: a phone kept only for alerts still gets them."""
+        with self.store.db:
+            if sid:
+                return self.store.db.execute("DELETE FROM push_subs WHERE session=?", (sid,)).rowcount
+            if now and keep:
+                self.store.db.execute("UPDATE push_subs SET session=? WHERE session=?", (now, keep))
+            if now and endpoint:
+                self.store.db.execute("UPDATE push_subs SET session=? WHERE endpoint=?", (now, endpoint))
+            return self.store.db.execute("DELETE FROM push_subs WHERE session IS NOT NULL AND session != ?",
+                                         (now or keep or "",)).rowcount
 
     # -- sending --
     def _vapid(self, endpoint: str) -> str:
@@ -141,9 +181,17 @@ class Push:
     async def _one(self, row, payload: bytes) -> bool:
         sid, endpoint, p256dh, auth = row
         try:
-            r = await self.http.post(endpoint, content=encrypt(payload, p256dh, auth), timeout=15, headers={
-                "Authorization": self._vapid(endpoint), "Content-Encoding": "aes128gcm",
-                "Content-Type": "application/octet-stream", "TTL": str(TTL_S), "Urgency": "high"})
+            for i in range(PUSH_TRIES):   # again over a refusal (429) or a push service's error, as it asks
+                r = await self.http.post(endpoint, content=encrypt(payload, p256dh, auth), timeout=15, headers={
+                    "Authorization": self._vapid(endpoint), "Content-Encoding": "aes128gcm",
+                    "Content-Type": "application/octet-stream", "TTL": str(TTL_S), "Urgency": "high"})
+                if (r.status_code != 429 and r.status_code < 500) or i == PUSH_TRIES - 1:
+                    break
+                try:
+                    wait = float(r.headers.get("retry-after", ""))
+                except ValueError:
+                    wait = PUSH_RETRY_S * 2 ** i
+                await asyncio.sleep(min(max(wait, 0.0), 30.0))
             ok, err = r.is_success, "" if r.is_success else f"HTTP {r.status_code}"
             if r.status_code in (404, 410):   # the device unsubscribed or the app was removed
                 try:
@@ -171,7 +219,5 @@ class Push:
             return 0
         payload = json.dumps({"title": title[:120], "body": message[:1000], "tag": tag[:60], "ts": int(time.time() * 1000)},
                              separators=(",", ":")).encode()
-        n = 0
-        for row in rows:
-            n += await self._one(row, payload)
-        return n
+        # every device at once: one whose push service asks to wait doesn't hold up the others
+        return sum(await asyncio.gather(*(self._one(row, payload) for row in rows)))

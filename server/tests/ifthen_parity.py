@@ -5,8 +5,10 @@ original C# TatankaBiasLogic and TatankaBiasDailyAtr (compiled with mono).
     python tests/ifthen_parity.py <workdir> [blocks] [seed]
 
 Fuzzes pasted blocks (CRLF, comments, spaces inside numbers, pipes and literal \\n in text, odd biases, junk
-numbers), then active rows, price formats, label wrapping, line colors and daily ATR sequences, and compares
-every output of the C#, the browser code (node) and the server's ATR."""
+numbers), then active rows, price formats, label wrapping, line colors and daily ATR sequences, the price each Price
+source reads (ReadPrice; "Input series": NinjaTrader's Inputs[0][0], here the bars as a price type or an indicator
+line on the chart: web/app.js ifPrice) and a background or border color's alpha (TatankaBiasStyle.Color: the app's
+"#rrggbbaa", hexA), and compares every output of the C#, the browser code (node) and the server's ATR."""
 import base64
 import json
 import math
@@ -16,7 +18,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from chartsrv.ifthen import TatankaBiasDailyAtr   # noqa: E402
+from test_hunt_web_chart import app_part           # noqa: E402
 
 WEB = Path(__file__).resolve().parents[2] / "web"
 B64 = lambda s: base64.b64encode(s.encode()).decode()   # noqa: E731
@@ -43,6 +47,12 @@ def block(rng):
     return rng.choice(["\n", "\r\n", "\r"]).join(lines)
 
 
+# NinjaTrader's PriceType of a bar series as the input: Median, Typical, Weighted as its help guide gives them
+INPUTS = {"Close": lambda o, h, l, c: c, "Open": lambda o, h, l, c: o, "High": lambda o, h, l, c: h, "Low": lambda o, h, l, c: l,
+          "Median": lambda o, h, l, c: (h + l) / 2, "Typical": lambda o, h, l, c: (h + l + c) / 3,
+          "Weighted": lambda o, h, l, c: (h + l + c + c) / 4}
+
+
 def record(n, seed):
     rng = random.Random(seed)
     out = []
@@ -58,6 +68,17 @@ def record(n, seed):
         for mode in ("Bias", "Position"):
             atr = rng.choice([math.nan, rng.uniform(5, 120)])
             out.append(f"C|{mode}|{rng.choice([0, 10, 25.5])!r}|{num()!r}|{atr!r}|#f23645|#4caf50|#ffeb3b".replace("nan", "NaN"))
+    sources = ["Close", "Open", "High", "Low", "HL2", "HLC3", "OHLC4", "HLCC4", "Input series", "?"]
+    for _ in range(n):   # ReadPrice: the input series is the bars as a price type (NinjaTrader's formula) or a line's value
+        lo = round(rng.uniform(10, 9000) / 0.25) * 0.25
+        o, h, l, c = (rng.choice([lo, lo + rng.randint(0, 40) * 0.25, rng.uniform(lo, lo + 10)]) for _ in range(4))
+        h, l = max(o, h, l, c), min(o, h, l, c)
+        name = rng.choice(list(INPUTS) + ["EMA 21", "Bollinger 14 2: Upper", "Bollinger 14 2: Lower", "SMA 9", ""])
+        val = (INPUTS[name](o, h, l, c) if name in INPUTS else c if name == "" else math.nan if name == "SMA 9"   # "": Close
+               else rng.choice([rng.uniform(lo - 20, lo + 20), math.nan]))
+        out.append(f"P|{B64(rng.choice(sources))}|{o!r}|{h!r}|{l!r}|{c!r}|{val!r}|{B64(name)}".replace("nan", "NaN"))
+    for _ in range(n):   # a brush's alpha
+        out.append("K|" + "|".join(str(rng.choice([0, 1, 64, 127, 128, 200, 254, 255, rng.randint(0, 255)])) for _ in range(4)))
     for length in (1, 2, 14):
         out.append(f"N|{length}")
         i, close = 0, 5000.0
@@ -77,6 +98,11 @@ vm.runInNewContext(fs.readFileSync({json.dumps(str(WEB / 'studies.js'))}, 'utf8'
   ';this.L={{biasParse, biasActiveRow, biasFormat, biasWrap, biasRange, biasLevelColor}};', ctx);
 const L = ctx.L, b64 = (s) => Buffer.from(s, 'utf8').toString('base64'), u64 = (s) => Buffer.from(s, 'base64').toString('utf8');
 const num = (s) => (s === 'NaN' ? NaN : Number(s)), hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)).concat(1);
+vm.runInNewContext(fs.readFileSync({json.dumps(str(WEB / 'ta.js'))}, 'utf8') + ';this.T={{IND_DEFS, indTitle}};', ctx);
+// web/app.js: ReadPrice (ifPrice, with the Input series) and the colors' alpha (hexA), on one bar and the chart's
+// indicators EMA 21, Bollinger 14 2 and SMA 9 (none yet: its value null, so Input series reads NaN)
+const P = new Function('S', 'IND_DEFS', 'indTitle', 'hexRgb', {json.dumps(chr(10).join(app_part(x) for x in ("hexA", "IF_BAR_INPUTS", "ifInputName", "ifInputValue", "ifPrice")) + ";return {ifPrice, hexA};")});
+const S = {{ bars: [], ifSet: {{}}, inds: [] }}, A = P(S, ctx.T.IND_DEFS, ctx.T.indTitle, (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) || 0));
 let rows = [];
 const out = [];
 for (const line of fs.readFileSync(0, 'utf8').split('\\n')) {{
@@ -88,6 +114,18 @@ for (const line of fs.readFileSync(0, 'utf8').split('\\n')) {{
   }} else if (p[0] === 'A') out.push(`a|${{L.biasActiveRow(rows, num(p[1]))}}`);
   else if (p[0] === 'F') out.push(`f|${{L.biasFormat(num(p[1]))}}`);
   else if (p[0] === 'W') out.push(`w|${{b64(L.biasWrap(u64(p[2]), Number(p[1])))}}`);
+  else if (p[0] === 'P') {{
+    const [o, h, l, c, v] = p.slice(2, 7).map(num);
+    S.bars = [{{ o, h, l, c }}];
+    S.ifSet = {{ InputSeries: u64(p[7]) }};
+    S.inds = [{{ c: {{ type: 'ema', len: 21 }}, vals: [[v]] }}, {{ c: {{ type: 'boll', len: 14, dev: 2 }}, vals: [[v, v, v]] }},
+      {{ c: {{ type: 'sma', len: 9 }}, vals: [[null]] }}];
+    const x = A.ifPrice(S.bars[0], u64(p[1]), 0);
+    out.push(`p|${{Number.isNaN(x) ? 'NaN' : x}}`);
+  }} else if (p[0] === 'K') {{
+    const [a, r, g, b] = p.slice(1, 5).map(Number), c = A.hexA('#' + [r, g, b, a].map((k) => k.toString(16).padStart(2, '0')).join(''));
+    out.push(`k|${{c[0]}},${{c[1]}},${{c[2]}},${{Math.round(c[3] * 1000) / 1000}}`);
+  }}
   else if (p[0] === 'C') {{
     const s = {{ LineColorMode: p[1], AtrPercent: num(p[2]), Above: hex(p[5]), Below: hex(p[6]), Within: hex(p[7]) }};
     out.push('c|' + rows.map((r) => L.biasLevelColor(r, num(p[3]), num(p[4]), s)).map((c) => `${{c[0]}},${{c[1]}},${{c[2]}},${{Math.round(c[3] * 1000) / 1000}}`).join(';'));
@@ -98,7 +136,7 @@ console.log(out.join('\\n'));"""
 
 def same(a, b):
     """Exact text, except the row prices and ATR values, which are compared as numbers (G17 vs JS digits)."""
-    if a[:1] not in ("r", "u"):
+    if a[:1] not in ("r", "u", "p"):
         return a == b
     ta, tb = a.split("|"), b.split("|")
     return len(ta) == len(tb) and all(x == y or (_num(x) is not None and _num(x) == _num(y)) for x, y in zip(ta, tb))
@@ -143,7 +181,7 @@ def main():
     rows = sum(int(x[2:]) for x in cs if x.startswith("R|"))
     print(f"PARITY OK: {n} blocks ({rows} rows parsed), {sum(x[0] == 'a' for x in cs)} active rows, "
           f"{sum(x[0] == 'f' for x in cs)} formats, {sum(x[0] == 'w' for x in cs)} wraps, {sum(x[0] == 'c' for x in cs)} color sets, "
-          f"{len(cs_atr)} ATR updates; every value equal")
+          f"{sum(x[0] == 'p' for x in cs)} price reads, {sum(x[0] == 'k' for x in cs)} brush colors, {len(cs_atr)} ATR updates; every value equal")
 
 
 if __name__ == "__main__":

@@ -35,9 +35,10 @@ class Window:
     start: dtime
     end: dtime
     calendar: str | None = None   # a CME holiday group in config/holidays.json; None: weekdays only
-    same_as: str | None = None    # settles to another market's settlement (MES to ES), while on the same contract month
+    same_as: str | None = None    # settles to another market's settlement (MES to ES): on one month, or both only quoted
     early: tuple = ()             # ((holiday name or "default", "HH:MM" or "normal"), ...): on an early-close day
     opens: dtime | None = None    # its daily open (tz), weekdays; None: CME Globex's 17:00 CT
+    evening: dtime | None = None  # its open on Globex's evening (tz), later than 17:00 CT: CBOT grains' 19:00
 
 
 def load(config_dir: Path | None) -> dict[str, Window]:
@@ -56,7 +57,8 @@ def load(config_dir: Path | None) -> dict[str, Window]:
                           for k, t in (v.get("early") or {}).items())
             out[root] = Window(ZoneInfo(v.get("tz", "America/Chicago")), dtime.fromisoformat(a), dtime.fromisoformat(b),
                                v.get("calendar"), v.get("same_as"), early,
-                               dtime.fromisoformat(v["opens"]) if v.get("opens") else None)
+                               dtime.fromisoformat(v["opens"]) if v.get("opens") else None,
+                               dtime.fromisoformat(v["evening"]) if v.get("evening") else None)
         except (KeyError, ValueError, TypeError, AttributeError) as e:
             log.warning("settlement window for %s not read (%s)", root, e)
     return out
@@ -120,6 +122,8 @@ class Settlements:
             if sessions.is_open(n + 60_000, w.calendar if w else None) and not sessions._no_session(n + 60_000):
                 break
             n = sessions.next_session_start(n)
+        if w and w.evening:   # that Globex evening, at the market's own open (grains: 19:00, not 17:00)
+            return _ms(datetime.fromtimestamp(n / 1000, w.tz).date(), w.evening, w.tz)
         return n
 
     def reference(self, root: str, now: int | None = None) -> dict | None:
@@ -140,11 +144,13 @@ class Settlements:
         return ref
 
     def _same_month(self, root: str, other: str) -> bool:
-        """Both on the same contract month ("MES 03-27", "ES 03-27"), or either's not known. Each rolls by its own
-        volume: between a micro's roll and its E-mini's, the micro has its own settlement."""
+        """Both on the same contract month ("MES 03-27", "ES 03-27"), or neither's known (both only quoted, on
+        NinjaTrader's roll dates). Each charted one rolls by its own volume: between a micro's roll and its E-mini's,
+        the micro has its own settlement; so does a micro only quoted (its month not known) while its E-mini is
+        charted: NinjaTrader's for it, not the E-mini's of maybe another month."""
         c = getattr(self.m, "contracts", None) or {}
         a, b = (str(c.get(k) or "").partition(" ")[2] for k in (root, other))
-        return not a or not b or a == b
+        return a == b
 
     def _current(self, root: str, now: int) -> tuple[dict | None, int]:
         """The settlement that counts now, and when to look again."""
@@ -216,11 +222,14 @@ class Settlements:
             return None
         return self.m.instruments[root].round(pv / v)
 
-    def on_feed(self, root: str, price: float, now: int | None = None):
+    def on_feed(self, root: str, price: float, now: int | None = None, first: bool = True):
         """The settlement its exchange published, from a feed (NinjaTrader's S lines): the latest window's once it is
         published, so a value much sooner after a window than that is taken as the window before's, unless it changed.
         A change then also replaces the feed's own taken for the latest window that soon: on a connect NinjaTrader
-        sends the one it holds, which may still be the one before."""
+        sends the one it holds, which may still be the one before. first: the one the feed held (NinjaTrader's on a
+        connect, on subscribing, or with its data connection back), maybe since a day missed; else a change it heard
+        live, so the latest window's also when the one saved is older than the window before (that day settled
+        unchanged: nothing was sent)."""
         now = int(time.time() * 1000) if now is None else now
         saved = self.saved.get(root)
         if saved and saved["price"] == price:
@@ -229,7 +238,10 @@ class Settlements:
         if not wins:
             t = now   # a market with no window known: the feed's latest, as it comes
         elif now - wins[0][1] >= PUBLISH_GRACE_MS or len(wins) < 2 or \
-                (saved and (saved["t"] < wins[0][1] or saved["t"] == wins[0][1] and saved["src"] == "feed")):
+                (saved and (saved["t"] == wins[1][1] or saved["t"] == wins[0][1] and saved["src"] == "feed"
+                            or saved["t"] < wins[1][1] and not first)):
+            # (changed from the window before's: today's; from an older one: held, a day missed meanwhile, it is
+            # that one's; heard live, the day before settled unchanged: today's)
             t = wins[0][1]
         else:
             t = wins[1][1]

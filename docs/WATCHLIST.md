@@ -41,8 +41,9 @@ order, with the symbols the other added or removed, each in its own section.
 - **Lists**: click the list name to switch, create, rename, copy, delete, **import a TradingView export** (in
   TradingView: the watchlist's **⋯ > Export list**, a .txt) or export one back.
 - **Details** (bottom): price, change, previous close (a future's settlement, with when it was set), volume, quote time; today's range with the price on it and the
-  open; the 52-week range; performance over 1W, 1M, 3M, YTD and 1Y (Yahoo's daily bars); for a live future its
-  contract and how it rolls; for a stock its next earnings; the flag.
+  open (after a holiday halt, a future's day has the halt's session in it, as its 1D bar does); the 52-week range;
+  performance over 1W, 1M, 3M, YTD and 1Y (Yahoo's daily bars); for a live future its contract and how it rolls; for
+  a stock its next earnings; the flag.
   Opening, alerts and removing are a click, a right-click and Del away. Click its header to fold it.
 - Prices flash green or red as they tick, at most about once a second each: on a symbol that ticks several times a
   second the flash fades between them (the price and the change follow every tick). Columns: **⋯** shows or hides
@@ -57,7 +58,11 @@ Quotes, best source first (Details shows which one a quote came from):
 1. **NinjaTrader** for futures: the add-on quotes the front month of every `XX1!` in your lists, if your NinjaTrader
    data connection carries it (CME, CBOT, NYMEX, COMEX; not Eurex/ICE/HKEX/OSE). Re-copy `TatankaChartFeed.cs`
    and press F5 once for this. Its quotes stop when a future's market data does (a minute with none, the data
-   connection lost, Market Replay or the Simulated Data Feed connected; add-on 17): IBKR or Yahoo takes over.
+   connection lost, Market Replay or the Simulated Data Feed connected; add-on 17): IBKR or Yahoo takes over. A
+   future it quotes moves to the next contract on NinjaTrader's roll dates, and the add-on tells the server, which
+   then drops the old contract's settlement and starts that future's alerts afresh. Add-on 22 also names the contract
+   each time it connects (a roll while NinjaTrader was closed counts too), and sends none of the old contract's prices
+   after the roll.
 2. **IBKR** (Connections, or `CHART_QUOTES_FEED=ibkr,yahoo`; TWS or IB Gateway running): stocks, ETFs, FX, US indices,
    crypto, futures; also the charts' history (below). A future only as `XX1!`: `BZ1!` is never quoted as Kanzhun's
    stock `BZ`, nor `BZ` as the future. **Alpaca** (free account; Connections): US stocks and ETFs in real time from IEX. **Coinbase** (no
@@ -83,28 +88,33 @@ crypto (days from the 17:00 New York roll and 00:00 UTC) takes one another sourc
 `/api/health` shows `close_fill` (asked, filled, errors).
 **A future's change is from its latest settlement**, as its exchange sets it, counted from the market's next open
 (CME's 17:00 CT Globex open; Friday's from Sunday's), as TradingView: after the 15:00 settlement ES still shows the
-day's change until 17:00, then the new session's. Each market's settlement window is in
-`config/settlements.json`, in the exchange's own time (E-mini S&P: the volume-weighted average of the trades from
-14:59:30 to 15:00:00 CT, to the tick). A future charted here (its trades stored) gets it worked out from its own trades
-the exchange's way a minute after the window (again when a gap fill brings more of them); one only quoted gets the
-settlement its exchange published, through NinjaTrader (add-on 9). On a CME holiday: none on a halt or closed day; on
-an early-close day (the day after Thanksgiving, Christmas Eve) at the time CME sets (12:00 CT for equity index,
-Treasuries, FX and grains; energy and metals as usual the day after Thanksgiving, earlier on Christmas Eve). Without
-one, or with one older than the settlement before the latest (no trades stored in the window, no word from
-NinjaTrader), the source's previous close. After a contract roll the old contract's no longer counts: the new one's
-from NinjaTrader, else the source's previous close, until the new contract's own trades settle a window. A micro takes
-its E-mini's while both are on the same contract month; each rolls by its own volume, so between the two rolls the
-micro has its own.
+day's change until 17:00, then the new session's. CBOT grains count theirs from their 19:00 CT evening open instead.
+Each market's settlement window is in `config/settlements.json`, in the exchange's own time (E-mini S&P: the
+volume-weighted average of the trades from 14:59:30 to 15:00:00 CT, to the tick). A future charted here (its trades
+stored) gets it worked out from its own trades the exchange's way a minute after the window (again when a gap fill
+brings more of them); one only quoted gets the settlement its exchange published, through NinjaTrader (add-on 9). The
+day's may not be published yet in the 30 minutes after its window: after a day missed (the PC off, NinjaTrader's data
+connection down), the one NinjaTrader holds as it comes back in that time is taken as the day before's, and the next
+change as the day's (add-on 22 tells the one it held from a change it heard live). On a
+CME holiday: none on a halt or closed day; on an early-close day (the day after Thanksgiving, Christmas Eve) at the
+time CME sets (12:00 CT for equity index, Treasuries, FX and grains; energy and metals as usual the day after
+Thanksgiving, earlier on Christmas Eve). Without one, or with one older than the settlement before the latest (no
+trades stored in the window, no word from NinjaTrader), the source's previous close. After a contract roll the old
+contract's no longer counts: the new one's from NinjaTrader, else the source's previous close, until the new
+contract's own trades settle a window. A micro charted here takes its E-mini's while both are on the same contract
+month; each rolls by its own volume, so between the two rolls the micro has its own. A micro only quoted (MCL, QM or
+MGC in a watchlist) follows NinjaTrader's roll dates, so while its E-mini is charted it may be on another month: it
+has its own, the settlement NinjaTrader publishes for it. With both only quoted, the micro takes its E-mini's.
 
 | Markets | Settlement window |
 |---|---|
 | ES, NQ, RTY, YM, EMD, NKD, NIY (micros take their E-mini's) | 14:59:30-15:00:00 CT |
 | ZT, ZF, ZN, TN, ZB, UB; 6E, 6J, 6B, 6A, 6C, 6S, 6M, 6N, M6E | 13:59:30-14:00:00 CT |
-| SR3 | 13:59-14:00 CT |
+| SR3, ZQ | 13:59-14:00 CT |
 | BTC, ETH (MBT, MET take theirs) | 14:59-15:00 CT |
-| ZC, ZS, ZW, ZL, ZM | 13:14-13:15 CT |
+| ZC, ZS, ZW, ZL, ZM, KE, ZO, ZR (counted from their 19:00 CT evening open) | 13:14-13:15 CT |
 | LE, HE, GF (counted from their 08:30 CT open) | 12:59:30-13:00:00 CT |
-| CL, NG, RB, HO, BZ (MCL and QM take CL's) | 14:28-14:30 ET |
+| CL, NG, RB, HO, BZ (MCL and QM take CL's, QG takes NG's) | 14:28-14:30 ET |
 | GC 13:29-13:30, SI 13:24-13:25, PL 13:03-13:05, HG 12:59-13:00, PA 12:58-13:00 (MGC, SIL, MHG take GC's, SI's, HG's) | ET |
 | FDAX | 17:29-17:30 Frankfurt |
 | FTUK (ICE FTSE 100), NCF (ICE Newcastle coal) | 16:28-16:30, 16:05-16:15 London |
@@ -161,8 +171,8 @@ bar opening then, or its last close before (a stock's 09:30 hour against a futur
 High and low are each bar's open and close (the symbols' highs don't come at the same moment), as TradingView draws a
 spread; no volume. Indicators, drawings and Compare work on it as on any chart; the last bar moves with the symbols'
 quotes between refreshes (as the watchlist works the formula out), and the legend says **formula**. Time bars only (a
-formula with a FRED or EIA series: days and longer). Alerts don't run on formula charts yet (nor on stock charts:
-they run on the live futures).
+formula with a FRED or EIA series: days and longer). Price alerts work on formula and stock charts, on their quotes
+(ALERTS.md); level, study, indicator and drawn-line alerts run on the live futures.
 
 Each free-data chart runs on its own exchange's clock: US stocks on New York's (regular hours 09:30-16:00 ET),
 crypto on UTC around the clock, currencies on the 17:00 New York roll, other markets on their exchange's zone (from
@@ -204,13 +214,15 @@ post-market trades stay off its bars.
   **Loading…** and the header shows no price, never the last symbol's bars or price under the new name. Each source is
   waited for a limited time (IBKR 10 s, Alpaca 15 s, Yahoo 20 s), so an answer comes within 60 s even when one
   hangs. With none, the chart says why, source by source ("No QQQ bars from IBKR (no answer in 10 s), Alpaca (no
-  bars) or Yahoo: …"); a timeout or server error is asked again 15 s later. A poll answered by another source (IBKR
-  too slow, or back) loads that source's bars in full, and the legend names it.
+  bars) or Yahoo: …"); a timeout, a source that didn't answer (Yahoo or FRED down, no internet) or a server error is
+  asked again 15 s later. A poll answered by another source (IBKR too slow, or back) loads that source's bars in
+  full, and the legend names it.
 - **FRED series** (`FRED:DGS10`, `FRED:CPIAUCSL`, `FRED:UNRATE`, `FRED:T10Y2Y`, `FRED:WALCL`, …): a line, in 1D, 1W
   and 1M, from FRED's public CSV; no key needed. Kept in the database, asked again every few hours.
 - Your own indicators (EMA, RSI, MACD, …), drawings and chart settings work on them. The Tatanka studies, VWAP,
   profiles, footprint, big trades, fills and replay need this app's own futures trades, so they stay on the live
-  futures charts, and so do alerts.
+  futures charts. Price alerts work here, on the symbol's quotes (ALERTS.md); level, study, indicator and drawn-line
+  alerts need a live future's trades.
 
 `CHART_SYMBOLS_ONLINE=0` keeps the server from reaching Nasdaq Trader, Coinbase and Yahoo's search (the built-in
 symbols still search). `/api/symbols/status` shows how many symbols of each kind it has and when it last refreshed.

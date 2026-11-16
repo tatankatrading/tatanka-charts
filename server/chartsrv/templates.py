@@ -12,6 +12,8 @@ STUDY_PARTS = ("studies", "inds", "layers")   # what moved from chart templates 
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\]{1,40}$")
 MAX_PER_KIND = 50
 MAX_BYTES = 20_000
+MAX_KINDS = 40                # the drawing tools and Tatanka indicators that have any, with room to spare
+MAX_TOTAL = 2_000_000         # all of them together: every page loads them all again on each change
 
 
 def clean_name(name: str) -> str:
@@ -54,7 +56,7 @@ class Templates:
         return moved
 
     def put(self, kind: str, name: str, data) -> dict:
-        if not KIND_RE.match(kind or ""):
+        if not KIND_RE.fullmatch(kind or ""):
             raise ValueError("kind: chart, indicators, draw:<tool> or ind:<indicator>")
         name = clean_name(name)
         if not isinstance(data, dict) or not data:
@@ -66,10 +68,19 @@ class Templates:
         if size > MAX_BYTES:
             raise ValueError("that template is too large")
         t = self.all()
+        if kind not in t and len(t) >= MAX_KINDS:
+            raise ValueError(f"templates of up to {MAX_KINDS} kinds")
         k = t.setdefault(kind, {})
         if name not in k and len(k) >= MAX_PER_KIND:
             raise ValueError(f"up to {MAX_PER_KIND} templates of a kind")
+        was = k.get(name)
         k[name] = {"data": data, "updated": int(time.time() * 1000)}
+        if len(json.dumps(t, separators=(",", ":"))) > MAX_TOTAL:
+            if was is None:
+                del k[name]
+            else:
+                k[name] = was
+            raise ValueError("too many templates all told: delete some first")
         self.store.set_setting(SETTING, t)
         return k[name]
 

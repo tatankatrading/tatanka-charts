@@ -176,12 +176,13 @@ const series = () => ({ data: [], setData(d) { this.data = d; }, applyOptions() 
 const candles = series(), vol = series(), noop = () => {};
 const chart = { timeScale: () => ({ options: () => ({ rightOffset: 0 }), setVisibleLogicalRange: noop }) };
 const PS = () => ({ options: () => ({ autoScale: true }) });
-const [cmpClear, altSetData, fpSchedule, setStudyData, indsUpdate, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo,
+const vpKeys = () => [];   // no volume profiles on
+const [cmpClear, altSetData, fpSchedule, setStudyData, indsUpdate, hemaClear, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo,
   scheduleRange, priceLineLayout, bigSchedule, fillsSchedule, goToTime, setChartZone, cmpLoad, setSessionClock, setSessionHolidays,
   legendStudies, dataWindow, cmpLegend, renderTf, renderStudiesMenu, barsLayout, watermarkLayout, replayLoad, tapeSymbol, amtRequest,
   tpoRequest, vpAll, gapRequest, amtLayout, ifRequest, renderPlanIf, renderRth, tabSync, applyPriceFormat, indsBuild, renderSymBtn,
   onSymbolChanged, viewSave, saveTabs, renderTabs, applyStudyState, amtFollow, lookStore, cellPost, authCheck, futureAdd, replayExit,
-  applyLock, setAuto] = Array(99).fill(noop);
+  applyLock, setAuto, vpLiveTick] = Array(100).fill(noop);
 const TK_MULTI = false, TZ_EXCHANGE = 'America/Chicago', WL_FUT = /^([A-Z0-9]+)1!$/, VP_KINDS = [], SPEC_RE = /^\\d+[mhDWM]$/;
 const NY = { tz: 'America/New_York', rth: ['09:30', '16:00'], day: '00:00' }, CME = { tz: 'America/Chicago', rth: null, day: '17:00' };
 const local = { set: noop }, ax = { pick: '' }, drawings = { state: {}, load: noop, select: noop, update: noop };
@@ -189,7 +190,7 @@ const toast = (t) => toasts.push(t), send = (m) => sent.push(m), applyBars = (m)
 const isExtSym = (s) => !S.instruments[s], chartSym = (s) => s, wlKey = (s) => s, wlIsFormula = () => false, specLabel = (s) => s, specOk = () => true;
 const extSource = () => 'yahoo', extSpecFor = (s) => s, extSeries = () => false, calSpec = () => false, bigOn = () => false;
 const exch = () => (S.ext ? S.ext.exchange || NY : CME), inst = () => ({}), indFmt = () => '', toPoints = (b) => [{ time: b.t, close: b.c }, {}];
-const px = (p) => (p == null ? '–' : Number(p).toFixed(2)), viewApply = () => false, viewSnap = () => null, ownTab = () => null;
+const px = (p) => (p == null ? '–' : Number(p).toFixed(2)), viewApply = () => false, anchorMs = () => null, viewSnap = () => null, ownTab = () => null;
 const sharedStudies = () => ({}), applyLook = () => false;
 /*APP*/
 const bars = (c0, c1, n = 6) => Array.from({ length: n }, (_, i) => {

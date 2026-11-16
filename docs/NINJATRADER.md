@@ -18,8 +18,8 @@ buy/sell side from bid/ask) to this server over `127.0.0.1:8801`, and your fills
 Setting it up:
 
 1. Off the simulator: **Leave the simulator**, in the setup guide on the first run or on Connections > NinjaTrader
-   while the simulator runs (README, First run). It deletes the simulator's invented trades and restarts on
-   NinjaTrader.
+   while the simulator runs (README, First run). It deletes the simulator's invented trades and the prices it made
+   up for your stock and formula alerts, and restarts on NinjaTrader.
 2. Copy `ninjatrader\TatankaChartFeed.cs` to `Documents\NinjaTrader 8\bin\Custom\AddOns\` (or **Download the
    add-on** on Connections > NinjaTrader, which has the server's Token in it).
 3. In NinjaTrader, connected to your data feed: New > NinjaScript Editor, press F5. The bottom of the editor must
@@ -40,7 +40,24 @@ once, in the background after the next start (feed plugins' trades the same; not
 deletes anyway). Add-on 18 leaves that replay out itself, by NinjaTrader's own time for the trade (over 20 minutes
 old when it comes), so a reconnect in the 16:00-17:00 break no longer opens the next session at the last one's close;
 when several trades in a row look that old, seconds apart, it is the PC's clock that is off, and they go (add-on 19:
-replays at separate reconnects, hours apart over a weekend or a holiday, never count as that).
+replays at separate reconnects, hours apart over a weekend or a holiday, never count as that). Add-on 21 also leaves
+out the replay after a data outage of a few minutes: once a minute of a market's trades has shown its own clock
+against the PC's, a trade over 2 minutes old by that clock is a replay (before, one under 20 minutes went as a print
+at the old price). Each market has its own clock, so one on delayed data keeps all its trades. Add-on 22 also tells a
+replay by the trade's own time: NinjaTrader's replay repeats the last trade, so a trade newer than any before on its
+contract is not one, and goes if it is under 20 minutes old by its market's clock (before, after the PC's clock was
+set a few minutes forward or NinjaTrader delivered trades late, the first three were lost, and a quiet market lost all
+of them). Replays no longer set a market's clock, so data reconnects a minute or two apart no longer let older and
+older replays through. It takes no settlement, prior close or day volume from Market Replay or the Simulated Data Feed
+either: a replayed day's settlement replaced the real one in the watchlist's change. At a contract roll in the 16:00
+CT break, NinjaTrader's replay of the new contract's last trade is left out by the server (any add-on), not put in the
+old contract's last minute, which gave the roll day's close the new contract's price. Add-on 22 sends a roll made
+while the server was away after the old contract's last trades queued before it, so those stay in their session
+(before, it sent the new contract's name first on connecting, and the server left them out as after the roll). It also
+marks a settlement NinjaTrader held: its first after subscribing or after NinjaTrader's data connection was down.
+After a day missed that one may be the day before's; a change heard live is the day's. One heard live while the
+server was away goes unmarked if the server is back within 30 minutes, and marked held if later (it may be an earlier
+day's by then). On connecting, the add-on sends each settlement again the same way, unless its line is still queued.
 
 One add-on at a time: a second NinjaTrader running it (another Windows user on the PC) is turned away while the first
 is connected (`another NinjaTrader add-on is connected to the server; trying again in 30 s`) and takes over, gap fill
@@ -100,8 +117,11 @@ months as it needs (up to 6 a time), ahead of that ("loading older bars from Nin
 back as the data provider's history does. Each part comes from its own contract by NinjaTrader's roll dates (Tools >
 Instruments > the symbol > Contract months), however old, none from before the first roll date NinjaTrader lists. A
 month that comes back empty is where the provider's history ends: the chart says so, and it isn't asked again for a
-week. Not answered in 6 minutes, or answered with an error (no data connection): asked again 10 minutes later; three
-times in a row, and that is taken as where the history ends too.
+week. Answered with an error (no data connection): asked again 10 minutes later; three errors in a row, and that is
+taken as where the history ends too. Not answered in 6 minutes (NinjaTrader's data connection down, a slow
+download): the other futures go on, and that one's answer is kept whenever it comes; nothing else is asked for that
+future meanwhile, so answers never mix. A chart waiting at its first bar says NinjaTrader didn't send older history
+and asks again as soon as it does.
 Charts don't reload for it (they load the older bars as they are scrolled back); a future's studies (AMT Toolkit,
 Daily SMA x4, TPO's days...) load again once its older months are in, if any are from the last 400 days. About 50-70
 MB per future per year. NinjaScript Output shows `filling ES 06-26 ... from NinjaTrader's 1-minute bars`;
@@ -110,4 +130,6 @@ all there is.
 
 Which futures: the server's list (**Connections > App > Instruments**, [CONNECTIONS.md](CONNECTIONS.md#instruments)). On connect the server tells the add-on
 which roots it charts and the add-on forwards each one's trades; its own `Contracts` list (ES, NQ, CL, GC, MES, MNQ)
-is forwarded either way.
+is forwarded from its start. A root the server's list leaves out (one of those, or one taken off Instruments while
+NinjaTrader runs) is quoted only from then, as a watchlist future, and the add-on names its quote's contract at each
+roll, so a price alert on it never fires on the jump between contracts.

@@ -19,7 +19,7 @@ const S = { st: { fp: 'bidask', tpo: false, gap: false, ifthen: false }, ext: nu
 const chart = { timeScale: () => ({ getVisibleLogicalRange: () => ({ from: 0, to: S.bars.length + 3 }), options: () => ({ barSpacing: 50 }) }) };
 const FP_MIN_SPACING = 40, fpPrim = { update() {} }, isTime = () => S.kind === 'time';
 const toPoints = () => [{}, {}], candles = { update() {} }, vol = { update() {} }, altSeries = null, BAR_CAP = 20000, anchorMs = () => null;
-const [updateStudyBar, indsUpdate, dsmaTick, hemaTick, cmpTail, legend, header] = Array(7).fill(() => {});
+const [updateStudyBar, indsUpdate, dsmaTick, hemaTick, vpLiveTick, cmpTail, legend, header] = Array(8).fill(() => {});
 const bodies = [];
 const answer = (body) => { const q = bodies.push(body) - 1; return { bars: body.starts.map((t, k) => ({ t, q, k, rows: [] })) }; };
 """

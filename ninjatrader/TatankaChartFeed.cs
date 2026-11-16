@@ -5,18 +5,26 @@
 //
 // Install: copy this file to  Documents\NinjaTrader 8\bin\Custom\AddOns\
 //          then New > NinjaScript Editor > press F5 to compile. It starts on compile and with NinjaTrader.
-// Status lines appear in New > NinjaScript Output. Market Replay and Simulated Data Feed trades are skipped.
+// Status lines appear in New > NinjaScript Output. Market Replay and Simulated Data Feed data are skipped.
 //
 // Wire format, one line per message, "\n" terminated, invariant culture:
 //   HELLO|<token>|<version>                 first line after connecting; the server says when the add-on is older than it
 //   C|<sym>|<contract>                       the contract now forwarded for <sym> ("ES 03-27"): on connect and on a roll
-//   C|<sym>|<contract>|quote                 a watchlist future's quote rolled: the settlements known are the old one's
+//   C|<sym>|<contract>|quote                 the contract a watchlist future's Q lines are from: when first quoted, on
+//                                            connect and at a roll (22+; before, at a roll only). One other than before is
+//                                            a roll (the settlements known are the old one's), and no Q line after it
+//                                            carries the old one's numbers
 //   T|<sym>|<utc epoch ms>|<price>|<size>|<side>   side +1 at/above ask, -1 at/below bid, 0 between
 //   Q|<sym>|<last>|<prior session close>|<day volume>   once a second per symbol, for the watchlist, while its
 //                                            market data comes (none after 60 s without, nor while NinjaTrader's
 //                                            live data is down or Playback or the Simulated Data Feed is connected)
-//   S|<sym>|<settlement>                    the settlement its exchange published (NinjaTrader's Settlement), on a change
-//                                            and on each connect: the watchlist's change is from it
+//   S|<sym>|<settlement>[|held]             the settlement its exchange published (NinjaTrader's Settlement), on a change
+//                                            and on each connect: the watchlist's change is from it. held: the one
+//                                            NinjaTrader held, maybe since a day missed (its first after subscribing or
+//                                            after NinjaTrader's data connection was down), or one sent over 30 minutes
+//                                            after it was heard (queued while the server was away, or sent again on a
+//                                            connect); without: a change it heard live in the last 30 minutes, the
+//                                            latest publication
 //   H|<utc epoch ms>                         heartbeat every 5 s
 //   X|<sym>|<utc epoch ms>|<price>|<size>    a trade from NinjaTrader's history (gap fill, no side)
 //   Y|<sym>|<bar open utc ms>|<o>|<h>|<l>|<c>|<volume>   a 1-minute bar from history (no tick history)
@@ -54,7 +62,8 @@
 // traded more, or two days after NinjaTrader's roll date if the volumes never came; never back to an older contract.
 // dates: NinjaTrader's own roll dates. MM-yy: that month, until changed in the app. Until a chart future's first R
 // line, its trades and its C line are held back (it may be on the wrong contract); with a server that sends no R
-// lines, they go 10 s after connecting. A built-in market the server's I line leaves out is quoted only.
+// lines, they go 10 s after connecting. A market the server's I line leaves out (a built-in one, or one taken off
+// Instruments while NinjaTrader runs) is quoted only, its rolls sent as C|..|quote.
 #region Using declarations
 using System;
 using System.Collections.Concurrent;
@@ -82,12 +91,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private const string Token    = "";       // must equal CHART_NT_TOKEN if the server sets one
 		private const int    MaxQueue = 200000;   // lines buffered while the server is down; the oldest are dropped
 		private const long   TickHistoryMaxMs = 3L * 86400000;   // longer gaps come as 1-minute bars
-		private const int    Version  = 20;       // raised with each change; the server's ADDON_VERSION
+		private const int    Version  = 22;       // raised with each change; the server's ADDON_VERSION
 		private const long   QuoteLiveMs = 60000;   // a symbol's Q lines stop once its market data is silent this long
 		private const long   ReplayMs = 20 * 60000; // a trade older than this when it comes is NinjaTrader's replay of its last
+		private const long   StaleMs  = 2 * 60000;  // ...or than this by the market's own clock (Clock), once it is known
 		private const int    ReplayRun = 3;         // ...unless more come in a row, each within ReplayRunMs of the one before:
 		private const long   ReplayRunMs = 5000;    // then it is the PC's clock that is off (replays come one a reconnect)
 		private const int    HistoryRetries = 10;                // 30 s apart, while NinjaTrader's connection comes up
+		private const long   HeldMs = 5 * 60000;    // its settlement on subscribing, or with its data back, comes within this
+		private const long   SettleLiveMs = 30 * 60000;   // the server's publish grace: a change heard live this recently
+		                                                  // is today's to it; one sent later than this goes held
 
 		private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 		private static readonly TimeZoneInfo Central = FindCentral();
@@ -95,13 +108,24 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private readonly List<BarsRequest> requests = new List<BarsRequest>();
 		private System.Threading.Timer rollTimer;
 		private readonly ConcurrentDictionary<string, double> lastPrice = new ConcurrentDictionary<string, double>();
+		// By root, the contract a watchlist future's Q lines are from (Quoting); also the lock its numbers change under.
+		private readonly Dictionary<string, Instrument> quoting = new Dictionary<string, Instrument>();
 		private readonly ConcurrentDictionary<string, double> priorClose = new ConcurrentDictionary<string, double>();
 		private readonly ConcurrentDictionary<string, long> dayVolume = new ConcurrentDictionary<string, long>();
 		private readonly ConcurrentDictionary<string, long> heardAt = new ConcurrentDictionary<string, long>();   // PC ms of its last market data
 		private readonly ConcurrentDictionary<string, int> replays = new ConcurrentDictionary<string, int>();   // trades left out as replays, in a row
 		private readonly ConcurrentDictionary<string, long> replayAt = new ConcurrentDictionary<string, long>();   // PC ms of the last that looked old
+		// By contract ("ES 12-26"), the newest own time (UTC ms) of the trades NinjaTrader gave for it: its replay of the
+		// last trade is never newer, while live trades keep moving on.
+		private readonly ConcurrentDictionary<string, long> newestAt = new ConcurrentDictionary<string, long>();
 		private readonly ConcurrentDictionary<string, long> nextVolume = new ConcurrentDictionary<string, long>();   // by contract
 		private readonly ConcurrentDictionary<string, double> settlement = new ConcurrentDictionary<string, double>();
+		// By symbol, until when (PC ms) its next settlement is the one NinjaTrader held, not a change heard live: set as
+		// it subscribes, and while NinjaTrader's data connection is down (its settlement then may be a day or more old).
+		private readonly ConcurrentDictionary<string, long> settleHeld = new ConcurrentDictionary<string, long>();
+		// By symbol, when (PC ms) the settlement kept was heard and whether NinjaTrader held it: sent again on a connect
+		// unmarked only if heard live within SettleLiveMs, else held (a day-old one sent unmarked would be today's).
+		private readonly ConcurrentDictionary<string, KeyValuePair<long, bool>> settleSeen = new ConcurrentDictionary<string, KeyValuePair<long, bool>>();
 		private readonly ConcurrentDictionary<string, VolumeCheck> volumeChecks = new ConcurrentDictionary<string, VolumeCheck>();
 		// Chart futures whose contract the server hasn't settled yet (its R line): no trades, no C line until it has.
 		private readonly ConcurrentDictionary<string, bool> held = new ConcurrentDictionary<string, bool>();
@@ -111,6 +135,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 		// Per symbol, NinjaTrader's time (whole seconds) of the first trade queued since the last connection ended: a
 		// GAP's open end stops there, on the same clock as the history (the server's cut is when trades arrive).
 		private readonly ConcurrentDictionary<string, long> firstLive = new ConcurrentDictionary<string, long>();
+		// By market, its trades' time less the PC's as they come (ms): the freshest over each minute, of the trades newer
+		// than any before on their contract (a replay repeats the last one, so never moves it; one late only ever looks
+		// older). Its own: one on delayed data (an exchange not subscribed to) runs behind the rest.
+		private sealed class Clock { public long Offset, Max = long.MinValue, Until; public bool Known; }
+		private readonly ConcurrentDictionary<string, Clock> clocks = new ConcurrentDictionary<string, Clock>();
 		private HashSet<string> chartRoots = new HashSet<string>();   // the server's last I list (under `feeds`)
 		private MarketDataEventArgs lastTrade;   // the same event delivered twice is sent once
 		private readonly HashSet<string> unknownRoots = new HashSet<string>();   // reported once each
@@ -163,7 +192,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					}
 				}
 				WatchAccounts();
-				rollTimer = new System.Threading.Timer(CheckRolls, null, 60000, 60000);   // roll check once a minute
+				rollTimer = new System.Threading.Timer(CheckRolls, null, 60000, 60000);   // roll and data check once a minute
 			}
 			else if (State == State.Terminated)
 			{
@@ -276,8 +305,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 		{
 			Instrument old = f.Current;
 			MarketData oldData = f.Data;
+			settleHeld[f.Master.Name] = NowMs() + HeldMs;   // its first settlement is NinjaTrader's on subscribing
 			f.Current = instrument;
 			f.Data = null;
+			if (f.QuoteOnly) Quoting(f.Master.Name, instrument);   // before the new subscription's first data
 			EventHandler<MarketDataEventArgs> h = Handler(f);
 			if (old != null && oldData != null) old.Dispatcher.InvokeAsync(() => oldData.Update -= h);
 			instrument.Dispatcher.InvokeAsync(() =>
@@ -291,15 +322,50 @@ namespace NinjaTrader.NinjaScript.AddOns
 			});
 			if (f.QuoteOnly)
 			{
-				if (old != null)
-				{
-					Print("TatankaChartFeed: watchlist quote rolled " + old.FullName + " to " + instrument.FullName);
-					Enqueue("C|" + f.Master.Name + "|" + instrument.FullName + "|quote");
-				}
+				if (old != null) Print("TatankaChartFeed: watchlist quote rolled " + old.FullName + " to " + instrument.FullName);
 				return;
 			}
 			if (!held.ContainsKey(f.Master.Name)) Enqueue("C|" + f.Master.Name + "|" + instrument.FullName);
 			Print("TatankaChartFeed: " + (old == null ? "forwarding " : "rolled " + old.FullName + " to ") + instrument.FullName);
+		}
+
+		// A watchlist future's Q lines are `instrument`'s from now (Forward), and the server is told (it sets the contract
+		// against the one it has, so a roll while it or NinjaTrader was off counts too). The numbers kept so far go: at a
+		// roll the old contract's, which its subscription may still deliver until its handler is gone (OnQuoteData leaves
+		// those out). No Q line after the C line carries the old contract's price.
+		private void Quoting(string root, Instrument instrument)
+		{
+			lock (quoting)
+			{
+				quoting[root] = instrument;
+				double d;
+				long v;
+				lastPrice.TryRemove(root, out d);
+				priorClose.TryRemove(root, out d);
+				dayVolume.TryRemove(root, out v);
+				settlement.TryRemove(root, out d);
+				Enqueue("C|" + root + "|" + instrument.FullName + "|quote");
+			}
+		}
+
+		// On connecting: each watchlist future's C|ROOT|contract|quote, so the server sees a roll made while it was away
+		// (or before NinjaTrader started). Not one whose own is still queued: those come in order, the old before the new.
+		private List<string> QuoteContracts()
+		{
+			List<string> lines = new List<string>();
+			lock (feeds)   // (Forward queues them with it locked)
+			{
+				HashSet<string> queued = new HashSet<string>();
+				foreach (string line in queue)
+				{
+					string[] p = line.Split('|');
+					if (p.Length == 4 && p[0] == "C" && p[3] == "quote") queued.Add(p[1]);
+				}
+				foreach (Feed f in feeds)
+					if (f.QuoteOnly && f.Current != null && !queued.Contains(f.Master.Name))
+						lines.Add("C|" + f.Master.Name + "|" + f.Current.FullName + "|quote");
+			}
+			return lines;
 		}
 
 		// The server has settled a chart future's contract (or sends no R lines): its trades go from now on, and the
@@ -396,10 +462,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			});
 		}
 
-		// The next contract's day volume (instrument thread), for rolling by volume.
+		// The next contract's day volume (instrument thread), for rolling by volume; never Market Replay's.
 		private void OnNextData(object source, MarketDataEventArgs e)
 		{
-			if (e.MarketDataType == MarketDataType.DailyVolume) nextVolume[e.Instrument.FullName] = (long)e.Volume;
+			if (e.MarketDataType == MarketDataType.DailyVolume && IsLiveData()) nextVolume[e.Instrument.FullName] = (long)e.Volume;
 		}
 
 		// The server's choice for a chart future (R line): volume, dates or a month; and the contract it charted last, so
@@ -439,6 +505,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 		{
 			try { WatchAccounts(); }
 			catch (Exception ex) { Print("TatankaChartFeed: account check failed: " + ex.Message); }
+			try { CheckData(); }
+			catch (Exception ex) { Print("TatankaChartFeed: data connection check failed: " + ex.Message); }
 			try
 			{
 				DateTime ct = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Central);
@@ -455,6 +523,18 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				Print("TatankaChartFeed: rollover check failed: " + ex.Message);
 			}
+		}
+
+		// NinjaTrader's data connection down (or Market Replay, the Simulated Data Feed): each market's next settlement
+		// once it is back is the one NinjaTrader holds then, maybe from before a day missed meanwhile (the add-on may stay
+		// connected to the server all along). The roll timer's, once a minute: after a shorter outage, what NinjaTrader
+		// holds is still the latest publication.
+		private void CheckData()
+		{
+			if (DataConnected()) return;
+			long until = NowMs() + HeldMs;
+			lock (feeds)
+				foreach (Feed f in feeds) settleHeld[f.Master.Name] = until;
 		}
 
 		// The server's requests: GAP lines, read on their own thread until the connection closes.
@@ -494,9 +574,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		// The server's chart symbols (Connections > Instruments, sent on connect): forward each root's trades, as the
-		// built-in Contracts are. A root the watchlists already quote moves from quotes only to trades. A built-in one
-		// not in the list (taken off Instruments, or a plugin's) gets no R line and would stay held, quote and all: it
-		// is quoted only from now, as a watchlist future (the W line that follows keeps it or drops it).
+		// built-in Contracts are. A root the watchlists already quote moves from quotes only to trades. One forwarded
+		// that is not in the list (a built-in one, one taken off Instruments while NinjaTrader runs, or a plugin's) is
+		// quoted only from now, as a watchlist future (the W line that follows keeps it or drops it): held, it would
+		// get no R line and stay held; released, its rolls would go as a chart's C line, which the server drops for a
+		// root it does not chart, so it never heard of them (C|..|quote) and took the jump for a move.
 		private void SetCharts(string[] roots)
 		{
 			int added = 0;
@@ -508,7 +590,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				for (int k = 0; k < feeds.Count; k++)
 				{
 					Feed f = feeds[k];
-					if (f.QuoteOnly || f.Current == null || chartRoots.Contains(f.Master.Name) || !held.ContainsKey(f.Master.Name)) continue;
+					if (f.QuoteOnly || f.Current == null || chartRoots.Contains(f.Master.Name)) continue;
 					Instrument i = f.Current;
 					MarketData md = f.Data;
 					if (md != null) i.Dispatcher.InvokeAsync(() => md.Update -= OnMarketData);
@@ -534,6 +616,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						Instrument qi = have.Current;
 						MarketData qmd = have.Data;
 						if (qi != null && qmd != null) qi.Dispatcher.InvokeAsync(() => qmd.Update -= OnQuoteData);
+						lock (quoting) quoting.Remove(root);   // its quote subscription's data, until removed, is left out
 						have.Data = null;
 						feeds.Remove(have);
 					}
@@ -569,6 +652,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					if (md != null) i.Dispatcher.InvokeAsync(() => md.Update -= OnQuoteData);
 					f.Data = null;
 					feeds.RemoveAt(k);
+					lock (quoting) quoting.Remove(f.Master.Name);   // what its subscription still delivers is left out
 					double d;
 					long v;
 					lastPrice.TryRemove(f.Master.Name, out d);
@@ -679,6 +763,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 				int end = line.IndexOf('\u0001', 1);
 				if (end < 0 || line.Substring(1, end - 1) != gen.ToString(Inv)) return;
 				line = line.Substring(end + 1);
+			}
+			else if (line.Length > 0 && line[0] == '\u0002')   // a settlement heard live (Settled), stamped with when
+			{
+				int end = line.IndexOf('\u0002', 1);
+				long heard;
+				if (end < 0) return;
+				bool old = !long.TryParse(line.Substring(1, end - 1), NumberStyles.Integer, Inv, out heard) || NowMs() - heard > SettleLiveMs;
+				line = line.Substring(end + 1) + (old ? "|held" : "");   // heard longer ago: maybe an earlier day's
 			}
 			w.WriteLine(line);
 		}
@@ -1071,19 +1163,32 @@ namespace NinjaTrader.NinjaScript.AddOns
 			heardAt[sym] = NowMs();   // its data still comes: its Q lines go on
 			if (e.MarketDataType == MarketDataType.Last)
 			{
-				if (e.Volume <= 0 || held.ContainsKey(sym) || !IsLiveData()) return;   // held: maybe the wrong contract
+				if (e.Volume <= 0) return;
+				long at = ToUtcMs(e.Time, NtZone()), seen;   // newer than any before on its contract (held or not live too)?
+				bool had = newestAt.TryGetValue(e.Instrument.FullName, out seen), newer = had && at > seen;
+				if (!had || newer) newestAt[e.Instrument.FullName] = at;
+				if (held.ContainsKey(sym) || !IsLiveData()) return;   // held: maybe the wrong contract
 				if (ReferenceEquals(Interlocked.Exchange(ref lastTrade, e), e)) return;   // the very same event again
 				// NinjaTrader replays the last trade when it subscribes or reconnects: in the 16:00 break (it became the next
 				// session's first print, at the last one's close), over a weekend. It keeps its own time: one older than
 				// ReplayMs is left out, unless more than ReplayRun come in a row, each within ReplayRunMs of the one before
 				// (the PC's clock is off, and every trade looks old: from then on they go). Replays, one a reconnect, come
-				// minutes or hours apart, so they never add up to a run.
-				long now = NowMs(), at = ToUtcMs(e.Time, NtZone()), prev;
-				if (now - at > ReplayMs)
+				// minutes or hours apart, so they never add up to a run. Once a minute of its live trades has told the
+				// market's clock from the PC's (Clock), a trade is judged by the market's: StaleMs old is a replay, so one
+				// after an outage of a few minutes is left out too; a run measures it again (the PC's clock set meanwhile).
+				// A replay is never newer than the trades before it on its contract: one that is only has to be under
+				// ReplayMs old by the market's clock (the PC's clock set forward, trades delivered late, a quiet market's
+				// each), and only such trades (or a run) set the market's clock, so replays never move it back.
+				long now = NowMs(), prev, lag;
+				Clock ck = clocks.GetOrAdd(sym, k => new Clock());
+				bool known, ran = false;
+				lock (ck) { known = ck.Known; lag = now + ck.Offset - at; }
+				if (known ? lag > (newer ? ReplayMs : StaleMs) : now - at > ReplayMs)
 				{
 					bool near = replayAt.TryGetValue(sym, out prev) && now - prev <= ReplayRunMs;
 					replayAt[sym] = now;
 					if (replays.AddOrUpdate(sym, 1, (k, n) => near || n > ReplayRun ? Math.Min(n, ReplayRun) + 1 : 1) <= ReplayRun) return;
+					ran = true;
 				}
 				else replays[sym] = 0;
 				double price = e.Instrument.MasterInstrument.RoundToTickSize(e.Price);
@@ -1092,6 +1197,22 @@ namespace NinjaTrader.NinjaScript.AddOns
 				int side = (e.Ask > 0 && price >= e.Ask) ? 1 : (e.Bid > 0 && price <= e.Bid) ? -1 : 0;
 				lastPrice[sym] = price;
 				Enqueue(string.Format(Inv, "T|{0}|{1}|{2}|{3}|{4}", sym, now, price, e.Volume, side));
+				lock (ck)
+				{
+					if (ran) ck.Max = long.MinValue;   // measured again from this one on
+					if ((ran || newer) && at - now > ck.Max) ck.Max = at - now;   // never from a replay
+					if (ck.Until == 0) ck.Until = now + 60000;   // its first: a minute of them before it is known
+					else if (ran || now >= ck.Until)
+					{
+						if (ck.Max != long.MinValue)
+						{
+							ck.Offset = ck.Max;
+							ck.Known = true;
+						}
+						ck.Max = long.MinValue;
+						ck.Until = now + 60000;
+					}
+				}
 				if (now >= Interlocked.Read(ref nextClock))   // against the PC's: P lines' clock until an account's first fill
 				{
 					Interlocked.Exchange(ref nextClock, now + 60000);
@@ -1101,10 +1222,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 			else if (e.MarketDataType == MarketDataType.LastClose && e.Price > 0)
 			{
-				priorClose[sym] = e.Price;
+				if (IsLiveData()) priorClose[sym] = e.Price;
 			}
 			else if (e.MarketDataType == MarketDataType.Settlement) Settled(sym, e.Price);
-			else if (e.MarketDataType == MarketDataType.DailyVolume)
+			else if (e.MarketDataType == MarketDataType.DailyVolume && IsLiveData())
 			{
 				dayVolume[sym] = e.Volume;
 				CheckVolume(sym, (long)e.Volume);
@@ -1138,27 +1259,50 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// A watchlist future's quote (instrument thread): remember the numbers; the send loop writes Q lines.
+		// A watchlist future's quote (instrument thread): remember the numbers; the send loop writes Q lines. Under the
+		// lock Quoting changes the contract under, so no old contract's number is put back after it took them out.
 		private void OnQuoteData(object source, MarketDataEventArgs e)
 		{
+			lock (quoting) OnQuote(e);
+		}
+
+		private void OnQuote(MarketDataEventArgs e)
+		{
 			string sym = e.Instrument.MasterInstrument.Name;
+			Instrument cur;
+			if (!quoting.TryGetValue(sym, out cur) || cur.FullName != e.Instrument.FullName) return;   // not the contract quoted now
 			heardAt[sym] = NowMs();
 			if (e.MarketDataType == MarketDataType.Last && e.Price > 0)
 			{
 				if (IsLiveData()) lastPrice[sym] = e.Price;
 			}
-			else if (e.MarketDataType == MarketDataType.LastClose && e.Price > 0) priorClose[sym] = e.Price;
-			else if (e.MarketDataType == MarketDataType.DailyVolume) dayVolume[sym] = e.Volume;
+			else if (e.MarketDataType == MarketDataType.LastClose && e.Price > 0)
+			{
+				if (IsLiveData()) priorClose[sym] = e.Price;
+			}
+			else if (e.MarketDataType == MarketDataType.DailyVolume)
+			{
+				if (IsLiveData()) dayVolume[sym] = e.Volume;
+			}
 			else if (e.MarketDataType == MarketDataType.Settlement) Settled(sym, e.Price);
 		}
 
-		// A settlement from NinjaTrader's data: sent when it changes (the exchange published the day's).
+		// A settlement from NinjaTrader's data: sent when it changes (the exchange published the day's). Never Market
+		// Replay's or the Simulated Data Feed's, nor kept to send again on a connect: a replayed day's replaced the real one.
+		// The first after subscribing or after the data connection was down is the one NinjaTrader held (held), which
+		// the server may place a day back; a later change is the latest publication, heard live. That one is queued
+		// stamped with when it was heard: if it waits for the server (away) over SettleLiveMs, it goes held (Send).
 		private void Settled(string sym, double price)
 		{
+			if (price <= 0 || !IsLiveData()) return;
+			long until, now = NowMs();
+			bool held = settleHeld.TryRemove(sym, out until) && now <= until;
 			double was;
-			if (price <= 0 || (settlement.TryGetValue(sym, out was) && was == price)) return;
+			if (settlement.TryGetValue(sym, out was) && was == price) return;
+			settleSeen[sym] = new KeyValuePair<long, bool>(now, held);
 			settlement[sym] = price;
-			Enqueue(string.Format(Inv, "S|{0}|{1}", sym, price));
+			if (held) Enqueue(string.Format(Inv, "S|{0}|{1}|held", sym, price));
+			else Enqueue("\u0002" + now.ToString(Inv) + "\u0002" + string.Format(Inv, "S|{0}|{1}", sym, price));
 		}
 
 		// Market Replay (Playback) and the Simulated Data Feed must never reach the live charts or alerts. The
@@ -1215,6 +1359,36 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
+		// The symbols with an S line still queued (heard while the server was away): those come in order, each marked as
+		// when it was heard (Send), so none is sent again on connecting. Sent first, held, it took a value heard live
+		// today for the day before's, and put the one queued before it a day on.
+		private HashSet<string> QueuedSettlements()
+		{
+			HashSet<string> syms = new HashSet<string>();
+			foreach (string queued in queue)
+			{
+				string line = queued;
+				if (line.Length > 0 && line[0] == '\u0002') line = line.Substring(line.IndexOf('\u0002', 1) + 1);
+				if (!line.StartsWith("S|", StringComparison.Ordinal)) continue;
+				string[] p = line.Split('|');
+				if (p.Length >= 3) syms.Add(p[1]);
+			}
+			return syms;
+		}
+
+		// The chart futures with a C line still queued (a roll while the server was away).
+		private HashSet<string> QueuedContracts()
+		{
+			HashSet<string> roots = new HashSet<string>();
+			foreach (string line in queue)
+			{
+				if (!line.StartsWith("C|", StringComparison.Ordinal)) continue;
+				string[] p = line.Split('|');
+				if (p.Length == 3) roots.Add(p[1]);
+			}
+			return roots;
+		}
+
 		private void SendLoop()
 		{
 			CancellationToken ct = cts.Token;
@@ -1238,14 +1412,29 @@ namespace NinjaTrader.NinjaScript.AddOns
 							w.NewLine = "\n";
 							w.WriteLine("HELLO|" + Token + "|" + Version);
 							heardR = false;
-							lock (feeds)
+							lock (feeds)   // (Forward and Release queue theirs with it locked)
+							{
+								// Not for one whose roll is still queued: the trades queued before it are the old contract's,
+								// and the server takes the roll as its C line comes, in order.
+								HashSet<string> rolling = QueuedContracts();
 								foreach (Feed f in feeds)
-									if (f.Current != null && !f.QuoteOnly && !held.ContainsKey(f.Master.Name))
+									if (f.Current != null && !f.QuoteOnly && !held.ContainsKey(f.Master.Name) && !rolling.Contains(f.Master.Name))
 										w.WriteLine("C|" + f.Master.Name + "|" + f.Current.FullName);
+							}
 							w.Flush();
+							foreach (string line in QuoteContracts()) w.WriteLine(line);   // a roll while the server was away
 							DateTime releaseAt = DateTime.UtcNow.AddSeconds(10);   // a server that sends no R lines
-							foreach (KeyValuePair<string, double> kv in settlement)   // the settlements known, again
-								w.WriteLine(string.Format(Inv, "S|{0}|{1}", kv.Key, kv.Value));
+							// The settlements known, again (one written into a connection that was closing is lost): held,
+							// unless heard live within SettleLiveMs (today's; the server would take it for the day before's).
+							HashSet<string> settling = QueuedSettlements();
+							long nowMs = NowMs();
+							foreach (KeyValuePair<string, double> kv in settlement)
+							{
+								if (settling.Contains(kv.Key)) continue;   // its own still queued, in order
+								KeyValuePair<long, bool> seen;
+								bool live = settleSeen.TryGetValue(kv.Key, out seen) && !seen.Value && nowMs - seen.Key <= SettleLiveMs;
+								w.WriteLine(string.Format(Inv, live ? "S|{0}|{1}" : "S|{0}|{1}|held", kv.Key, kv.Value));
+							}
 							SendChanged();   // changes from while it was away first: a connect's positions come after them
 							lock (watchedAccounts)   // fills made while the server was away come again (it keeps each once), then
 								foreach (Account a in watchedAccounts)   // the positions as they are now

@@ -1,6 +1,8 @@
 """Deletes the stored market data (trades, 1-minute bars, and the session profiles and settlements worked out from
-them) and keeps everything else: alerts and their history, drawings and settings. For switching from the dev sim feed
-to a real one: the sim's random-walk bars sit at real-looking prices and would mix with real data in charts and studies.
+them, and the values the stock and formula alerts last checked) and keeps everything else: alerts and their history,
+drawings and settings. For switching from the dev sim feed to a real one: the sim's random-walk bars sit at
+real-looking prices and would mix with real data in charts and studies, and its alerts' last values, made up the same
+way, would fire them on the first real quote.
 
 Stop the server first, so nothing writes while it runs. Docker, from the Tatanka Charts folder:
     docker compose stop chart
@@ -18,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import load_settings
+from .free_alerts import FREE_LAST
 from .settlement import SAVED
 from .store import connect
 
@@ -72,6 +75,8 @@ def wipe(path: Path, yes: bool, out=print) -> Path | None:
                 saved = {root: {k: v for k, v in x.items() if not (k == "prev" and v.get("src") == "trades")}
                          for root, x in saved.items() if x.get("src") != "trades"}
                 db.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(saved), SAVED))
+            if "settings" in before:   # the values the stock and formula alerts last checked, the sim's quotes: emptied
+                db.execute("UPDATE settings SET value='{}' WHERE key=?", (FREE_LAST,))   # (a DELETE fails the count check)
         try:
             db.execute("VACUUM")
         except sqlite3.OperationalError as e:   # no room to shrink the file: the trades are gone all the same

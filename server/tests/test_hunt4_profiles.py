@@ -101,7 +101,7 @@ def test_minute_profiles_after_a_pause_are_caught_up_in_a_worker(tmp_path, monke
 
 def test_svp_poll_reads_only_the_finished_sessions_the_client_does_not_hold(tmp_path, monkeypatch):
     """Every 3 s a chart with Session VP on asks again, naming the finished sessions it holds: those are not read from
-    the cache and parsed again on the event loop, only the ones it lacks."""
+    the cache and parsed again on the event loop, only the ones it lacks (each its profile and its per-bar values)."""
     monkeypatch.setenv("CHART_WORKERS", "0")
     monkeypatch.setattr(time, "time", lambda: ct(14, 10, 30) / 1000)
     store = Store(tmp_path / "t.db")
@@ -119,4 +119,5 @@ def test_svp_poll_reads_only_the_finished_sessions_the_client_does_not_hold(tmp_
     assert reads == [] and poll["sessions"][:2] == [{"start": s["start"], "same": True} for s in done]
     assert poll["sessions"][2] == first["sessions"][2]
     poll = asyncio.run(svc.get("prof", "ES", key=first["key"], have={ct(13, 8, 30)}))   # Monday not held: read, sent
-    assert len(reads) == 1 and poll["sessions"][:2] == [done[0], {"start": ct(13, 8, 30), "same": True}]
+    assert len(reads) == 2 and poll["sessions"][1] == {"start": ct(13, 8, 30), "same": True}
+    assert {k: v for k, v in poll["sessions"][0].items() if k != "dev"} == {k: v for k, v in done[0].items() if k != "dev"}

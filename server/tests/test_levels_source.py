@@ -58,7 +58,7 @@ def test_indicator_settings_and_symbols(tmp_path, monkeypatch):
             m.ind.put("tpo", bad)
     assert m.ind.put("hema", {"PlotHTFEMA": {"color": "#FF0000", "dash": "Dash", "width": 1.5}})["PlotHTFEMA"]["dash"] == "Dash"
     with pytest.raises(ValueError):
-        m.ind.put("hema", {"HtfPeriodType": "Week"})   # this app builds Minute and Day sources
+        m.ind.put("hema", {"HtfPeriodType": "Tick"})   # this app builds NinjaTrader's time bars: Second to Year
     m.ind.put_symbol("lines", "ES", {"RangeTop": 7800.0, "CustomLevels": "7845.75|VAH"})
     assert m.ind.value("lines", "RangeTop", "ES") == 7800.0 and m.ind.value("lines", "RangeTop", "NQ") == 0.0
     m.ind.put_symbol("ifthen", "ES", {"RowsBlock": "U|1|2|x"}, 5)
@@ -85,15 +85,17 @@ def test_seed_reset_puts_a_setting_back(tmp_path, monkeypatch):
 
 
 class _Link:
-    """A levels link (or several) answering by the clock; `asked` lists when and which."""
+    """A levels link (or several) answering by the clock; `asked` lists when and which. An answer is (status, text) or
+    (status, text, headers); `sent` lists the request headers."""
     def __init__(self, answer):
-        self.answer, self.asked, self.now = answer, [], 0
+        self.answer, self.asked, self.now, self.sent = answer, [], 0, []
 
-    async def get(self, url, timeout=None, follow_redirects=None):
+    async def get(self, url, timeout=None, follow_redirects=None, headers=None):
         from types import SimpleNamespace
         self.asked.append((self.now, url))
-        status, text = self.answer(url, self.now)
-        return SimpleNamespace(status_code=status, text=text, raise_for_status=lambda: None)
+        self.sent.append(dict(headers or {}))
+        status, text, *more = self.answer(url, self.now)
+        return SimpleNamespace(status_code=status, text=text, headers=more[0] if more else {}, raise_for_status=lambda: None)
 
 
 def _link_levels(setting, http):
@@ -142,33 +144,121 @@ def test_a_new_levels_link_is_asked_at_once():
     assert http.asked[-1] == (sat, "https://levels.example/NEWER/ES.txt")
 
 
-def test_a_levels_link_is_asked_every_2_minutes_while_the_market_is_open():
-    """At once when set (and at a start), then every 2 minutes while the market is open; not in the 16:00-17:00 CT
-    break, a weekend or a closed holiday, and at the first check once it opens again. No publish windows."""
+def test_a_levels_link_is_asked_on_ninjatraders_schedule_while_the_market_is_open():
+    """At once when set (and at a start), then as the NinjaTrader Toolkit's LevelLink.NextAsk has it while the market is
+    open (the C# itself is compared in test_levels_link_schedule.py); not in the 16:00-17:00 CT break, a weekend or a
+    closed holiday, and at the first check once it opens again. LINE has no Published line, so a first answer is not
+    taken for this publish: inside 16:45's hour it is asked every minute until the text changes, then every 2 minutes."""
     import asyncio
     from chartsrv import sessions
     later = "2026-10-21, 5100.00, 5120.00, 5080.00\n"
     http = _Link(lambda url, now: (200, later if now >= _ct(2026, 10, 20, 17, 3) else LINE))
     d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
     asyncio.run(_poll_until(d, http, _ct(2026, 10, 20, 15, 51), _ct(2026, 10, 20, 17, 7)))   # a Tuesday
-    every2 = lambda h, mi, n: [_ct(2026, 10, 20, h, mi + 2 * i) for i in range(n)]   # noqa: E731
-    assert [t for t, _ in http.asked] == every2(15, 51, 5) + every2(17, 0, 4)
-    assert d.src["ES"].read_ms == _ct(2026, 10, 20, 17, 4) and d.current("ES")[0][0].Price == 5100.0
-    # set on a Friday in the last minutes: asked then, not over the weekend, again at Sunday's open
+    tue = lambda h, mi: _ct(2026, 10, 20, h, mi)   # noqa: E731
+    # 15:51, then 30 minutes (16:21, in the break: the first check at 17:00), 17:00-17:03 each minute (16:45's levels
+    # not in hand), the new text at 17:03, then every 2 minutes
+    assert [t for t, _ in http.asked] == [tue(15, 51), tue(17, 0), tue(17, 1), tue(17, 2), tue(17, 3), tue(17, 5)]
+    assert d.src["ES"].read_ms == tue(17, 3) and d.current("ES")[0][0].Price == 5100.0
+    # set on a Friday in the last minutes: asked then, not over the weekend, again at Sunday's open (16:45's hour)
     http = _Link(lambda url, now: (200, LINE))
     d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
     asyncio.run(_poll_until(d, http, _ct(2026, 10, 23, 15, 57), _ct(2026, 10, 25, 17, 3), step=60_000))
-    assert [t for t, _ in http.asked] == [_ct(2026, 10, 23, 15, 57), _ct(2026, 10, 23, 15, 59),
-                                          _ct(2026, 10, 25, 17, 0), _ct(2026, 10, 25, 17, 2)]
+    assert [t for t, _ in http.asked] == [_ct(2026, 10, 23, 15, 57), _ct(2026, 10, 25, 17, 0), _ct(2026, 10, 25, 17, 1),
+                                          _ct(2026, 10, 25, 17, 2)]
     # a closed day (here an invented Wednesday): set that day, asked once; none until the next open
     sessions.set_calendar({"days": [{"date": "2026-11-25", "name": "Closed", "closed": True}]})
     try:
         http = _Link(lambda url, now: (200, LINE))
         d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
         asyncio.run(_poll_until(d, http, _ct(2026, 11, 25, 9, 0), _ct(2026, 11, 25, 17, 3), step=60_000))
-        assert [t for t, _ in http.asked] == [_ct(2026, 11, 25, 9, 0), _ct(2026, 11, 25, 17, 0), _ct(2026, 11, 25, 17, 2)]
+        assert [t for t, _ in http.asked] == [_ct(2026, 11, 25, 9, 0), _ct(2026, 11, 25, 17, 0), _ct(2026, 11, 25, 17, 1),
+                                              _ct(2026, 11, 25, 17, 2)]
     finally:
         sessions.set_calendar({"days": []})
+
+
+def test_a_publish_is_asked_for_every_15_seconds_until_it_comes():
+    """Set at 08:00 with the levels published yesterday at 16:45: asked again at 08:14 (woken for 08:15), every 15 s
+    until the 08:15 levels come (here at 08:16:30), every 2 minutes for 30 minutes after, then every 30 minutes."""
+    import asyncio
+    old = "Published: 2026-10-20 16:45 CT\n" + LINE
+    new = "Published: 2026-10-21 08:15 CT\n2026-10-21, 5100.00, 5120.00, 5080.00\n"
+    http = _Link(lambda url, now: (200, new if now >= _ct(2026, 10, 21, 8, 16, 30) else old))
+    d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+    asyncio.run(_poll_until(d, http, _ct(2026, 10, 21, 8, 0), _ct(2026, 10, 21, 9, 30)))
+    at = lambda h, mi, s=0: _ct(2026, 10, 21, h, mi, s)   # noqa: E731
+    want = [at(8, 0)] + [at(8, 14) + 15_000 * k for k in range(11)] + [at(8, 16, 30) + 120_000 * k for k in range(1, 16)] \
+        + [at(9, 16, 30)]
+    assert [t for t, _ in http.asked] == want
+    assert d.current("ES")[0][0].Price == 5100.0
+
+
+def test_failures_back_off_and_a_link_the_service_refuses_waits_30_minutes():
+    """Failures in a row: 1, 2, 4, 8, 15, 15 minutes (1 at most in a publish's hour). The levels service's own 403 or 404
+    (its X-Tatanka-Levels mark): every 30 minutes; one without the mark (a proxy) is a failure. An ETag is sent back and
+    a 304 is an answer."""
+    import asyncio
+    thu = lambda h, mi: _ct(2026, 10, 22, h, mi)   # noqa: E731
+    http = _Link(lambda url, now: (500, ""))
+    d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+    asyncio.run(_poll_until(d, http, thu(10, 0), thu(11, 0), step=60_000))
+    assert [t for t, _ in http.asked] == [thu(10, m) for m in (0, 1, 3, 7, 15, 30, 45)]
+    assert "unreachable (HTTP 500)" in d.status("ES")["error"]
+    http = _Link(lambda url, now: (500, ""))
+    d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+    asyncio.run(_poll_until(d, http, thu(8, 20), thu(8, 30), step=60_000))   # 08:15's hour: each minute
+    assert [t for t, _ in http.asked] == [thu(8, m) for m in range(20, 30)]
+    for mark, want in (({"X-Tatanka-Levels": "1"}, [thu(10, 0), thu(10, 30)]), ({}, [thu(10, m) for m in (0, 1, 3, 7, 15, 30)])):
+        http = _Link(lambda url, now, mark=mark: (403, "", mark))
+        d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+        asyncio.run(_poll_until(d, http, thu(10, 0), thu(10, 31), step=60_000))
+        assert [t for t, _ in http.asked] == want, mark
+        assert d.status("ES")["error"] == "The levels link was refused (HTTP 403): check the link."
+    http = _Link(lambda url, now: (200, LINE, {"ETag": '"v1"'}) if now == thu(10, 0) else (304, ""))
+    d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+    asyncio.run(_poll_until(d, http, thu(10, 0), thu(11, 1), step=60_000))
+    assert [t for t, _ in http.asked] == [thu(10, 0), thu(10, 30), thu(11, 0)]
+    assert http.sent == [{}, {"If-None-Match": '"v1"'}, {"If-None-Match": '"v1"'}]
+    assert d.status("ES")["error"] == "" and d.current("ES")[0][0].Price == 5000.0
+
+
+def test_a_changed_answer_without_a_published_line_is_the_publish_due_next():
+    """LevelLink: a text that changed while asking, with no Published line, counts as published when it came (stampCt =
+    nowCt); only a first answer does not (it may be yesterday's). Changed at 08:00: 08:15's levels are in hand, so it is
+    asked every 2 minutes for 30 minutes (08:14 is not a publish to wait for), then every 30 minutes."""
+    import asyncio
+    from datetime import datetime
+    other = "2026-10-21, 5100.00, 5120.00, 5080.00\n"
+    at = lambda h, mi, s=0: _ct(2026, 10, 21, h, mi, s)   # noqa: E731
+    http = _Link(lambda url, now: (200, other if now >= at(7, 40) else LINE))
+    d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+    asyncio.run(_poll_until(d, http, at(7, 30), at(9, 1)))
+    assert [t for t, _ in http.asked] == [at(7, 30)] + [at(8, m) for m in range(0, 31, 2)] + [at(9, 0)]
+    assert d.src["ES"].link.stamp == datetime(2026, 10, 21, 8, 0) and d.current("ES")[0][0].Price == 5100.0
+
+
+def test_a_304_keeps_saying_the_answer_held_gave_no_levels():
+    """Good levels (ETag "a"), then an answer with none (ETag "b"): the last good levels stay and it says so. The asks
+    after it get 304 for that same answer: still said, as NinjaTrader's chart keeps the error of the text it parsed until
+    another comes. A good answer clears it."""
+    import asyncio
+    wed = lambda h, mi: _ct(2026, 10, 21, h, mi)   # noqa: E731
+
+    def answer(url, now):
+        tag = http.sent[-1].get("If-None-Match")
+        etag, text = ('"a"', LINE) if now < wed(10, 30) or now >= wed(11, 30) else ('"b"', "<html>Session expired</html>")
+        return (304, "") if tag == etag else (200, text, {"ETag": etag})
+    http = _Link(answer)
+    d = _link_levels({"v": "https://levels.example/key/{root}.txt"}, http)
+    asyncio.run(_poll_until(d, http, wed(10, 0), wed(10, 31), step=60_000))
+    bad = "Levels link unreachable (ValueError): keeping the last good levels."
+    assert d.status("ES")["error"] == bad and d.status("ES")["count"] == 7
+    asyncio.run(_poll_until(d, http, wed(10, 31), wed(11, 30), step=60_000))
+    assert [h.get("If-None-Match") for h in http.sent[-3:]] == ['"b"'] * 3     # 304s for it
+    assert d.status("ES")["error"] == bad and d.status("ES")["count"] == 7
+    asyncio.run(_poll_until(d, http, wed(11, 30), wed(12, 31), step=60_000))
+    assert d.status("ES")["error"] == "" and d.status("ES")["count"] == 7
 
 
 def test_paths_under_onedrive_and_without_docker(tmp_path, monkeypatch):

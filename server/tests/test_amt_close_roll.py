@@ -248,7 +248,7 @@ def test_gc_runs_on_bars_its_open_falls_on():
                                      "CL": SimpleNamespace(rth=("08:00", "13:30"))})
     hub = AmtHub.__new__(AmtHub)
     hub.m = m
-    got = {(s, n): hub.engine_minutes(s, n) for s in ("GC", "ES", "CL") for n in (1, 5, 7, 15, 20, 30)}
+    got = {(s, n): hub.engine_minutes(s, n, {}) for s in ("GC", "ES", "CL") for n in (1, 5, 7, 15, 20, 30)}
     assert got[("GC", 30)] == 10 and got[("GC", 15)] == 5 and got[("GC", 5)] == 5
     assert got[("ES", 30)] == 30 and got[("ES", 15)] == 15 and got[("ES", 20)] == 10 and got[("ES", 7)] == 1
     assert got[("CL", 30)] == 30 and got[("CL", 5)] == 5

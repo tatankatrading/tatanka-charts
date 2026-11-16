@@ -254,5 +254,5 @@ def test_the_chart_page_asks_once_and_waits_a_minute_after_a_failed_answer():
     answered: two of each, at the chart's open, every HTF close and every trim. After a failed answer every closed bar
     asked again at once. Now a closed bar doesn't ask while one is out (new history and settings still do, once it
     answers), and after a failed answer it asks again a minute later."""
-    out = run_app(["hemaBusy", "hemaRequest", "hemaTick"], HEMA_JS)
+    out = run_app(["hemaEach", "hemaRequest", "hemaTick"], HEMA_JS)
     assert out == {"open": 1, "htfClosed": 2, "htfAnswer": 2, "again": [3, 4, 4], "failed": 2, "recovered": [3, True]}

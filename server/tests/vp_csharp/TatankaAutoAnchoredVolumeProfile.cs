@@ -1,6 +1,9 @@
-// Tatanka Auto Anchored Volume Profile 1.1.0 | NinjaTrader 8.1
+// Copyright (c) 2026 Tatanka Trading LLC.
+// This Source Code Form is subject to the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, obtain one at https://mozilla.org/MPL/2.0/.
+// Tatanka Auto Anchored Volume Profile v1.1.0 for NinjaTrader 8
 // Chart-only. One-minute source bars; uniform estimated volume across each bar's price ticks.
-// See TatankaAutoAnchoredVolumeProfile-Guide.md for setup and calculation differences.
+// Guide (setup, calculation, TradingView differences): https://github.com/TatankaTrading/tatanka-indicators/blob/main/docs/Other-Indicators-Guide.md#auto-anchored-volume-profile
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -779,60 +782,3 @@ namespace TatankaAavpCore
     }
 }
 // END STANDALONE AUTO ANCHORED PROFILE CORE
-
-#region NinjaScript generated code. Neither change nor remove.
-
-namespace NinjaTrader.NinjaScript.Indicators
-{
-	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
-	{
-		private TatankaAutoAnchoredVolumeProfile[] cacheTatankaAutoAnchoredVolumeProfile;
-		public TatankaAutoAnchoredVolumeProfile TatankaAutoAnchoredVolumeProfile()
-		{
-			return TatankaAutoAnchoredVolumeProfile(Input);
-		}
-
-		public TatankaAutoAnchoredVolumeProfile TatankaAutoAnchoredVolumeProfile(ISeries<double> input)
-		{
-			if (cacheTatankaAutoAnchoredVolumeProfile != null)
-				for (int idx = 0; idx < cacheTatankaAutoAnchoredVolumeProfile.Length; idx++)
-					if (cacheTatankaAutoAnchoredVolumeProfile[idx] != null &&  cacheTatankaAutoAnchoredVolumeProfile[idx].EqualsInput(input))
-						return cacheTatankaAutoAnchoredVolumeProfile[idx];
-			return CacheIndicator<TatankaAutoAnchoredVolumeProfile>(new TatankaAutoAnchoredVolumeProfile(), input, ref cacheTatankaAutoAnchoredVolumeProfile);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
-{
-	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
-	{
-		public Indicators.TatankaAutoAnchoredVolumeProfile TatankaAutoAnchoredVolumeProfile()
-		{
-			return indicator.TatankaAutoAnchoredVolumeProfile(Input);
-		}
-
-		public Indicators.TatankaAutoAnchoredVolumeProfile TatankaAutoAnchoredVolumeProfile(ISeries<double> input )
-		{
-			return indicator.TatankaAutoAnchoredVolumeProfile(input);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.Strategies
-{
-	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
-	{
-		public Indicators.TatankaAutoAnchoredVolumeProfile TatankaAutoAnchoredVolumeProfile()
-		{
-			return indicator.TatankaAutoAnchoredVolumeProfile(Input);
-		}
-
-		public Indicators.TatankaAutoAnchoredVolumeProfile TatankaAutoAnchoredVolumeProfile(ISeries<double> input )
-		{
-			return indicator.TatankaAutoAnchoredVolumeProfile(input);
-		}
-	}
-}
-
-#endregion

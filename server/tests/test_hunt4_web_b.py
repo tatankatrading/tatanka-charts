@@ -19,7 +19,7 @@ const S = { symbol: 'ES', instruments: { ES: {} }, ind: { schema: {}, overrides:
   ifData: null, ifRows: [], ifSet: { AtrLength: 14 } };
 const local = { set: noop }, indDlg = { refresh: noop }, ifPrim = { update: noop }, $ = () => ({});
 const [indApply, renderPlanLines, renderIfInfo, renderPlanIf, amtLayout] = Array(5).fill(noop);
-const indReady = () => true, biasParse = (rows) => rows.split('\\n');
+const indReady = () => true, biasParse = (rows) => rows.split('\\n'), indSym = (key, sym = S.symbol) => sym;
 /*APP*/
 (async () => {
   // the socket comes back: loadInd asks; another device saves the TPO's ticks and ES's level lines meanwhile
@@ -48,7 +48,7 @@ const indReady = () => true, biasParse = (rows) => rows.split('\\n');
   console.log(JSON.stringify({ ind, ifs }));
 })();
 """
-BROADCAST_PARTS = ["indCache", "indHeard", "loadInd", "indSymbolSaved", "indSaved", "ifHeard", "ifRequest", "onMessage"]
+BROADCAST_PARTS = ["indCache", "indHeard", "loadInd", "indSymbolSaved", "indSaved", "ifHeard", "replayUntil", "ifRequest", "onMessage"]
 
 
 @needs_node

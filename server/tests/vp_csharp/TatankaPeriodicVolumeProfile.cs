@@ -1,6 +1,9 @@
-// Tatanka Periodic Volume Profile 1.0.0 | NinjaTrader 8.1
+// Copyright (c) 2026 Tatanka Trading LLC.
+// This Source Code Form is subject to the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, obtain one at https://mozilla.org/MPL/2.0/.
+// Tatanka Periodic Volume Profile v1.0.1 for NinjaTrader 8
 // Chart-only. One-minute source bars; uniform estimated volume across each bar's price ticks.
-// See TatankaPeriodicVolumeProfile-Guide.md for setup and calculation differences.
+// Guide (setup, calculation, TradingView differences): https://github.com/TatankaTrading/tatanka-indicators/blob/main/docs/Other-Indicators-Guide.md#periodic-volume-profile
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -725,60 +728,3 @@ namespace TatankaPvpCore
     }
 }
 // END STANDALONE PERIODIC PROFILE CORE
-
-#region NinjaScript generated code. Neither change nor remove.
-
-namespace NinjaTrader.NinjaScript.Indicators
-{
-	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
-	{
-		private TatankaPeriodicVolumeProfile[] cacheTatankaPeriodicVolumeProfile;
-		public TatankaPeriodicVolumeProfile TatankaPeriodicVolumeProfile()
-		{
-			return TatankaPeriodicVolumeProfile(Input);
-		}
-
-		public TatankaPeriodicVolumeProfile TatankaPeriodicVolumeProfile(ISeries<double> input)
-		{
-			if (cacheTatankaPeriodicVolumeProfile != null)
-				for (int idx = 0; idx < cacheTatankaPeriodicVolumeProfile.Length; idx++)
-					if (cacheTatankaPeriodicVolumeProfile[idx] != null &&  cacheTatankaPeriodicVolumeProfile[idx].EqualsInput(input))
-						return cacheTatankaPeriodicVolumeProfile[idx];
-			return CacheIndicator<TatankaPeriodicVolumeProfile>(new TatankaPeriodicVolumeProfile(), input, ref cacheTatankaPeriodicVolumeProfile);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
-{
-	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
-	{
-		public Indicators.TatankaPeriodicVolumeProfile TatankaPeriodicVolumeProfile()
-		{
-			return indicator.TatankaPeriodicVolumeProfile(Input);
-		}
-
-		public Indicators.TatankaPeriodicVolumeProfile TatankaPeriodicVolumeProfile(ISeries<double> input )
-		{
-			return indicator.TatankaPeriodicVolumeProfile(input);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.Strategies
-{
-	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
-	{
-		public Indicators.TatankaPeriodicVolumeProfile TatankaPeriodicVolumeProfile()
-		{
-			return indicator.TatankaPeriodicVolumeProfile(Input);
-		}
-
-		public Indicators.TatankaPeriodicVolumeProfile TatankaPeriodicVolumeProfile(ISeries<double> input )
-		{
-			return indicator.TatankaPeriodicVolumeProfile(input);
-		}
-	}
-}
-
-#endregion

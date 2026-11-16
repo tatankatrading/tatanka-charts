@@ -71,7 +71,10 @@ await tP.runAll();
 const w = srv.get('main');
 out({{ tabs: w.data.keys.chartTabs, by: w.by, btn: P.els['ws-btn'].textContent, toasts: P.toasts, desktop: D.toasts }});""")
     assert out["tabs"] == "[ES 5m, CL 15m]" and out["by"] == "desktop"
-    assert out["btn"] == "▦ Main •" and out["toasts"] == ["Main was changed on another device: ▦ → Load the newer one"]
+    # (r20: the change it makes then is said once not to be saved, with what keeps it)
+    assert out["btn"] == "▦ Main •" and out["toasts"] == [
+        "Main was changed on another device: ▦ → Load the newer one",
+        "Not saved: Main was changed on another device. ▦ → Save keeps this device's; clicking it in the list loads the newer one"]
     assert out["desktop"] == []
 
 
@@ -268,4 +271,4 @@ ctx.dlg.edit = { id: 'old', kind: 'ind' };
 const c = submit(), d = submit();
 await drain(); await c; await d;
 out({ created, edited: calls, ok: els['#al-ok'].disabled });""")
-    assert out == {"created": ["POST /api/alerts"], "edited": ["POST /api/alerts", "DELETE /api/alerts/old"], "ok": False}
+    assert out == {"created": ["POST /api/alerts"], "edited": ["POST /api/alerts"], "ok": False}

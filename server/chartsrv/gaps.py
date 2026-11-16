@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Tatanka Trading LLC.
 # This Source Code Form is subject to the Mozilla Public License, v. 2.0.
 # If a copy of the MPL was not distributed with this file, obtain one at https://mozilla.org/MPL/2.0/.
-"""Tatanka Gap Analysis v1.0.0, ported from the NinjaTrader 8 source
+"""Tatanka Gap Analysis v1.1.0, ported from the NinjaTrader 8 source
 (tatankatrading/tatanka-indicators, ninjatrader/TatankaGapAnalysis.cs, the ENGINE_BEGIN..ENGINE_END part).
 
 GapEngine mirrors the C# GapEngine statement for statement and keeps its names: RTH opening gaps against
@@ -10,13 +10,14 @@ by index with its END time in Chicago, as NinjaTrader stamps it; calling it agai
 bar grows (Calculate.OnPriceChange) is what the C# does in real time. Drawing and alerts live elsewhere."""
 from datetime import datetime, timedelta
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DMIN = datetime.min
 DAY = timedelta(days=1)
 ONE_TICK = timedelta(microseconds=1)    # DateTime.AddTicks(-1): any step below a second gives the same answer
 
-# The settings that change what is computed, with the NinjaTrader defaults and [Range] limits.
-DEFAULTS = {"RthStart": 83000, "RthEnd": 150000, "MinimumGapPoints": 0.0}
+# The settings that change what is computed, with the NinjaTrader defaults and [Range] limits. UseInstrumentHours (v1.1.0):
+# the RTH times at the instrument's own regular hours (gaps_service.own_hours), or as typed on every instrument.
+DEFAULTS = {"RthStart": 83000, "RthEnd": 150000, "MinimumGapPoints": 0.0, "UseInstrumentHours": True}
 
 
 def settings(overrides: dict | None) -> dict:
@@ -24,7 +25,10 @@ def settings(overrides: dict | None) -> dict:
     for k, v in (overrides or {}).items():
         if k not in DEFAULTS:
             raise ValueError(f"unknown gap setting {k}")
-        if k == "MinimumGapPoints":
+        if k == "UseInstrumentHours":
+            if not isinstance(v, bool):
+                raise ValueError("UseInstrumentHours must be true or false")
+        elif k == "MinimumGapPoints":
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < 1e9:
                 raise ValueError("MinimumGapPoints must be 0 or more")
             v = float(v)

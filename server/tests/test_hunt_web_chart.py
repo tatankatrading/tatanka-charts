@@ -45,9 +45,21 @@ def app_lines(first: str, last: str) -> str:
     return "\n".join(APP[start:next(i for i in range(start, len(APP)) if APP[i].startswith(last)) + 1])
 
 
+# The HTF EMA's state is per one on the chart (S.hx[key], hemaOf): for the tests written on its single one, S.hema (the
+# server's answer), S.hemaVals and S.hemaSet stand for the first one's. Goes before /*APP*/, with "hemaEach" in the parts.
+HEMA_SHIM = """
+const hemaH = { busy: false, again: false, error: '', asked: 0, failed: 0, noBars: false, start: null, dueAsked: null, gen: 0,
+  keep: { live: new Map(), call: null, last: null, stamped: false },
+  get data() { return S.hema; }, set data(v) { S.hema = v; }, get vals() { return S.hemaVals; }, set vals(v) { S.hemaVals = v; },
+  line: typeof hemaLine !== 'undefined' ? hemaLine : { applyOptions() {}, setData() {}, update() {} } };
+const hemaOf = () => hemaH, hemaSetOf = () => S.hemaSet, instKeys = () => ['hema'];
+S.hx = { hema: hemaH };
+"""
+
+
 def run_app(parts: list[str], js: str):
     """Runs js in node with the named parts of app.js where it says /*APP*/; what it logs last is the result (JSON)."""
-    src = js.replace("/*APP*/", "\n".join(app_part(p) for p in parts))
+    src = js.replace("/*APP*/", (HEMA_SHIM if "hemaEach" in parts else "") + "\n".join(app_part(p) for p in parts))
     r = subprocess.run(["node", "-e", src], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout.strip().split("\n")[-1])
@@ -257,7 +269,7 @@ let asked = 0;
 const S = { st: { fp: 'bidask' }, cs: {}, bars: [{ t: 1, seq: 1 }, { t: 2, seq: 2 }], fp: new Map([[1, 'whole'], [2, 'part']]) };
 const toPoints = () => [{}, {}], candles = { update() {} }, vol = { update() {} }, altSeries = null, BAR_CAP = 20000, anchorMs = () => null;
 const fpSchedule = () => { asked += 1; };
-const [updateStudyBar, indsUpdate, dsmaTick, hemaTick, cmpTail, legend, header] = Array(7).fill(() => {});
+const [updateStudyBar, indsUpdate, dsmaTick, hemaTick, vpLiveTick, cmpTail, legend, header] = Array(8).fill(() => {});
 /*APP*/
 applyBars({ bars: [{ t: 2, seq: 2 }, { t: 3, seq: 3 }, { t: 3, seq: 4 }] });   // bar 2 finished, 3 too, 4 forming
 console.log(JSON.stringify({ kept: [...S.fp.keys()], asked }));""")

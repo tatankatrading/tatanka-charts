@@ -46,8 +46,8 @@ docker compose exec chart python -m chartsrv.check
 Values saved here win over `.env`; **Use .env** forgets the saved one, **Clear** turns a key or URL off whatever
 `.env` says. Keys, tokens and URLs are kept in the server's database (`chart.db`), never shown again (the NinjaTrader
 token only goes into the add-on downloaded from its card) and never logged. The trade feed stays the simulator when
-`.env` says `CHART_FEED=sim`, so invented and real trades never mix. The NinjaTrader port is set in `.env` and
-`docker-compose.yml` (Docker publishes it). Read-only everywhere: the app never sends an order to any of them.
+`.env` says `CHART_FEED=sim`, so invented and real trades never mix. The NinjaTrader port (`CHART_NT_PORT`, 8801) is set in `.env`
+and `docker-compose.yml` (Docker publishes it: change both). Read-only everywhere: the app never sends an order to any of them.
 
 ## Instruments
 
@@ -81,7 +81,9 @@ A change applies at once (no restart). The list shows the contract each one is o
 `Contracts` list are only a starting point; any month NinjaTrader knows will do. A roll sends a "Contract roll"
 message to Discord/phone, and `/api/health` shows the contract each symbol is on. Bars before a roll are not adjusted, so the chart steps by
 the spread between the contracts at the roll (as NinjaTrader's unadjusted merge does). That step crosses no line or
-level for the alerts: they start again from the new contract's first trade.
+level for the alerts: price, level, study and indicator alerts start again from the new contract's first trade, the
+AMT Toolkit's alerts 15 minutes after the roll, and a gap from the old contract's RTH close to the new one's open is
+not alerted (nor its fill), though Gap Analysis still draws it.
 
 Each trade once: the add-on has a market-data subscription of its own per contract, as NinjaTrader's add-on
 framework has it (an earlier version listened on the instrument's shared one, and a day forwarded that way came out
@@ -130,7 +132,13 @@ What it replaces is saved first as a `-before-restore` backup. The market data s
 it: whether the simulator was left, the setup guide, the contracts and their rolls. One exception: a backup from an
 install off the simulator (it had left it, or ran NinjaTrader from `.env`), restored onto one still on it (a new PC's
 fresh install), leaves the simulator at the next start, as **Leave the simulator** does, so the restored alerts never
-fire at its invented prices.
+fire at its invented prices. The prices it made up for the stock and formula alerts go with the restore.
+
+The login stays too when this install has had one: its password (or none, if the login was turned off since, as when
+you forgot it), signed-in devices and app-notification devices are left as they are. So a device signed out since the
+backup stays signed out, and app notifications removed since stay removed. An install that never had a password (a new
+PC's fresh install) takes the backup's password, with its signed-in and notification devices.
+
 `docker compose exec chart python -m chartsrv.backup full tatanka-full.db` copies the whole database, market data too,
 into the backups folder (a name alone goes there; it can be large).
 

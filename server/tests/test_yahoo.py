@@ -65,7 +65,9 @@ def test_sources_are_ranked(tmp_path, monkeypatch):
     assert m.quotes["ES1!"]["last"] == 6900.0 and m.quotes["ES1!"]["src"] == "ninjatrader"
     clock[0] += mk.QUOTE_HOLD_MS                                       # NinjaTrader went quiet
     m.on_quote("ES1!", 6890.0, 6850.0, 10, source="yahoo", at=clock[0] - 600_000)
-    assert m.quotes["ES1!"]["src"] == "yahoo" and m.quotes["ES1!"]["ts"] == clock[0] - 600_000
+    assert m.quotes["ES1!"]["src"] == "ninjatrader"   # older than NinjaTrader's last (r20-b1): not put back
+    m.on_quote("ES1!", 6890.0, 6850.0, 10, source="yahoo", at=clock[0] - 60_000)
+    assert m.quotes["ES1!"]["src"] == "yahoo" and m.quotes["ES1!"]["ts"] == clock[0] - 60_000
     m.on_quote("ES1!", 6901.0, 6850.0, 10, source="ibkr")                # a better source takes it back at once
     assert m.quotes["ES1!"]["src"] == "ibkr" and not m.quote_wanted("ES1!", "yahoo") and m.quote_wanted("ES1!", "ninjatrader")
 

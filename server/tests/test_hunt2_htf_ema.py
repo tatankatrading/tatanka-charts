@@ -102,8 +102,8 @@ def test_htfema_endpoint_says_when_the_next_calendar_bar_opens(client, monkeypat
 
 DRAW_JS = """
 const vm = require('vm'), fs = require('fs'), ctx = {};
-vm.runInNewContext(fs.readFileSync(%s, 'utf8') + ';this.f=htfEmaValues;', ctx);
-const htfEmaValues = ctx.f;
+vm.runInNewContext(fs.readFileSync(%s, 'utf8') + ';this.f=htfEmaValues;this.live=htfEmaLive;', ctx);
+const htfEmaValues = ctx.f, htfEmaLive = ctx.live;
 const hemaLine = { applyOptions() {}, setData() {} }, hemaStyle = () => ({}), renderHemaInfo = () => {};
 const timeOf = (b) => b.t, isTime = () => S.spec !== '2000t', specSeconds = () => 604800;
 // weeks open at 0, 100, 200 and 300 (ms here); HTF bars close at 30, 60 and 90 (the week's last session's), ...
@@ -129,7 +129,7 @@ console.log(JSON.stringify({
 @needs_node
 def test_htf_ema_draw_takes_the_next_bar_from_replay_or_the_server():
     js = DRAW_JS % json.dumps(str(WEB / "studies.js"))
-    out = run_app(["hemaPeriodMs", "hemaCal", "hemaAfter", "hemaPoint", "hemaDraw"], js)
+    out = run_app(["hemaEach", "hemaPeriodMs", "hemaCal", "hemaStamped", "hemaAfter", "hemaPoint", "hemaVals", "hemaDraw"], js)
     # the week opening at 100: HTF bars to 160 (190 closes with it); a tick bar closes when the next opens (200)
     assert out == {"replay": 5, "replayMore": 5, "tickReplay": 6, "over": 5, "forming": 9}
 
@@ -139,7 +139,8 @@ def test_htf_ema_payload_says_when_the_forming_htf_bar_closes():
     d = htfema.compute(EXACT, m1, 5, 252, m1[-600].t, m1[-1].t + 60_000)
     assert d["htf"][-1][0] == epoch_ms(datetime(2026, 10, 16, 12, 0))   # the 11:00 hour, closed
     assert d["due"] == epoch_ms(datetime(2026, 10, 16, 13, 0))           # the 12:00 hour closes at 13:00
-    assert htfema.compute(EXACT, m1, 5, 252, m1[-600].t, epoch_ms(datetime(2026, 10, 17, 12, 0)))["due"] is None   # Saturday
+    week = synth(10, 2, datetime(2026, 10, 16, 16, 0))                   # to Friday's close
+    assert htfema.compute(EXACT, week, 5, 252, week[-600].t, epoch_ms(datetime(2026, 10, 17, 12, 0)))["due"] is None   # Saturday
 
 
 TICK_JS = """
@@ -176,5 +177,5 @@ const at = async (t, closed = false) => { clock = t; hemaTick(closed); await new
 
 @needs_node
 def test_htf_ema_forming_bar_asks_again_when_an_htf_bar_closes_inside_it():
-    out = run_app(["hemaBusy", "hemaRequest", "hemaTick"], TICK_JS)
+    out = run_app(["hemaEach", "hemaRequest", "hemaTick"], TICK_JS)
     assert out == {"inside": 1, "htfClosed": 2, "minute": 2, "later": 3, "again": 3, "smooth": 3, "replay": 3, "closed": 4}

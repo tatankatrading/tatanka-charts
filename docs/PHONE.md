@@ -84,7 +84,13 @@ $99/year developer account; it would add nothing the installed app lacks. A Wind
 **Connections > Login**: set a password (8+ characters) and the app asks for it on every phone and PC once; each
 stays signed in (180 days, renewed as you use it, the iPhone app too). The Login card lists the signed-in devices:
 right-click one (long-press) to sign it out, **Sign out everywhere else** all but this one, **Change password** signs every other device out.
-Ten wrong passwords in ten minutes and it waits ten minutes. Without a password a fresh install lets only the PC
+A device signed out gets no more app notifications either: they go with its sign-in, and it turns them on again after
+it signs in. Ones turned on while no password was set, or with an older version of the app, join the device's sign-in
+the next time it opens the app signed in. Until then signing it out leaves them, so for a lost phone also remove it
+under **App notifications**. Turning the login off leaves them all as they are.
+Ten wrong passwords in ten minutes and it waits ten minutes. Thirty from all addresses together and every other
+device's sign-in waits too, but the PC itself still signs in, and a signed-in device can still change the password
+(each still has the limit of ten). Without a password a fresh install lets only the PC
 itself in (README, Secure by default), and an older one is open to whoever reaches it, which over Tailscale is only
 your own devices; another site's page open on the PC can't use it either (the app
 answers only to its own addresses: the PC's, and its `tailscale serve` name, which it takes as this PC's the first time
@@ -102,3 +108,6 @@ Forgot it, on the PC (login off, every device signed out):
 ```
 docker compose exec chart python -m chartsrv.auth off
 ```
+
+Then set a new one in the app: every other device signs in again, and turns its app notifications on again. The
+device you set it on keeps its own.

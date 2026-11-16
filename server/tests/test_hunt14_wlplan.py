@@ -210,8 +210,12 @@ Object.defineProperty(S, 'llSet', { get: () => LINES[S.symbol] });
 const api = async (m, p) => ({ origin: 'paste', count: 3, date: '2026-10-30', paste: SAVED[p.split('/').pop()], error: '' });
 const indDlg = { refresh: noop }, levelLinesOf = () => [], watch = { setDoc: noop, markActive: noop }, chartSym = (s) => s, TK_MULTI = false;
 const drawings = { state: {} }, workspaces = null, calOpen = () => false, isExtSym = () => false, indReady = () => true;
+const bondTick = () => 0, inst = () => ({ tick_size: 0.25 });   // no Treasury here: the range as stored
+const llShared = () => S.symbol, indSym = (key, sym = S.symbol) => sym;
+const instKeys = () => ['lines'], llPrimOf = () => llPrim;
 const [renderRth, applyPriceFormat, indsBuild, indSets, applyStudyVisibility, drawLevels, renderAmtMenu, versionCheck, updateNote, tabSync,
-  buildHeader, renderAlerts, renderEvents, moveSharedOut, loadInd, calLoad, tplLoad, shareLoad, setupCheck, cellPost, notifyStatus, subscribe] = Array(22).fill(noop);
+  buildHeader, renderAlerts, renderEvents, moveSharedOut, loadInd, calLoad, tplLoad, shareLoad, setupCheck, cellPost, notifyStatus, pushHello,
+  subscribe] = Array(23).fill(noop);
 const loadAmtServer = async () => {}, loadGapAlerts = async () => {}, llPrim = { update: noop }, rangePrim = llPrim, alertPrim = llPrim;
 const journalOpen = () => false, journalLoad = noop;   // the Journal's reconnect reload (another part of hello)
 let indHeard = null, tapeWant = '';
@@ -251,8 +255,8 @@ def test_the_plan_tab_keeps_unsaved_levels_and_level_lines_when_the_page_reconne
     """A pasted levels line and a Level Lines range and levels typed, not saved, the cursor out of the box: ES's ML
     levels published and a reconnect (hello) leave them (both put ES's saved ones back); a switch to NQ shows NQ's,
     and NQ's newly published levels show in a box with no edits."""
-    out = run_app(["markDirty", "fillBox", "LV_ORIGIN", "loadPlanLevels", "renderPlanLevels", "LL_BOXES", "renderPlanLines",
-                   "onSymbolChanged", "onMessage", "SPEC_RE"], PLAN_JS)
+    out = run_app(["markDirty", "fillBox", "LV_ORIGIN", "loadPlanLevels", "renderPlanLevels", "LL_BOXES", "llRangeShown", "renderPlanLines",
+                   "llLeft", "renderLlLeft", "onSymbolChanged", "onMessage", "SPEC_RE"], PLAN_JS)
     drafts = [["2026-11-02, 6900, 6925, 6880", True], ["6950", True], ["6850|POC, 6875|VAH", True]]
     assert out["published"] == drafts
     assert out["reconnected"] == drafts

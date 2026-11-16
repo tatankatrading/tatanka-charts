@@ -97,6 +97,18 @@ const VP_KINDS = ['aavp', 'pvp', 'prof'];   // Tatanka Auto Anchored, Periodic a
 const TATANKA_SET = [...NT_CHART_SET, 'tpo', ...VP_KINDS, 'dsma'];   // the Tatanka indicators with NinjaTrader settings
 const STUDY_DEFAULTS = { lv: false, ve: false, vr: false, b1: false, b2: false, b3: false, prof: false, aavp: false, pvp: false, right: 'off', fp: 'off', amtDash: true,
   big: false, fills: true, econ: false, tpo: false, dsma: false, ...Object.fromEntries(NT_CHART_SET.map((k) => [k, true])) };
+// Studies a chart can have several of, as NinjaTrader adds an indicator twice: the first is its own key ('pvp'), the
+// others 'pvp_2' to 'pvp_4', each with its own settings (tabSet), drawing and requests, on and off by S.st as the first.
+// One is there while S.st has its key (instAdd, instRemove). Level Lines 2: its range and levels this chart's own
+// (NinjaTrader's Sharing mode Off), the first's the symbol's.
+const MULTI = ['hema', 'aavp', 'pvp', 'prof', 'lines'];
+const INST_MAX = 4;   // of each
+const INST_RE = /^(hema|aavp|pvp|prof|lines)_([2-9])$/;
+const baseOf = (k) => INST_RE.exec(k)?.[1] ?? k;
+const instNo = (k) => Number(INST_RE.exec(k)?.[2] || 1);
+const instKeys = (base) => [base, ...Object.keys(S.st).filter((k) => INST_RE.test(k) && baseOf(k) === base && instNo(k) <= INST_MAX)
+  .sort((a, b) => instNo(a) - instNo(b))];
+const vpKeys = () => VP_KINDS.flatMap(instKeys);
 const ST_PRESET = 2;   // bumped when the defaults change in a way every device should take once
 let stReset = false;
 function loadStudies() {
@@ -113,6 +125,8 @@ function studiesFrom(st, note = false) {
     st = {};
   }
   if (typeof st.prof === 'string') st.prof = st.prof !== 'off';   // the ETH / RTH session profiles became the Session Volume Profile
+  delete st.undefined;   // saved by the AMT Toolkit's Profile buttons before they were told apart from the studies'
+  for (const k of Object.keys(st)) if (INST_RE.test(k) && (typeof st[k] !== 'boolean' || instNo(k) > INST_MAX)) delete st[k];
   return { ...STUDY_DEFAULTS, ...st, _preset: ST_PRESET };
 }
 const S = {
@@ -225,28 +239,33 @@ function tabSetSave(key, d) {
 }
 // Apply to all charts (the Indicators dialog), after the starting settings were set: no chart keeps its own for this
 // study, so every one shows them. This chart's tabs and shared set here; the layout's charts and every other workspace
-// through layout.js. Resolves to how many other workspaces took it.
-async function studyAll(key) {
+// through layout.js. freeze (applyAll's, a study that has others of it): what the starting settings were and are now,
+// so each other chart's HTF EMA 2 keeps what it shows (tkInstFreeze; this chart's did in applyAll). Resolves to how
+// many other workspaces took it.
+async function studyAll(key, freeze = null) {
   if (TK_CELL !== null) {   // a chart of a layout: the page around it does the rest
     studyAllHere(key);
-    window.parent.postMessage({ tk: true, type: 'all', key: 'study', study: key }, location.origin);
+    window.parent.postMessage({ tk: true, type: 'all', key: 'study', study: key, freeze }, location.origin);
     return 0;
   }
-  if (TK_MULTI) { const { [key]: _, ...rest } = S.cellSet; S.cellSet = rest; indSets(); renderAmtMenu(); } else studyAllHere(key);
-  return workspaces ? workspaces.studyAll(key) : 0;
+  if (TK_MULTI) { S.cellSet = tkStudyOmit(S.cellSet, key); indSets(); renderAmtMenu(); } else studyAllHere(key);
+  return workspaces ? workspaces.studyAll(key, -1, freeze) : 0;
 }
 function cellPart(part, v) {   // the page around the charts: its Studies menu edited this chart's
   if (part === 'inds' && Array.isArray(v)) { S.indCfg = v.map(indClean).filter(Boolean).slice(0, IND_MAX); indsChanged(); }
   else if (part === 'layers' && Array.isArray(v)) setLayers(v);
   else if (part === 'hidden' && v && typeof v === 'object' && !Array.isArray(v)) { S.stHidden = { ...v }; saveHidden(); renderStudiesMenu(); }
 }
-function studyAllHere(key) {
+function studyAllHere(key, freeze = null) {   // freeze: another chart's Apply to all (layout.js 'indall')
+  instFreeze(key, freeze);
   let n = 0;
-  for (const t of S.tabs) {
-    if (t.own?.set && key in t.own.set) { const { [key]: _, ...rest } = t.own.set; t.own = { ...t.own, set: rest }; n += 1; }
+  for (const t of S.tabs) {   // each keeps what is its own whatever the starting settings (tkStudyOmit)
+    const set = tkStudyOmit(t.own?.set, key);
+    if (set !== t.own?.set) { t.own = { ...t.own, set }; n += 1; }
   }
   if (n) saveTabs();
-  if (key in S.sharedSet) { const { [key]: _, ...rest } = S.sharedSet; S.sharedSet = rest; local.set('indSet', JSON.stringify(rest)); }
+  const shared = tkStudyOmit(S.sharedSet, key);
+  if (shared !== S.sharedSet) { S.sharedSet = shared; local.set('indSet', JSON.stringify(shared)); }
   if (key === 'amt') { renderAmtMenu(); amtFollow(); } else indApply();
   indDlg.refresh();
   cellPost('state');
@@ -382,17 +401,23 @@ const clockOf = (tz) => inputClocks.get(tz) || inputClocks.set(tz, inputClock(tz
 const exToZone = (hhmm, tz = TZ_EXCHANGE) => (ax.zone === tz ? hhmm : ax.hm.format(clockOf(tz).toMs(`${clockOf(tz).toInput(Date.now()).slice(0, 10)}T${hhmm}`)));
 const zoneTimes = (v, tz = TZ_EXCHANGE) => `${v.split('-').map((x) => exToZone(x, tz)).join('-')} ${ax.short}`;   // "08:30-15:00" -> "09:30-16:00 ET"
 // An indicator's "HHmm-HHmm" session, written for ES/NQ's 08:30-15:00 CT, at this instrument's own regular hours, as
-// the server runs it (sessions.rth_mover): a time nearer the open moves with the open, one nearer the close with it.
+// the server runs it with Use Instrument Hours on (sessions.rth_mover, move_window): a time nearer the open moves with the
+// open, one nearer the close with it; two that would land on the same minute or past each other (11:00-12:00 on CL) move
+// as their middle does.
 function ownHours(v) {
   const r = inst().rth, hm = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(-2));
   if (!r || typeof v !== 'string' || !/^\d{3,4}-\d{3,4}/.test(v)) return v;
   const [o, c] = r.map(hm);
   if (o === 510 && c === 900) return v;
+  const move = (m) => (m < 420 || m >= 960 ? m : m + (Math.abs(m - 510) <= Math.abs(m - 900) ? o - 510 : c - 900));
   const [rng, ...days] = v.split(':');
-  return [rng.split('-').map((e) => {
-    const m = hm(e.padStart(4, '0')), n = m < 420 || m >= 960 ? m : m + (Math.abs(m - 510) <= Math.abs(m - 900) ? o - 510 : c - 900);
-    return `${String(Math.floor(n / 60)).padStart(2, '0')}${String(n % 60).padStart(2, '0')}`;
-  }).join('-'), ...days].join(':');
+  const [a, b] = rng.split('-').map((e) => hm(e.padStart(4, '0')));
+  let [x, y] = [move(a), move(b)];
+  if (a !== b && ((a < b) !== (x < y) || x === y)) {
+    const mid = (a + Math.floor((((b - a) % 1440) + 1440) % 1440 / 2)) % 1440, d = move(mid) - mid;
+    [x, y] = [(a + d + 1440) % 1440, (b + d + 1440) % 1440];
+  }
+  return [[x, y].map((n) => `${String(Math.floor(n / 60)).padStart(2, '0')}${String(n % 60).padStart(2, '0')}`).join('-'), ...days].join(':');
 }
 function zoneTexts() {   // the page's fixed texts: [data-ct] holds exchange times, [data-zone] the zone's name
   document.querySelectorAll('[data-ct]').forEach((e) => { e.textContent = zoneTimes(e.dataset.ct); });
@@ -495,7 +520,8 @@ chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
 // ---- chart settings (per device): bar style, colors, grid, session breaks, crosshair, price line, countdown ------
 const CS_DEFAULTS = { style: 'candles', up: NT.up, down: NT.down, doji: NT.doji, bg: NT.bg, volume: true, priceOnly: false, priceLine: true,
   countdown: true, gridLines: 'both', gridColor: NT.grid, textColor: NT.text, xhairColor: '#9598a1', fontSize: 12, watermark: false,
-  sessions: true, crosshair: 'normal', rightBars: 6, plAuto: true, plColor: '#ffffff', plStyle: 'dashed', plWidth: 1, plOpacity: 100, dataWin: false };
+  sessions: true, crosshair: 'normal', rightBars: 6, plAuto: true, plColor: '#ffffff', plStyle: 'dashed', plWidth: 1, plOpacity: 100, dataWin: false,
+  barsFront: true };   // the price bars in front of every study (layerPlan)
 const LW_STYLE = { solid: 0, dotted: 1, dashed: 2, large: 3 };
 // Background, grid and axis text together, as the chart themes in NinjaTrader and TradingView.
 const CS_THEMES = { nt: { bg: NT.bg, gridColor: NT.grid, textColor: NT.text }, black: { bg: '#000000', gridColor: '#1a1a1a', textColor: '#a0a0a0' },
@@ -603,12 +629,19 @@ function chartLayout() {
   });   // the right margin: amtLayout (it never goes below the setting)
   vol.applyOptions({ visible: S.cs.volume });
   axisStack.height = Math.ceil(S.cs.fontSize * 1.5) + 1;   // the axis tags' height at this font, for stacking them
+  axisStack.anchor = () => {   // the live price's label (and the countdown under it): the other tags go around it
+    // the candles' label, or the Bars or Line style's (theirs then: the same price on the same scale)
+    const shown = candles.options().lastValueVisible || (!!altSeries && altSeries.options().visible && altSeries.options().lastValueVisible);
+    if (!S.lastBar || !shown) return null;
+    const y = candles.priceToCoordinate(S.lastBar.c);
+    return y == null ? null : [y, S.cs.countdown && isTime() && !S.replay && !S.ext ? 2 : 1];
+  };
 }
 // Scale on price only: other series on the price pane stop counting toward its auto-scale.
 const keepScale = (base) => base();
 function priceOnlyLayout() {
   for (const s of chart.panes()[0].getSeries()) {
-    if (s === candles || s === vol || s === altSeries || s === hemaLine) continue;   // the HTF EMA: never (above)
+    if (s === candles || s === vol || s === altSeries || hemaLines().includes(s)) continue;   // the HTF EMA: never (above)
     s.applyOptions({ autoscaleInfoProvider: S.cs.priceOnly ? () => null : keepScale });
   }
 }
@@ -727,9 +760,16 @@ S.ind = (() => { try { return JSON.parse(local.get('indCache', '')) || null; } c
   || { schema: {}, overrides: {}, symbols: {}, per_symbol: {} };
 const indReady = (key) => !!S.ind.schema[key];
 const indDefaults = (key) => Object.fromEntries((S.ind.schema[key]?.settings || []).map((x) => [x.name, x.default]));
-function indValues(key, sym = S.symbol) {
-  const own = S.ind.symbols[key]?.[sym] || {}, tab = tabSet()[key] || {};
-  const v = { ...indDefaults(key), ...(S.ind.overrides[key] || {}), ...own, ...tab };   // this tab's settings last
+// Whose per-symbol values a symbol's chart has: Level Lines on a micro, its full-size contract's (MES: ES's), as
+// NinjaTrader's Sharing mode shares them (the server's SHARE).
+const indSym = (key, sym = S.symbol) => S.ind.share?.[baseOf(key)]?.[sym] || sym;
+function indValues(key, sym = S.symbol) {   // key: a study's, or another of it ('pvp_2'): the same starting settings
+  // Level Lines 2 and on: the range and levels are this chart's (Sharing Off), not the symbol's; the first one's are the
+  // symbol's only, never the chart's
+  const b = baseOf(key), mine = b === 'lines' && key !== b, own = mine ? {} : S.ind.symbols[b]?.[indSym(b, sym)] || {};
+  const symNames = mine ? [] : S.ind.per_symbol?.[b] || [];
+  const tab = Object.fromEntries(Object.entries(tabSet()[key] || {}).filter(([n]) => !symNames.includes(n)));
+  const v = { ...indDefaults(b), ...(S.ind.overrides[b] || {}), ...own, ...tab };   // this tab's settings last
   if (key === 'ifthen' && !own.InstrumentLabel) v.InstrumentLabel = sym;   // NinjaTrader's "ES" is per chart
   return v;
 }
@@ -742,27 +782,47 @@ let gapDays = (() => {   // the gap history: not a NinjaTrader setting (it scans
 function indSets() {
   S.tpoSet = indValues('tpo');
   S.gapSet = { ...indValues('gap'), days: gapDays };
-  S.hemaSet = indValues('hema');
+  S.hemaSets = Object.fromEntries(instKeys('hema').map((k) => [k, indValues(k)]));
+  S.hemaSet = S.hemaSets.hema;
   S.ifSet = indValues('ifthen');
-  S.llSet = indValues('lines');
-  S.vpSet = Object.fromEntries(VP_KINDS.map((k) => [k, indValues(k)]));
+  S.llSets = Object.fromEntries(instKeys('lines').map((k) => [k, indValues(k)]));
+  S.llSet = S.llSets.lines;
+  S.vpSet = Object.fromEntries(vpKeys().map((k) => [k, indValues(k)]));
   S.dsmaSet = indValues('dsma');
 }
 indSets();
 
 // ---- Tatanka HTF EMA: OnBarUpdate runs here on the chart's bars (studies.js), the server supplies the
-// higher-timeframe EMA and the chart EMA before the first bar --------------------------------------------
-S.hema = null;
-S.hemaVals = [];
+// higher-timeframe EMA and the chart EMA before the first bar. Each one on the chart ('hema', 'hema_2'...) has its own
+// settings (S.hemaSets), line, answer and requests: S.hx[key] (hemaOf) ------------------------------------------------
+S.hx = {};
 const LW_DASH = { Solid: 0, Dot: 1, Dash: 2, DashDot: 3, DashDotDot: 4 };   // Lightweight's LineStyle
-function hemaStyle() {
-  const p = S.hemaSet.PlotHTFEMA || { color: '#808080', dash: 'Solid', width: 2 };
+const hemaSetOf = (k = 'hema') => S.hemaSets?.[k] || S.hemaSet;
+function hemaStyle(k = 'hema') {
+  const p = hemaSetOf(k).PlotHTFEMA || { color: '#808080', dash: 'Solid', width: 2 };
   return { color: p.color, lineWidth: Math.max(1, Math.round(p.width)), lineStyle: LW_DASH[p.dash] ?? 0 };
 }
-const hemaTitle = () => `HTF EMA(${S.hemaSet.HtfPeriod} ${S.hemaSet.HtfPeriodType},${S.hemaSet.EmaLength})`;
-// Left out of the price auto-scale: a higher timeframe's EMA can sit hundreds of points from price after a big move,
-// and fitting it squashed the candles flat. Off the chart then, it goes off screen.
-const hemaLine = chart.addSeries(L.LineSeries, { ...lineOpts, ...hemaStyle(), lastValueVisible: true, title: '', autoscaleInfoProvider: () => null });
+const hemaTitle = (k = 'hema') => { const o = hemaSetOf(k); return `HTF EMA(${o.HtfPeriod} ${o.HtfPeriodType},${o.EmaLength})`; };
+// One's state: data (the server's answer), vals (its value at each bar), keep (what its live bars keep, htfEmaLive), its
+// line, and its requests (busy, again: asked again once it answers; error; asked and failed: when last asked and when an
+// answer last failed; dueAsked: the answer's due when last asked; noBars: not asked, no bars yet; start: the first bar
+// last asked for; gen: one more at each reset, so an answer asked for before it is dropped). The line is left out of
+// the price auto-scale: a higher timeframe's EMA can sit hundreds of points from price after a big move, and fitting it
+// squashed the candles flat. Off the chart then, it goes off screen.
+function hemaOf(k = 'hema') {
+  return S.hx[k] ??= { data: null, vals: [], keep: htfEmaKeep(S.bars.at(-1)?.t), busy: false, again: false, error: '', asked: 0, failed: 0,
+    dueAsked: null, noBars: false, start: null, gen: 0,
+    line: chart.addSeries(L.LineSeries, { ...lineOpts, ...hemaStyle(k), lastValueVisible: true, title: '', autoscaleInfoProvider: () => null,
+      ...(S.priceFormat ? { priceFormat: S.priceFormat } : {}) }) };
+}
+hemaOf();   // the first one's line: made here, before the studies' below (the series order)
+const hemaLines = () => Object.values(S.hx).map((h) => h.line);
+// A new load: each asks again, and none of the bars ran live (NinjaTrader's historical bars, as after a reload). A reset
+// (one's settings changed, or it was taken off or put back on): NinjaTrader adds it anew, its bars historical too. An
+// answer on its way was asked for before (other settings, or bars that are gone): dropped (gen), else its values would
+// stay on the bars that close before the next answer comes.
+function hemaReset(k) { const h = hemaOf(k); h.data = null; h.keep = htfEmaKeep(S.bars.at(-1)?.t); h.gen++; }
+function hemaClear() { Object.keys(S.hx).forEach(hemaReset); }
 // Daily SMA x4 (below): four plots with price markers (PaintPriceMarkers), and its labels right of the last bar
 S.dsma = null;
 S.dsmaVals = [];
@@ -803,12 +863,30 @@ function applyStudyVisibility() {
   }
   avwap.applyOptions({ visible: anchorMs() != null });
   if (S.layersReady) applyLayers();   // which studies are on decides each one's pass
-  const any = S.st.ve || S.st.vr || VP_KINDS.some((k) => S.st[k]) || S.st.right !== 'off' || S.st.amt || S.st.tpo || S.st.gap || S.st.hema || S.st.dsma || S.st.ifthen || S.st.fp !== 'off' || anchorMs() != null || S.indCfg.length > 0;
+  const any = S.st.ve || S.st.vr || MULTI.some((b) => instKeys(b).some((k) => S.st[k])) || S.st.right !== 'off' || S.st.amt || S.st.tpo || S.st.gap || S.st.dsma || S.st.ifthen || S.st.fp !== 'off' || anchorMs() != null || S.indCfg.length > 0;
   $('#st-btn').classList.toggle('on', !!any);
 }
 
 const anchorKey = () => `anchor:${S.symbol}`;
 function anchorMs() { const v = parseInt(local.get(anchorKey(), ''), 10); return Number.isFinite(v) ? v : null; }
+// An anchor before the bars loaded is loaded back to (applyHistory) when the most a chart holds (OLDER_MAX) can reach
+// it. Minute and longer bars: not when the bars back to it are over that, counted by the clock (5 trading days a week,
+// 23 hours a day or the RTH hours) or at the loaded bars' own pace (a quiet minute has no bar), whichever is fewer, a
+// tenth off for holidays; it then starts at the first bar, with nothing loaded. Seconds bars (a bar only where a trade
+// was), tick, volume, range and Renko bars, or a count short of it: loaded back once. One that ran out of room, or past
+// the stored history, is remembered for this page's life (avwapFar: symbol, timeframe, hours and anchor), so a
+// timeframe switch, tab or reconnect doesn't page back again.
+const avwapFar = new Set();
+function avwapReach(anchor, key) {
+  if (avwapFar.has(key)) return false;
+  const n = S.bars.length;
+  if (!isTime() || S.spec.endsWith('s') || n < 2) return true;
+  const r = S.rth && inst().rth, hm = (s) => +s.slice(0, 2) * 60 + +s.slice(3, 5);
+  const day = r ? (hm(r[1]) - hm(r[0]) + 1440) % 1440 || 1440 : 23 * 60;   // minutes a day
+  const back = S.bars[0].t - anchor, clock = back / (specSeconds(S.spec) * 1000) * (day / 1440) * (5 / 7);
+  const pace = back * (n - 1) / Math.max(1, S.bars[n - 1].t - S.bars[0].t);
+  return n + Math.min(clock, pace) * 0.9 <= OLDER_MAX;
+}
 function drawAvwap() {
   const a = anchorMs();
   // 2D and 3D bars hold a weekend or a holiday as often as not: each one runs to the next one's open (barEnd). An RTH
@@ -1188,60 +1266,108 @@ candles.attachPrimitive(rangePrim);
 // stored 1-minute bars and trades, for every chart of the symbol; their OnRender is ported in studies.js -----------
 S.vp = {};      // kind -> the server's answer (finished profiles kept from earlier answers)
 S.vpErr = {};
+S.vpLive = {};  // AAVP, PVP: kind -> their plots' values on the bars that formed while it ran (vpLiveNote)
 const vpHeld = {};   // kind -> {sym, key, byStart}: the finished profiles held, named in the next request
 const vpBusy = {};
 const vpIntraday = () => /^\d+[smhtvrk]$/.test(S.spec);   // NinjaTrader's IsIntraday: seconds to hours, tick, volume, range, Renko
-function vpBase(k) {
-  if (!S.st[k] || S.ext || !indReady(k) || !S.bars.length) return null;
+function vpBase(k) {   // k: the profile's key ('pvp', or another of it: 'pvp_2'); kind: which profile it is
+  const kind = baseOf(k);
+  if (!S.st[k] || S.ext || !indReady(kind) || !S.bars.length || !S.vpSet[k]) return null;
   const daily = S.spec === '1D';
   let error = S.vpErr[k] || S.vp[k]?.error || '';
-  if (k === 'aavp' && !vpIntraday() && !daily) error = 'Use an intraday chart or a 1 Day chart. The anchor period can still be Year, Quarter, Month, Week, or Session.';
-  if (k === 'pvp' && !vpIntraday()) error = 'Use an intraday chart (for example, 30 or 60 Minute). The profile Period can still be Daily, Weekly, Monthly, or Yearly.';
-  if (k === 'prof' && !vpIntraday()) error = 'Use an intraday chart (for example, 30 Minute).';
-  return { kind: k, d: S.vp[k]?.symbol === S.symbol ? S.vp[k] : null, set: S.vpSet[k], bars: S.bars, tick: inst().tick_size,
-    periodMs: isTime() && !calSpec() ? specSeconds(S.spec) * 1000 : 0, daily, error, fmt: px };
+  if (kind === 'aavp' && !vpIntraday() && !daily) error = 'Use an intraday chart or a 1 Day chart. The anchor period can still be Year, Quarter, Month, Week, or Session.';
+  if (kind === 'pvp' && !vpIntraday()) error = 'Use an intraday chart (for example, 30 or 60 Minute). The profile Period can still be Daily, Weekly, Monthly, or Yearly.';
+  if (kind === 'prof' && !vpIntraday()) error = 'Use an intraday chart (for example, 30 Minute).';
+  return { kind, key: k, d: S.vp[k]?.symbol === S.symbol ? S.vp[k] : null, set: S.vpSet[k], bars: S.bars, tick: inst().tick_size,
+    periodMs: isTime() && !calSpec() ? specSeconds(S.spec) * 1000 : 0, barEnd: barCloseMs, daily, error, fmt: pxTick };
 }
-// Texts stacked: the top messages below the legend, one NinjaTrader text box (46 px) apart; the bottom notices upward.
+// Texts stacked: the top messages below the legend, one NinjaTrader text box (46 px) apart; the bottom notices upward,
+// each 20 px above the one before's top line (one wrapped on a narrow chart goes up from where it is written, its last
+// line reaching 16 px down), none over the AMT Toolkit's warning (64 px up, its lines down from there): one that would
+// be goes above it.
+let vpMeasure = null;
 function vpState(k) {
   const st = vpBase(k);
   if (!st) return null;
-  let msgY = Math.max(35, legendBox().bottom + 4), noticeY = 23;
-  for (const j of VP_KINDS) {
-    if (j === k) break;
-    const o = vpBase(j);
-    if (o && vpMessage(o)) msgY += 46;
-    else if (o && vpNotice(o)) noticeY += 20;
-  }
   const bar = $('#draw-bar'), r = bar && !bar.hidden ? bar.getBoundingClientRect() : null;   // the drawing tools cover the left edge
-  return { ...st, msgY, noticeY, textX: r && r.width ? Math.max(12, r.right - $('#chart-wrap').getBoundingClientRect().left + 8) : 12 };
+  const textX = r && r.width ? Math.max(12, r.right - $('#chart-wrap').getBoundingClientRect().left + 8) : 12;
+  vpMeasure ||= document.createElement('canvas').getContext('2d');
+  vpMeasure.font = VP_FONT;   // as drawVp wraps them
+  const w = Math.max(100, chart.timeScale().width() - textX - 12), up = (n) => (vpWrap(vpMeasure, n, w).length - 1) * 1.33 * VP_FONT_PX;
+  const wh = amtWarnHeight(), place = (y, n) => (wh && y - 16 < 64 && y + up(n) > 64 - wh ? 64 + 16 + 4 : y);
+  let msgY = Math.max(35, legendBox().bottom + 4), noticeY = 23;
+  for (const j of vpKeys()) {
+    if (j === k) break;
+    const o = vpBase(j), n = o && !vpMessage(o) && vpNotice(o);
+    if (o && vpMessage(o)) msgY += 46;
+    else if (n) noticeY = place(noticeY, n) + up(n) + 20;
+  }
+  const n = vpNotice(st);
+  if (n) noticeY = place(noticeY, n);
+  return { ...st, msgY, noticeY, textX, touches: st.kind === 'pvp' && st.d?.profiles ? vpTouches(k, st.d) : null };
 }
-const vpPrims = Object.fromEntries(VP_KINDS.map((k) => [k, new VolumeProfilePrimitive(() => vpState(k))]));
-Object.values(vpPrims).forEach((p) => candles.attachPrimitive(p));
-const vpList = (k) => (k === 'pvp' ? 'profiles' : k === 'prof' ? 'sessions' : null);
-// Profiles the server sent as "same" are the ones held; finished ones are held for the next request.
+// PVP's "until touched" ends on this chart's own bars, as NinjaTrader checks them (studies.js pvpTouches): the bars as
+// drawn, Renko bricks and Heikin Ashi bars too. Each draw asks; what was found is kept per profile (pvpTouches' memo),
+// so only the bars since are checked: all again when the chart's bars are others (a load, older ones in front, another
+// bar style).
+const vpTouchMemo = {};
+function vpTouches(k, d) {
+  const n = S.bars.length, ha = altSeries?._style === 'ha', m = vpTouchMemo[k];
+  const memo = m && m.bars === S.bars && m.first === S.bars[0]?.t && m.ha === ha && n >= m.n ? m.memo : new Map();
+  vpTouchMemo[k] = { bars: S.bars, first: S.bars[0]?.t, ha, n, memo };
+  if (ha && S.ha.length !== n) for (let i = 0; i < n; i++) haAt(i);
+  const v = pvpTouches(d.profiles, S.bars, ha ? (i) => [S.ha[i].l, S.ha[i].h] : (i) => [S.bars[i].l, S.bars[i].h], memo);
+  for (const start of memo.keys()) if (!v.has(start)) memo.delete(start);   // profiles gone
+  return v;
+}
+// Each profile's drawing, made the first time it is asked for (another of a kind when it is added); its layer is its
+// key's (applyLayers puts it in its place)
+const vpPrims = {};
+function vpPrim(k) {
+  if (!vpPrims[k]) {
+    const p = vpPrims[k] = new VolumeProfilePrimitive(() => vpState(k));
+    candles.attachPrimitive(p);
+    layerZ(p);
+  }
+  return vpPrims[k];
+}
+vpKeys().forEach(vpPrim);
+const vpList = (k) => (baseOf(k) === 'pvp' ? 'profiles' : baseOf(k) === 'prof' ? 'sessions' : null);
+// Profiles the server sent as "same" are the ones held; finished ones are held for the next request. SVP: a held session
+// without its per-bar values yet (worked out in the background) is named in nodev; they come with its "same".
 function vpMerge(k, d, sym) {
   const list = vpList(k);
   if (!list) return d;
   const h = vpHeld[k], held = h && h.sym === sym && h.key === d.key ? h.byStart : new Map(), keep = new Map();
-  d[list] = d[list].map((p) => (p.same ? held.get(p.start) && { ...held.get(p.start), ...(p.touch ? { touch: p.touch } : {}) } : p)).filter(Boolean);
-  for (const p of d[list]) if (k === 'pvp' ? p.closed : p.done) keep.set(p.start, p);
+  d[list] = d[list].map((p) => (p.same ? held.get(p.start) && { ...held.get(p.start), ...(p.touch ? { touch: p.touch } : {}), ...(p.dev ? { dev: p.dev } : {}) } : p)).filter(Boolean);
+  for (const p of d[list]) if (baseOf(k) === 'pvp' ? p.closed : p.done) keep.set(p.start, p);
   vpHeld[k] = { sym, key: d.key, byStart: keep };
   return d;
 }
+// The view an answer is for: replay's clock (its jumps), ETH/RTH, the settings (a changed one: the answer held and one
+// on its way are the old setting's, not noted on the bars, vpLiveNote), and for SVP the clock's zone (Session time zone
+// Chart). An answer asked for another is not this chart's.
+const vpViewKey = (k) => `${!!S.replay && S.replay.jumps} ${S.rth} ${JSON.stringify(S.vpSet[k] ?? null)}${baseOf(k) === 'prof' ? ` ${ax.zone}` : ''}`;
 // One request per kind at a time; the server keeps what it built, so asking again is cheap.
 async function vpRequest(k, reset) {
-  if (reset) { S.vp[k] = null; S.vpErr[k] = ''; delete vpHeld[k]; }
-  if (!S.st[k] || S.ext || !indReady(k) || !S.instruments[S.symbol]) { S.vp[k] = null; vpPrims[k].update(); renderVpInfo(k); return; }
+  if (reset) { S.vp[k] = null; S.vpErr[k] = ''; delete vpHeld[k]; delete S.vpLive[k]; }
+  if (!S.st[k] || S.ext || !indReady(baseOf(k)) || !S.instruments[S.symbol] || !S.vpSet[k]) { S.vp[k] = null; vpPrim(k).update(); renderVpInfo(k); return; }
   if (vpBusy[k]) { vpBusy[k] = 'again'; return; }
   vpBusy[k] = true;
-  const sym = S.symbol, h = vpHeld[k], q = new URLSearchParams({ symbol: sym, s: JSON.stringify(S.vpSet[k]) }), view = `${!!S.replay && S.replay.jumps} ${S.rth}`;
-  if (h && h.sym === sym && h.byStart.size) { q.set('key', h.key); q.set('have', [...h.byStart.keys()].join(',')); }
-  if (S.rth && k !== 'prof') q.set('rth', 'true');   // an RTH chart's AAVP and PVP: its regular hours' minutes
+  const sym = S.symbol, h = vpHeld[k], q = new URLSearchParams({ symbol: sym, s: JSON.stringify(S.vpSet[k]) }), view = vpViewKey(k);
+  if (h && h.sym === sym && h.byStart.size) {
+    q.set('key', h.key);
+    q.set('have', [...h.byStart.keys()].join(','));
+    const nodev = [...h.byStart.values()].filter((p) => baseOf(k) === 'prof' && !p.dev).map((p) => p.start);
+    if (nodev.length) q.set('nodev', nodev.join(','));
+  }
+  if (S.rth) q.set('rth', 'true');   // an RTH chart's: its regular hours' minutes and trades, as NinjaTrader's on an RTH template
+  if (baseOf(k) === 'prof' && S.vpSet[k].SessionTimeZone === 'Chart') q.set('tz', ax.zone);   // NinjaTrader's Chart: this chart's zone
   replayUntil(q);
   if (S.replay) q.set('rid', REPLAY_RID);
   try {
-    const d = await api('GET', `/api/vp/${k}?${q}`);
-    if (sym === S.symbol && S.st[k] && view === `${!!S.replay && S.replay.jumps} ${S.rth}`) { S.vp[k] = vpMerge(k, d, sym); S.vpErr[k] = ''; }
+    const d = await api('GET', `/api/vp/${baseOf(k)}?${q}`);
+    if (sym === S.symbol && S.st[k] && view === vpViewKey(k)) { S.vp[k] = vpMerge(k, d, sym); d.view = view; S.vpErr[k] = ''; vpLiveNote(k); }
   } catch (e) {
     if (sym === S.symbol) S.vpErr[k] = e.message;
   } finally {
@@ -1249,34 +1375,80 @@ async function vpRequest(k, reset) {
     vpBusy[k] = false;
     if (again) vpRequest(k);
   }
-  vpPrims[k].update();
+  if (!vpPrims[k] && !(k in S.st)) return;   // taken off the chart meanwhile
+  vpPrim(k).update();
   renderVpInfo(k);
   legend(S.lastBar);
 }
-function vpAll(reset) { for (const k of VP_KINDS) vpRequest(k, reset); }
-setInterval(() => {   // as the indicators publish OnEachTick: the forming minute and the latest trades
-  if (document.visibilityState === 'visible') for (const k of VP_KINDS) if (S.st[k] && !S.ext && !S.replay) vpRequest(k);
-}, 3000);
+function vpAll(reset) { S.vpLive = {}; for (const k of vpKeys()) vpRequest(k, reset); }   // the chart's bars again: as an indicator loaded again
+// AAVP's and PVP's POC, VAH and VAL plots: NinjaTrader resets them on every bar of history and publishes the profile's
+// levels on the bars that form while it runs (and the last one at load), each at its latest. Kept here per bar (its open
+// and seq) as the answers and the live bar come, for the data window (S.vpLive).
+// Not while the bars shown are another view's, on their way out (a replay jump, another timeframe or ETH/RTH: noted on
+// the new last bar when they come, applyHistory), nor from an answer of another view or of a setting changed since (the
+// bars that close before the new setting's answer stay empty; NinjaTrader's load is at once).
+const vpBarKey = (b) => `${b.t}|${b.seq ?? ''}`;
+function vpLiveNote(k) {
+  if (!['aavp', 'pvp'].includes(baseOf(k)) || !S.bars.length || S.liveWait || S.replay?.loading || S.vp[k]?.view !== vpViewKey(k)) return;
+  const p = vpLatest(vpBase(k));
+  if (!p) return;
+  const m = S.vpLive[k] || (S.vpLive[k] = new Map());
+  m.set(vpBarKey(S.bars[S.bars.length - 1]), [p.poc, p.vah, p.val]);
+  if (m.size > 20000) m.delete(m.keys().next().value);
+}
+function vpLiveTick() { for (const k of vpKeys()) if (S.st[k] && S.vp[k]) vpLiveNote(k); }   // the forming bar: the levels now
+// The volume profiles' POC, VAH and VAL at bar i, as NinjaTrader's Data Box has their plots: SVP's the session's as of
+// the bar's close (svpAt; the last bar: now), AAVP's and PVP's as published live (above). null: none there.
+function vpBarValues(k, st, i) {
+  if (st.kind !== 'prof') return S.vpLive[k]?.get(vpBarKey(S.bars[i])) || null;
+  const n = S.bars.length, close = i >= n - 1 ? Infinity : st.periodMs ? barCloseMs(S.bars[i]) : S.bars[i + 1].t;
+  return svpAt(st.d.sessions, close);
+}
+function vpDataCells(i) {
+  const out = [];
+  for (const k of vpKeys()) {
+    const st = S.st[k] && !(k in S.stHidden) ? vpBase(k) : null;
+    if (!st || st.error || !st.d) continue;
+    const v = vpBarValues(k, st, i), f = (x) => (v ? pxTick(x) : '–');
+    out.push([`${{ aavp: 'AAVP', pvp: 'PVP', prof: 'SVP' }[st.kind]}${k === baseOf(k) ? '' : ` ${instNo(k)}`} POC`, f(v?.[0])],
+      ['VAH', f(v?.[1])], ['VAL', f(v?.[2])]);
+  }
+  return out;
+}
+// SVP: a finished session held without its per-bar values (worked out in the background, vpMerge)
+const vpNoDev = (k) => baseOf(k) === 'prof' && vpHeld[k]?.sym === S.symbol && [...vpHeld[k].byStart.values()].some((p) => !p.dev);
+// Every 3 seconds, as the indicators publish OnEachTick: the forming minute and the latest trades. In replay (its clock
+// moves with the steps) only for SVP's per-bar values worked out in the background, paused too.
+function vpPoll() {
+  if (document.visibilityState === 'visible') for (const k of vpKeys()) if (S.st[k] && !S.ext && (!S.replay || vpNoDev(k))) vpRequest(k);
+}
+setInterval(vpPoll, 3000);
+// A Tatanka study's line in its Studies panel: the panel is its kind's, shown under the row opened (stRow), so another
+// of it ('pvp_2') writes there only while its row is the one open.
+function infoEl(k) {
+  const el = document.getElementById(`${baseOf(k)}-info`);
+  return el && (el.closest('.stp')?.dataset.k || baseOf(k)) === k ? el : null;
+}
 function renderVpInfo(k) {
-  const el = $(`#${k}-info`), d = S.vp[k], o = S.vpSet[k];
+  const el = infoEl(k), d = S.vp[k], o = S.vpSet[k], kind = baseOf(k);
   if (!el) return;
   if (!S.st[k]) { el.textContent = ''; return; }
   const st = vpBase(k);
   if (st?.error) { el.textContent = st.error; return; }
   if (!d) { el.textContent = 'Loading…'; return; }
-  if (k === 'aavp') {
+  if (kind === 'aavp') {
     const p = d.profile;
     el.textContent = !p ? 'No 1-minute bars stored for this symbol yet.'
       : `${o.AnchorPeriod} from ${p.window[0]}${p.first ? ' (stored bars start later)' : ''}: ${p.rows.length} rows of ${p.tpr} tick${p.tpr > 1 ? 's' : ''}.`;
-  } else if (k === 'pvp') {
+  } else if (kind === 'pvp') {
     const p = d.profiles.at(-1);
     el.textContent = !p ? 'No 1-minute bars stored for this symbol yet.'
       : `${d.profiles.length} ${o.Period.toLowerCase()} profile${d.profiles.length > 1 ? 's' : ''}; the latest from ${p.window[0]}, ${p.rows.length} rows of ${p.tpr} tick${p.tpr > 1 ? 's' : ''}.`;
   } else {
     const n = d.sessions.filter((p) => p.approx).length;
-    const ct = ['ExchangeTemplate', 'Chart', 'Central'].includes(o.SessionTimeZone);   // in CT: moved to its own hours, as the server
-    const hours = ct ? ownHours(`${o.SessionStart}-${o.SessionEnd}`.replace(/:/g, '')).replace(/(\d\d)(\d\d)-(\d\d)(\d\d)/, '$1:$2-$3:$4') : `${o.SessionStart}-${o.SessionEnd}`;
-    el.textContent = `${d.sessions.length} session${d.sessions.length === 1 ? '' : 's'} ${hours} ${ct ? 'CT' : o.SessionTimeZone}, from every trade stored here`
+    const zone = ['ExchangeTemplate', 'Central'].includes(o.SessionTimeZone) ? 'CT' : o.SessionTimeZone === 'Chart' ? ax.short : o.SessionTimeZone;
+    const hours = d.hours || `${o.SessionStart}-${o.SessionEnd}`;   // the window the server ran (Use Instrument Hours: its own hours)
+    el.textContent = `${d.sessions.length} session${d.sessions.length === 1 ? '' : 's'} ${hours} ${zone}${S.rth ? ' (RTH)' : ''}, from every trade stored here`
       + (n ? `; ${n} with minutes from 1-minute bars (no trades stored then: keep the NinjaTrader add-on connected for every trade).` : '.');
   }
 }
@@ -1285,8 +1457,58 @@ function renderVpInfo(k) {
 // run here on every tick (studies.js) ------------------------------------------------------------------------
 S.ifData = null;
 S.ifRows = [];
-const hexA = (h) => [...hexRgb(h), 1];
-function ifPrice(b, src) {
+// A color as [r, g, b, a]: '#rrggbbaa' (the background and border, with their opacity) or '#rrggbb' (opaque).
+const hexA = (h) => [...hexRgb(h), h.length === 9 ? parseInt(h.slice(7), 16) / 255 : 1];
+// NinjaTrader's Data series > Input series, what Price source "Input series" reads (Inputs[0][0]): the chart's bars as one
+// of NinjaTrader's price types (Close unless set), or a line of an indicator on this chart. Here this chart's own
+// setting, InputSeries: a price type, or a line on the chart by its name: an indicator's ("EMA 21", "Bollinger 14 2:
+// Upper"), the session or RTH VWAP's and the bands shown ("VWAP (RTH): +1σ"), an HTF EMA ("HTF EMA 2") or a Daily
+// SMA x4 plot ("Daily SMA x4: DailySMA1").
+const IF_BAR_INPUTS = { Close: (b) => b.c, Open: (b) => b.o, High: (b) => b.h, Low: (b) => b.l, Median: (b) => (b.h + b.l) / 2,
+  Typical: (b) => (b.h + b.l + b.c) / 3, Weighted: (b) => (b.h + b.l + b.c + b.c) / 4 };
+const ifInputName = (c, label, n) => (n > 1 ? `${indTitle(c)}: ${label}` : indTitle(c));
+const ifNum = (v) => (v == null || !Number.isFinite(v) ? NaN : v);
+// The lines of the studies on this chart: [name, (i) => the value at bar i], in the Studies menu's order.
+function ifStudyLines() {
+  const out = [];
+  for (const w of VWAPS) {
+    if (!S.st[w.key]) continue;
+    const name = w.key === 've' ? 'VWAP (session)' : 'VWAP (RTH)', at = (i, k) => {   // as vwapPoint: k sigma off it
+      const st = S.bars[i]?.st, m = st?.[w.at], sd = st?.[w.at + 1];
+      return m == null || (k && sd == null) ? NaN : ifNum(k ? m + k * sd : m);
+    };
+    out.push([name, (i) => at(i, 0)]);
+    for (const k of [1, 2, 3]) {
+      if (S.st[`b${k}`]) out.push([`${name}: +${k}σ`, (i) => at(i, k)], [`${name}: −${k}σ`, (i) => at(i, -k)]);
+    }
+  }
+  for (const k of instKeys('hema')) {
+    if (S.st[k]) out.push([k === 'hema' ? 'HTF EMA' : `HTF EMA ${instNo(k)}`, (i) => ifNum(S.hx[k]?.vals[i])]);
+  }
+  if (S.st.dsma) for (const p of [0, 1, 2, 3]) out.push([`Daily SMA x4: DailySMA${p + 1}`, (i) => ifNum(S.dsmaVals[p]?.[i])]);
+  return out;
+}
+function ifInputChoices() {
+  const out = Object.keys(IF_BAR_INPUTS);
+  for (const x of S.inds || []) {
+    const lines = IND_DEFS[x.c.type].lines;
+    for (const [, label] of lines) out.push(ifInputName(x.c, label, lines.length));
+  }
+  for (const [name] of ifStudyLines()) out.push(name);
+  return [...new Set(out)];
+}
+// The input at the chart's bar i: NaN where the line has none; a line no longer on the chart: the bars' Close.
+function ifInputValue(name, i) {
+  const b = S.bars[i];
+  if (!name || name in IF_BAR_INPUTS) return IF_BAR_INPUTS[name || 'Close'](b);
+  for (const x of S.inds || []) {
+    const lines = IND_DEFS[x.c.type].lines, k = lines.findIndex(([, label]) => ifInputName(x.c, label, lines.length) === name);
+    if (k >= 0) return ifNum(x.vals[i]?.[k]);
+  }
+  const line = ifStudyLines().find(([n]) => n === name);
+  return line ? line[1](i) : b.c;
+}
+function ifPrice(b, src, i = S.bars.length - 1) {   // ReadPrice: b is the chart's bar i
   switch (src) {
     case 'Open': return b.o;
     case 'High': return b.h;
@@ -1295,6 +1517,7 @@ function ifPrice(b, src) {
     case 'HLC3': return (b.h + b.l + b.c) / 3.0;
     case 'OHLC4': return (b.o + b.h + b.l + b.c) / 4.0;
     case 'HLCC4': return (b.h + b.l + b.c + b.c) / 4.0;
+    case 'Input series': return ifInputValue(S.ifSet.InputSeries, i);
     default: return b.c;
   }
 }
@@ -1330,7 +1553,7 @@ $('#if-full').checked = ifFull();
 $('#if-full').onchange = (e) => setIfFull(e.target.checked);
 
 // ---- Tatanka Gap Analysis: the GapEngine runs on the server over the chart's bars, the live bar fills here ----
-const GAP_SERVER = ['MinimumGapPoints', 'days'];
+const GAP_SERVER = ['MinimumGapPoints', 'UseInstrumentHours', 'days'];
 S.gaps = null;
 S.gapError = '';
 S.gapAlerts = {};
@@ -1341,11 +1564,12 @@ const GAP_SHARED = new Set(Object.keys(GAP_SWITCH));
 S.gapSwitches = null;   // symbol -> { new, fill }, from the server
 S.gapNotice = [];       // those its first start turned off (from each symbol's alerts as saved before): said once
 const gapShown = (sym = S.symbol) => Object.fromEntries(Object.entries(GAP_SWITCH).map(([k, n]) => [k, S.gapSwitches?.[sym]?.[n] ?? true]));
-const gapSpecOk = () => /^\d+[mh]$/.test(S.spec);
+const gapSpecOk = () => /^\d+[mh]$/.test(S.spec) || gapSeconds();   // NinjaTrader's Minute or Second charts
+const gapSeconds = () => /^([1-9]|[1-5]\d)s$/.test(S.spec);   // 1s-59s: the server runs it over this chart's own bars
 // Where the symbol/OHLC legend ends, in chart pixels: tables drawn at the top move below it if they would overlap.
 // Measured once per frame (every drawn study asks; each measure can force a layout), then forgotten.
-let legendSeen = null, dashSeen = null;
-const forgetMeasures = () => { legendSeen = dashSeen = null; };
+let legendSeen = null, dashSeen = null, warnSeen = null;
+const forgetMeasures = () => { legendSeen = dashSeen = warnSeen = null; };
 function legendBox() {
   if (!legendSeen) { legendSeen = measureLegend(); queueMicrotask(forgetMeasures); }
   return legendSeen;
@@ -1364,6 +1588,14 @@ function measureLegend(above = Infinity) {   // above: only the lines starting h
   }
   return { right, bottom };
 }
+function amtWarnHeight() {   // the AMT Toolkit's warning at the bottom left: how tall, 0 when it shows none
+  if (warnSeen == null) {
+    const el = $('#amt-warn');
+    warnSeen = el && !el.hidden && el.textContent ? el.offsetHeight : 0;
+    queueMicrotask(forgetMeasures);
+  }
+  return warnSeen;
+}
 function amtDashBottom() {
   if (dashSeen == null) {
     const el = $('#amt-dash');
@@ -1374,7 +1606,7 @@ function amtDashBottom() {
 }
 const gapPrim = new GapPrimitive(() => {
   if (!S.st.gap || S.ext || !indReady('gap') || !S.gapSet.EnabledAnalysis) return null;
-  const error = !gapSpecOk() ? 'Use a minute or hour chart. Session boundaries require time-based bars.' : S.gapError;
+  const error = !gapSpecOk() ? 'Use a minute, hour or second chart. Session boundaries require time-based bars.' : S.gapError;
   return {
     gaps: isTime() ? S.gaps : null, error, bars: S.bars, periodMs: specSeconds(S.spec) * 1000, set: S.gapSet,
     fmt: (p) => px(Math.round(p / inst().tick_size) * inst().tick_size), avoidTop: amtDashBottom(), legend: legendBox(),
@@ -1406,19 +1638,43 @@ candles.attachPrimitive(amtPrim);
 // The Toolkit draws labels and the developing profile up to 50 bars right of the last bar, as on a
 // NinjaTrader chart with a right margin; give the chart that room while it's on (and the If/Then and Daily SMA labels
 // theirs).
-function amtLayout() {
+const AMT_ROOM = 0.3;
+// amtRoomWas: the chart's width and bar spacing at the last range change. amtRoomSet: the range a load or Reset view
+// set (the library applies it on its next frame), until the chart shows it.
+let amtRoomFrame = 0, amtRoomWas = null, amtRoomSet = null;
+chart.timeScale().subscribeVisibleLogicalRangeChange(() => { if (!amtRoomFrame) amtRoomFrame = requestAnimationFrame(amtRoomCheck); });
+// The view changed: the margin's cap again. A zoom (wheel, pinch) changes the bar spacing on the same width and keeps
+// the view it made; a resize (a phone turned, the sidebar) changes the width and sets the margin as a load does. So
+// does the range a load or Reset view set: it changes the bar spacing after a zoom too, but it is not one.
+function amtRoomCheck() {
+  amtRoomFrame = 0;
+  const ts = chart.timeScale(), was = amtRoomWas, now = [ts.width(), ts.options().barSpacing], lr = ts.getVisibleLogicalRange();
+  const load = !!amtRoomSet && !!lr && Math.abs(lr.from - amtRoomSet.from) < 0.5 && Math.abs(lr.to - amtRoomSet.to) < 0.5;
+  amtRoomWas = now;
+  if (load) amtRoomSet = null;
+  if (S.st.amt || S.st.ifthen || S.st.dsma) amtLayout(!load && !!was && was[0] === now[0] && was[1] !== now[1]);
+}
+function amtLayout(zoomed = false) {
   let ro = Math.max(S.cs.rightBars, S.st.amt && !S.ext ? (window.innerWidth < 760 ? 25 : 55) : 0);   // never less than the setting
   if (S.st.ifthen && S.ifSet.LineLabels && S.ifRows.length) ro = Math.max(ro, S.ifSet.LabelOffset + 2);   // If/Then labels
   if (S.st.dsma && S.dsmaSet.ShowLabels) {   // Daily SMA x4's: LabelOffset bars on, then about "200 SMA - 6897.25"
     const fs = { Tiny: 10, Small: 12, Large: 18 }[S.dsmaSet.LabelSize] || 14;
     ro = Math.max(ro, S.dsmaSet.LabelOffset + Math.ceil((fs * 9) / chart.timeScale().options().barSpacing));
   }
+  // at most about a third of the bars in view: set in bars, zooming in pushed the last bars to the left edge and off it
+  // (footprint's wide bars: the last at the legend); the labels further right show again zoomed out
+  const view = chart.timeScale().getVisibleLogicalRange();
+  if (view && view.to > view.from) ro = Math.min(ro, Math.max(2, Math.floor((view.to - view.from) * AMT_ROOM)));
+  ro = Math.max(ro, S.cs.rightBars);
   // Setting the margin scrolls the chart to the latest bars: only when it changes, and a chart scrolled back stays put.
+  // A zoom (the cap again) keeps the view it made, on the bar under the cursor, unless the empty space right of the
+  // last bar is more than the new cap: then the last bar comes in to it.
   const ts = chart.timeScale();
   if (ts.options().rightOffset === ro) return;
-  const lr = ts.getVisibleLogicalRange(), back = lr && S.bars.length && lr.to < S.bars.length - 1;
+  const lr = ts.getVisibleLogicalRange(), n = S.bars.length, back = lr && n && lr.to < n - 1;
+  const keep = back || (zoomed && lr && n && lr.to - (n - 1) <= ro);
   ts.applyOptions({ rightOffset: ro });
-  if (back) ts.setVisibleLogicalRange(lr);
+  if (keep) ts.setVisibleLogicalRange(lr);
 }
 // The chart's Toolkit settings: the server's starting ones with the open tab's on top (tabSet). The alert settings
 // are the server's for the chart's symbol, the same on every chart of it (one runner per symbol alerts), and the levels
@@ -1481,8 +1737,8 @@ function renderAmtDash() {
   const el = $('#amt-dash'), warn = $('#amt-warn'), d = S.amt;
   const ready = S.st.amt && !S.ext && d && d.ready;
   warn.hidden = !S.st.amt || !!S.ext;
-  warn.textContent = !S.st.amt ? '' : !d ? 'Tatanka AMT v1.2.2 — loading chart and secondary history…'
-    : !d.ready ? 'Tatanka AMT v1.2.2 — waiting for bars' : [amtTzWarning(), d.warning].filter(Boolean).join(' ');
+  warn.textContent = !S.st.amt ? '' : !d ? 'Tatanka AMT v1.2.4 — loading chart and secondary history…'
+    : !d.ready ? 'Tatanka AMT v1.2.4 — waiting for bars' : [amtTzWarning(), d.warning].filter(Boolean).join(' ');
   el.hidden = !(ready && S.st.amtDash && d.style?.tbl_show !== false);
   if (!el.hidden) {
     // Folding to SESSION and DAY TYPE is this app's (phones start folded); NinjaTrader always shows every row.
@@ -1505,13 +1761,14 @@ function renderAmtDash() {
 // Where NinjaTrader's Dashboard() and notices go, in the price pane: FontSize(tbl_size), rows fs + 10 high, the table
 // max(310, 25 fs) wide, 10px from the side, 10px from the top, centred, or 55px up from the bottom; the notices 64px
 // up from the bottom, 10px in. A table wider than the pane stays on screen. Folded on a phone it is only its title,
-// a tab in the top corner beside the legend's first line instead of a bar across the chart.
+// a tab in the top corner beside the legend's first line instead of a bar across the chart. In the top right corner
+// of a wider chart the data window's row (the legend's second line) wraps before the table, not under it.
 const AMT_FS = { tiny: 10, small: 12, large: 18, huge: 24 };
 let amtDashAt = '', amtMeasure = null;
 function placeAmtDash() {
   const el = $('#amt-dash'), warn = $('#amt-warn'), d = S.amt;
   const left = chart.priceScale('left').width(), W = chart.timeScale().width(), H = chart.paneSize(0).height;
-  let at = `${left} ${W} ${H} ${warn.hidden}`;
+  let at = `${left} ${W} ${H} ${warn.hidden}`, dwin = '';
   if (!el.hidden && d) {
     const narrow = W < 520;   // a phone: smaller, and below the legend's two lines
     const pill = narrow && !el.querySelector('.rows').children.length;
@@ -1532,6 +1789,8 @@ function placeAmtDash() {
     const x = Math.max(left, left + (pos.includes('Left') ? 10 : W - w - (narrow ? 6 : 10)));
     const y = pos.includes('Bottom') ? H - h - 55 : pos.includes('Middle') ? (H - h) / 2 : below;
     el.classList.toggle('pill', pill);
+    // (the legend sits 8 px in: its row ends 8 px before the table)
+    if (!narrow && !pos.includes('Left') && !pos.includes('Bottom') && !pos.includes('Middle')) dwin = `min(100%, ${Math.max(120, x - 16)}px)`;
     at += ` ${x} ${y} ${w} ${h} ${fs}`;
     if (at !== amtDashAt) {
       Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
@@ -1539,8 +1798,10 @@ function placeAmtDash() {
       el.style.setProperty('--rh', `${rh}px`);
     }
   }
+  at += ` ${dwin}`;
   if (at === amtDashAt) return;
   amtDashAt = at;
+  $('#dwin').style.maxWidth = dwin;
   Object.assign(warn.style, { left: `${left + 10}px`, top: `${H - 64}px`, width: `${Math.max(0, W - 20)}px`, maxHeight: '64px' });
 }
 $('#amt-dash').onclick = () => {
@@ -1632,7 +1893,9 @@ async function indPut(key, overrides) {
   indApply();
 }
 async function indPutSymbol(key, values, sym = S.symbol) {
-  indSymbolSaved(key, sym, await api('PUT', `/api/indicators/${key}/${sym}`, values));
+  // a micro's Level Lines: its full-size contract's, which the server saves them as (asked as the chart's own symbol:
+  // the full-size one may not be an instrument here)
+  indSymbolSaved(key, indSym(key, sym), await api('PUT', `/api/indicators/${key}/${sym}`, values));
   if ('RowsBlock' in values && sym === S.symbol) {
     S.ifData = { ...(S.ifData || {}), rows: values.RowsBlock, updated: Date.now() };
     S.ifRows = biasParse(values.RowsBlock);
@@ -1642,35 +1905,36 @@ async function indPutSymbol(key, values, sym = S.symbol) {
   indApply();
 }
 // New settings: recompute, then ask the server again only where an engine input changed (else just redraw).
-function indApply() {
-  const was = { tpo: S.tpoSet, gap: S.gapSet, hema: S.hemaSet, ifthen: S.ifSet, vp: S.vpSet };
+const indSnap = () => ({ tpo: S.tpoSet, gap: S.gapSet, hema: S.hemaSets, ifthen: S.ifSet, vp: S.vpSet });
+// was: the sets as they were drawn (a tab switch takes them before its instances change them)
+function indApply(was = indSnap()) {
   indSets();
-  const now = { tpo: S.tpoSet, gap: S.gapSet, hema: S.hemaSet, ifthen: S.ifSet };
-  const moved = (k, names) => names.some((n) => JSON.stringify(was[k]?.[n]) !== JSON.stringify(now[k][n]));
+  const now = { tpo: S.tpoSet, gap: S.gapSet, hema: S.hemaSets, ifthen: S.ifSet };
+  const moved = (k, names, i) => names.some((n) => JSON.stringify((i ? was[k]?.[i] : was[k])?.[n]) !== JSON.stringify((i ? now[k][i] : now[k])?.[n]));
   if (moved('tpo', Object.keys(now.tpo).filter((n) => !TPO_DRAWING.includes(n)))) tpoRequest(); else { tpoPrim.update(); renderTpoInfo(); }
-  if (moved('gap', ['RthStart', 'RthEnd', 'MinimumGapPoints', 'EnabledAnalysis'])) gapRequest(); else { gapPrim.update(); renderGapInfo(); }
-  if (moved('hema', ['HtfPeriodType', 'HtfPeriod', 'EmaLength', 'Mode'])) { S.hema = null; hemaRequest(); } else hemaDraw();
+  if (moved('gap', ['RthStart', 'RthEnd', 'MinimumGapPoints', 'UseInstrumentHours', 'EnabledAnalysis'])) gapRequest(); else { gapPrim.update(); renderGapInfo(); }
+  const fresh = (sets, k) => !!sets && !(k in sets);   // one just put on: asked for already (studiesChanged)
+  for (const k of instKeys('hema')) if (!fresh(was.hema, k) && moved('hema', ['HtfPeriodType', 'HtfPeriod', 'EmaLength', 'Mode'], k)) { hemaReset(k); hemaRequest(k); } else hemaDraw(k);
   // none yet (the settings came after the chart, or it failed) or a longer one: ask; else just draw
   if (S.st.dsma && (!S.dsma || Math.max(...dsmaPeriods()) > S.dsma.length)) dsmaRequest(); else dsmaDraw();
   if (moved('ifthen', ['AtrLength'])) ifRequest();
-  for (const k of VP_KINDS) { if (JSON.stringify(was.vp?.[k]) !== JSON.stringify(S.vpSet[k])) vpRequest(k); vpPrims[k].update(); renderVpInfo(k); }
+  // a changed setting: NinjaTrader loads the indicator again, its plots empty on the bars of history (S.vpLive)
+  for (const k of vpKeys()) { if (!fresh(was.vp, k) && JSON.stringify(was.vp?.[k]) !== JSON.stringify(S.vpSet[k])) { delete S.vpLive[k]; vpRequest(k); } vpPrim(k).update(); renderVpInfo(k); }
   amtLayout();
   ifPrim.update();
   renderIfInfo();
-  llPrim.update();
-  renderLlInfo();
+  instKeys('lines').forEach((k) => { llPrimOf(k).update(); renderLlInfo(k); });
   legend(S.lastBar);
 }
 function renderTatankaMenu() {
-  VP_KINDS.forEach(renderVpInfo);
   renderAmtMenu();
   renderTpoInfo();
   renderGapMenu();
-  renderHemaInfo();
+  instKeys('hema').forEach(renderHemaInfo);
   renderDsmaInfo();
   renderIfInfo();
-  renderLlInfo();
-  VP_KINDS.forEach(renderVpInfo);
+  instKeys('lines').forEach(renderLlInfo);
+  vpKeys().forEach(renderVpInfo);
 }
 
 // ---- TPO Profile ------------------------------------------------------------------------------------------------
@@ -1709,7 +1973,8 @@ function renderTpoInfo() {
   if (S.tpoError) { el.textContent = S.tpoError; return; }
   const d = S.tpo, t = inst().tick_size;
   const step = d?.profiles?.at(-1)?.step ?? d?.step;   // the newest profile's rows (the engine's can be the next day's already)
-  el.textContent = !d ? 'Loading…' : step ? `Rows ${px(step)} (${Math.round(step / t)} ticks), ${d.minutes}-minute bars, ${ownHours(S.tpoSet.SessionTime)} CT.` : 'Waiting for bars.';
+  const hours = S.tpoSet.UseInstrumentHours === false ? S.tpoSet.SessionTime : ownHours(S.tpoSet.SessionTime);   // as the server runs it
+  el.textContent = !d ? 'Loading…' : step ? `Rows ${px(step)} (${Math.round(step / t)} ticks), ${d.minutes}-minute bars, ${hours} CT.` : 'Waiting for bars.';
 }
 
 // ---- Gap Analysis: RTH start and end are NinjaTrader's HHmmss numbers (83000 = 08:30:00 CT) ----------------------------
@@ -1729,12 +1994,17 @@ async function gapRequest(reset) {
     S.gapError = GAP_RTH_BAD;
     gapPrim.update(); renderGapInfo(); return;
   }
+  // a second chart's runs over its own bars, from the first: not before they are in (applyHistory asks then), never
+  // from the first of the bars still shown (another timeframe's, the live ones under a replay start, the replay's on
+  // the way back to live)
+  if (gapSeconds() && (S.liveWait || S.replay?.loading)) { S.gaps = null; gapPrim.update(); renderGapInfo(); return; }
   if (gapBusy) { gapAgain = true; return; }
   gapBusy = true;
   const key = studyView();
   const q = new URLSearchParams({ symbol: S.symbol, spec: S.spec, RthStart: S.gapSet.RthStart, RthEnd: S.gapSet.RthEnd });
   if (S.rth) q.set('rth', 'true');
   for (const k of GAP_SERVER) q.set(k, String(S.gapSet[k]));
+  if (gapSeconds() && S.bars.length) q.set('start', String(S.bars[0].t));   // over this chart's bars, from its first
   replayUntil(q);
   try {
     const d = await api('GET', `/api/gaps?${q}`);
@@ -1766,13 +2036,14 @@ function gapCatchUp() {
 function renderGapInfo() {
   const el = $('#gap-info');
   if (!S.st.gap) { el.textContent = ''; return; }
-  if (!gapSpecOk()) { el.textContent = 'Needs a minute or hour chart.'; return; }
+  if (!gapSpecOk()) { el.textContent = 'Needs a minute, hour or second chart.'; return; }
   if (indReady('gap') && !S.gapSet.EnabledAnalysis) { el.textContent = 'Off: Enabled Analysis is unchecked in its settings.'; return; }
   if (S.gapError) { el.textContent = S.gapError; return; }
   const d = S.gaps, a = S.gapAlerts[S.symbol];
   const alerts = a?.on ? ` Alerts: ${[a.new && 'new gap', a.fill && 'fill'].filter(Boolean).join(' + ') || 'none'}${a.rth ? ' (RTH)' : ''}.`
     : a?.error ? ` Alerts off: ${a.error}` : '';   // on, but its times make no session on its hours (the server's why)
-  el.textContent = !d ? 'Loading…' : `${d.gaps.length} gaps in ${S.gapSet.days} days, ${d.gaps.filter((g) => g.fb < 0).length} open. RTH ${d.hours || gapRth()} CT.${alerts}`;
+  const span = d?.seconds ? 'the chart\'s bars' : `${S.gapSet.days} days`;   // a seconds chart: from its first bar
+  el.textContent = !d ? 'Loading…' : `${d.gaps.length} gaps in ${span}, ${d.gaps.filter((g) => g.fb < 0).length} open. RTH ${d.hours || gapRth()} CT.${alerts}`;
 }
 function renderGapMenu() {
   $('#gap-alerts').checked = !!S.gapAlerts[S.symbol]?.on;
@@ -1795,7 +2066,8 @@ async function putGapAlerts(on, sym = S.symbol, rth = S.rth) {
   const g = S.gapSet;
   gapAlertsPut++;
   const a = await api('PUT', `/api/gaps/alerts/${sym}`, {
-    on, RthStart: g.RthStart, RthEnd: g.RthEnd, MinimumGapPoints: g.MinimumGapPoints, rth: !!rth && !!S.instruments[sym]?.rth,
+    on, RthStart: g.RthStart, RthEnd: g.RthEnd, MinimumGapPoints: g.MinimumGapPoints, UseInstrumentHours: g.UseInstrumentHours !== false,
+    rth: !!rth && !!S.instruments[sym]?.rth,
     minutes: ((m) => (m ? Number(m[1]) * (m[2] === 'h' ? 60 : 1) : 1))(/^(\d+)([mh])$/.exec(S.spec || '')),   // this chart's bars: the alerts say what its table does
   });
   S.gapAlerts[sym] = a;   // into the alerts as they are now (a GET's answer may have replaced them meanwhile)
@@ -1814,7 +2086,7 @@ async function gapAlertsFollow(g = S.gapSet, sw = {}, sym = S.symbol) {
   }
   gapAlertsPut++;
   const got = await api('PUT', `/api/gaps/alerts?symbol=${encodeURIComponent(sym)}`, {
-    ...switches, RthStart: g.RthStart, RthEnd: g.RthEnd, MinimumGapPoints: g.MinimumGapPoints,
+    ...switches, RthStart: g.RthStart, RthEnd: g.RthEnd, MinimumGapPoints: g.MinimumGapPoints, UseInstrumentHours: g.UseInstrumentHours !== false,
   });
   S.gapAlerts = got.alerts || {};
   if (got.switches) S.gapSwitches = got.switches;
@@ -1903,74 +2175,114 @@ async function moveSharedOut() {
 }
 
 // ---- HTF EMA --------------------------------------------------------------------------------------------------
-// hemaNoBars: not asked, no bars yet; hemaStart: the first bar last asked for; hemaFailed: when an answer last failed
-let hemaBusy = false, hemaAgain = false, hemaError = '', hemaAsked = 0, hemaFailed = 0, hemaNoBars = false, hemaStart = null;
-async function hemaRequest() {
-  hemaNoBars = !S.bars.length;
-  if (!S.st.hema || !S.bars.length || !S.instruments[S.symbol] || !indReady('hema')) { S.hema = null; hemaDraw(); return; }
-  if (hemaBusy) { hemaAgain = true; return; }
-  hemaBusy = true;
-  hemaAsked = Date.now();
-  hemaStart = S.bars[0].t;
-  const key = `${S.symbol} ${S.spec} ${S.rth}`, o = S.hemaSet;
+// Every one on the chart, or one (k): its own request, drawing and ticks, as below.
+const hemaEach = (fn) => instKeys('hema').map((k) => fn(k));
+async function hemaRequest(k) {
+  if (k === undefined) { await Promise.all(hemaEach(hemaRequest)); return; }
+  const h = hemaOf(k);
+  h.noBars = !S.bars.length;
+  if (!S.st[k] || !S.bars.length || !S.instruments[S.symbol] || !indReady('hema')) { h.data = null; hemaDraw(k); return; }
+  if (h.busy) { h.again = true; return; }
+  h.busy = true;
+  h.asked = Date.now();
+  h.dueAsked = h.data?.due ?? null;
+  h.start = S.bars[0].t;
+  const key = `${S.symbol} ${S.spec} ${S.rth}`, o = hemaSetOf(k), gen = h.gen;
   const q = new URLSearchParams({ symbol: S.symbol, spec: S.spec, start: S.bars[0].t, HtfPeriodType: o.HtfPeriodType,
     HtfPeriod: o.HtfPeriod, EmaLength: o.EmaLength, Mode: o.Mode });
   if (S.rth) q.set('rth', 'true');
+  const mine = () => key === `${S.symbol} ${S.spec} ${S.rth}` && S.st[k] && h.gen === gen;   // not reset meanwhile
   try {
     const d = await api('GET', `/api/htfema?${q}`);
-    if (key === `${S.symbol} ${S.spec} ${S.rth}` && S.st.hema) { S.hema = d; hemaError = ''; }
+    if (mine()) { h.data = d; h.error = ''; }
   } catch (e) {
-    S.hema = null;
-    hemaError = e.message;
-    hemaFailed = Date.now();
+    if (mine()) {
+      h.data = null;
+      h.error = e.message;
+      h.failed = Date.now();
+    }
   } finally {
-    hemaBusy = false;
+    h.busy = false;
   }
-  hemaDraw();
-  if (hemaAgain) { hemaAgain = false; hemaRequest(); }
+  if (S.hx[k] !== h) return;   // taken off the chart meanwhile
+  hemaDraw(k);
+  if (h.again) { h.again = false; hemaRequest(k); }
 }
 const hemaPeriodMs = () => (isTime() ? specSeconds(S.spec) * 1000 : 0);
 const hemaCal = () => /^\d+[DWM]$/.test(S.spec) && S.spec !== '1D';   // bars of several sessions (1D: cut at its close)
+// NinjaTrader's barsTimeStamped: the chart's bars and the source's are Second or Minute bars (seconds, minute and hour
+// charts; a Second or Minute source), so a chart bar opening after the forming source bar's close counts it at once.
+const hemaStamped = (k) => (hemaPeriodMs() > 0 && hemaPeriodMs() < 86_400_000 && !hemaCal()
+  && ['Second', 'Minute'].includes(hemaSetOf(k)?.HtfPeriodType));
 // When the bar after the last one opens: in bar replay the next bar's (the HTF bars run to the present; past the bars
 // loaded, the next stretch's, else the replay clock), else the server's once a calendar bar is over (its last HTF bar
 // runs after it, as on a tie).
-const hemaAfter = () => { const r = S.replay; return r ? r.data[r.idx]?.t ?? r.nextAt ?? r.at : S.hema?.next; };
+const hemaAfter = (h = hemaOf()) => { const r = S.replay; return r ? r.data[r.idx]?.t ?? r.nextAt ?? r.at : h.data?.next; };
 const hemaPoint = (b, v) => (Number.isNaN(v) ? { time: timeOf(b) } : { time: timeOf(b), value: v });
-function hemaDraw() {
-  const d = S.st.hema ? S.hema : null;
-  hemaLine.applyOptions({ visible: !!d, ...hemaStyle() });
-  S.hemaVals = d ? htfEmaValues(S.bars, d, hemaPeriodMs(), hemaCal(), hemaAfter()) : [];
-  hemaLine.setData(d ? S.bars.map((b, i) => hemaPoint(b, S.hemaVals[i])) : []);
-  renderHemaInfo();
+// Its value at each bar. Live, Exact and Live keep NinjaTrader's realtime values: a bar that ran live keeps what its last
+// call showed, a source bar closing inside it after that counts from the next (htfEmaLive; update: a bar update). In
+// bar replay each bar comes whole at its close, with no trades inside it to have a last call: as a reload shows it.
+// (NinjaTrader's Playback runs replayed trades as realtime, and its bars would keep theirs as on a live chart.)
+function hemaVals(k, update) {
+  const h = hemaOf(k), d = S.st[k] ? h.data : null;
+  if (!d) { if (update && !S.replay) h.keep.last = S.bars.at(-1)?.t; return []; }   // none to keep: bars closing now show the reload's
+  const a = [S.bars, d, hemaPeriodMs(), hemaCal(), hemaAfter(h)];
+  if (S.replay || d.mode === 'SmoothScaled') return htfEmaValues(...a);
+  h.keep.stamped = hemaStamped(k);
+  return htfEmaLive(h.keep, ...a, update);
+}
+function hemaDraw(k, update = false) {
+  if (k === undefined) { hemaEach((x) => hemaDraw(x)); return; }
+  const h = hemaOf(k), d = S.st[k] ? h.data : null;
+  h.line.applyOptions({ visible: !!d, ...hemaStyle(k) });
+  h.vals = hemaVals(k, update);
+  h.line.setData(d ? S.bars.map((b, i) => hemaPoint(b, h.vals[i])) : []);
+  renderHemaInfo(k);
 }
 // Calculate.OnPriceChange: the forming bar's value moves with its close.
-function hemaLive() {
-  if (!S.st.hema || !S.hema || !S.bars.length) return;
-  const vals = htfEmaValues(S.bars, S.hema, hemaPeriodMs(), hemaCal(), hemaAfter()), i = S.bars.length - 1;
-  S.hemaVals = vals;
-  try { hemaLine.update(hemaPoint(S.bars[i], vals[i])); } catch { hemaDraw(); }
+function hemaLive(k) {
+  if (k === undefined) { hemaEach(hemaLive); return; }
+  const h = hemaOf(k);
+  if (!S.st[k] || !S.bars.length) return;
+  const vals = hemaVals(k, true), i = S.bars.length - 1;
+  if (!h.data) return;
+  h.vals = vals;
+  try { h.line.update(hemaPoint(S.bars[i], vals[i])); } catch { hemaDraw(k); }
 }
 // A bar's update: the line follows it. The server is asked again when a chart bar closes and its answer may have
 // changed: the forming HTF bar closed (d.due; or none was forming), the chart's first bar is another (bars trimmed), a
 // bar of several sessions was over (d.next), or a minute after a failed answer; on a seconds or tick chart a bar closes
 // every second or so. Not while it is being asked: the bars closing meanwhile ask once it answers, if it is out of date
 // (new bars and settings ask again then). For Exact and Live (the last closed HTF bar's EMA) also when an HTF bar
-// closes inside the forming one, as on a 4h, day or week chart (at most once a minute, the clocks can differ).
-function hemaTick(closed) {
-  if (!S.st.hema) return;
-  if (!S.hema && hemaNoBars) { hemaRequest(); return; }   // the first bars came (a chart or a replay that started empty)
-  if (closed) hemaDraw(); else hemaLive();
-  if (S.replay || hemaBusy) return;
-  const d = S.hema, now = Math.max(Date.now(), S.bars.at(-1)?.t ?? 0);
-  if (closed && (d ? now >= (d.due ?? 0) || S.bars[0].t !== hemaStart || d.next != null : now - hemaFailed > 60_000)) hemaRequest();
-  else if (d && d.mode !== 'SmoothScaled' && now >= (d.due ?? 0) && now - hemaAsked > 60_000) hemaRequest();
+// closes inside the forming one, as on a 4h, day or week chart (at most once a minute, the clocks can differ), and on
+// every trade while the server holds one past its close for a trade after it (d.held: NinjaTrader 1.0.1 steps with that
+// trade; for a minute at most, should the server's trades and the chart's part). Inside a forming chart bar, any source
+// asks again once each source bar has closed (the answer's due, not asked for since: the update after its close), at
+// most every 10 seconds (a Second source closes a bar every few seconds), so the bar's next price change counts it as
+// NinjaTrader's does (a live bar keeps that value), and every period of the source (10 seconds to a minute) while the
+// clocks differ.
+function hemaTick(closed, k) {
+  if (k === undefined) { hemaEach((x) => hemaTick(closed, x)); return; }
+  if (!S.st[k]) return;
+  const h = hemaOf(k);
+  if (!h.data && h.noBars) { hemaRequest(k); return; }   // the first bars came (a chart or a replay that started empty)
+  if (closed) hemaDraw(k, true); else hemaLive(k);
+  if (S.replay || h.busy) return;
+  const d = h.data, now = Math.max(Date.now(), S.bars.at(-1)?.t ?? 0), due = d && (d.held || now >= (d.due ?? 0));
+  const o = hemaSetOf(k), secs = o?.HtfPeriodType === 'Second' && o.HtfPeriod % 60;
+  const every = secs ? Math.min(60_000, Math.max(10_000, o.HtfPeriod * 1000)) : 60_000;
+  if (closed && (d ? due || S.bars[0].t !== h.start || d.next != null : now - h.failed > 60_000)) hemaRequest(k);
+  else if (d && d.mode !== 'SmoothScaled' && due && (d.held && now - d.due < 60_000 || now - h.asked > every
+    || h.dueAsked !== d.due && now - h.asked >= 10_000)) hemaRequest(k);
 }
-function renderHemaInfo() {
-  const el = $('#hema-info'), o = S.hemaSet;
-  if (!S.st.hema) { el.textContent = ''; return; }
-  if (hemaError) { el.textContent = hemaError; return; }
-  const src = o.HtfPeriodType === 'Day' ? `${o.HtfPeriod}D` : o.HtfPeriod % 60 ? `${o.HtfPeriod}m` : `${o.HtfPeriod / 60}h`;
-  const d = S.hema;
+function renderHemaInfo(k = 'hema') {
+  const el = infoEl(k), o = hemaSetOf(k), h = hemaOf(k);
+  if (!el) return;
+  if (!S.st[k]) { el.textContent = ''; return; }
+  if (h.error) { el.textContent = h.error; return; }
+  const n = o.HtfPeriod, unit = { Second: 's', Day: 'D', Week: 'W', Month: 'M', Year: 'Y' }[o.HtfPeriodType];
+  const src = unit ? `${n}${unit}` : n % 60 ? `${n}m` : `${n / 60}h`;
+  const d = h.data;
   el.textContent = !d ? 'Loading…'
     : o.Mode === 'SmoothScaled' ? `EMA ${d.scaled} of this chart's bars (${src} ${o.EmaLength} scaled).`
     : o.Mode === 'ExactHTF' ? `Last closed ${src} EMA ${o.EmaLength}.` : `${src} EMA ${o.EmaLength} with the live price.`;
@@ -2088,20 +2400,33 @@ function renderDsmaInfo() {
 }
 
 // ---- If/Then: the block is per symbol on the server (the Plan tab); fetched even while hidden, for the Plan tab ------
-let ifFetched = 0, ifHeard = 0;   // ifHeard: blocks broadcast for the open symbol
+// ifHeard: blocks broadcast for the open symbol; ifAsked: in replay, the clock asked for and the answer's today
+let ifFetched = 0, ifHeard = 0, ifReq = 0, ifAsked = null;
+// In replay the daily ATR is the one as it stood at the replay clock: asked again when the clock reaches another trade
+// date, and each minute until that day's first trade is in (before it, the ATR is the day's before the last one).
+function ifStale() {
+  const a = ifAsked, at = S.replay.at;
+  return !a || tradeDate(at) !== tradeDate(a.at) || (a.today === false && Math.floor(at / 60e3) > Math.floor(a.at / 60e3));
+}
 async function ifRequest() {
   if (!S.instruments[S.symbol] || !indReady('ifthen')) { renderIfInfo(); return; }
-  const sym = S.symbol, was = S.ifData, heard = ifHeard;
+  const sym = S.symbol, was = S.ifData, heard = ifHeard, req = ++ifReq;   // only the newest answer: the latest clock's
+  const asked = ifAsked = S.replay ? { at: S.replay.at, today: null } : null;
   ifFetched = Date.now();
   try {
-    const rth = S.rth;
-    const d = await api('GET', `/api/ifthen/${sym}?atr=${S.ifSet.AtrLength}${rth ? '&rth=true' : ''}`);
-    if (sym !== S.symbol || rth !== S.rth) return;
+    const rth = S.rth, q = replayUntil(new URLSearchParams({ atr: S.ifSet.AtrLength }));
+    if (rth) q.set('rth', 'true');
+    const d = await api('GET', `/api/ifthen/${sym}?${q}`);
+    if (req !== ifReq || sym !== S.symbol || rth !== S.rth) return;
+    if (asked) asked.today = d.today;
     // a block broadcast while this was answered: the answer may have been read before it was saved
     const late = ifHeard !== heard && S.ifData;
     S.ifData = late ? { ...d, rows: late.rows, updated: late.updated } : d;
     S.ifRows = biasParse(S.ifData.rows);
-  } catch (e) { $('#if-info').textContent = e.message; return; }
+  } catch (e) {
+    if (req === ifReq) { $('#if-info').textContent = e.message; ifAsked = null; }   // replay: asked again at the next bar
+    return;
+  }
   amtLayout();
   ifPrim.update();
   renderPlanIf(false);
@@ -2115,27 +2440,50 @@ function renderIfInfo() {
   if (!d) { el.textContent = 'Loading…'; return; }
   if (!S.ifRows.length) { el.textContent = d.rows ? 'No valid rows: use BIAS|LO|HI|TEXT, one band per line.' : `No block for ${S.symbol}: paste it on the Plan tab.`; return; }
   const act = f && f.active >= 0 ? `now in ${biasRange(S.ifRows[f.active])}` : '';
-  el.textContent = `${S.ifRows.length} bands${act ? `, ${act}` : ''}. Daily ATR(${S.ifSet.AtrLength}) ${d.atr != null ? px(d.atr) : 'needs more days'}.`;
+  const input = S.ifSet.PriceSource === 'Input series' ? ` Price: ${S.ifSet.InputSeries || 'Close'}${ifInputKnown() ? '' : ' (not on this chart: Close)'}.` : '';
+  el.textContent = `${S.ifRows.length} bands${act ? `, ${act}` : ''}. Daily ATR(${S.ifSet.AtrLength}) ${d.atr != null ? px(d.atr) : 'needs more days'}.${input}`;
 }
+const ifInputKnown = (name = S.ifSet.InputSeries) => !name || ifInputChoices().includes(name);
 
 // ---- Level Lines: NinjaTrader's OnRender (studies.js); the range and levels are per symbol ------------------------------
-// A line's price as its label shows it: on a tick, as the instrument writes prices; between ticks (a range's mid on an
-// odd number of ticks, a level typed off the tick) its own price, not the tick it rounds to (Level Lines v1.1.1).
+// A line's price as its label shows it (BuildLabelText): on a tick, as the instrument writes prices; between ticks (a
+// range's mid on an odd number of ticks, a level typed off the tick) its own price, not the tick it rounds to (Level
+// Lines v1.1.1): "0." and as many decimals as the instrument writes (at least 1) and up to 4 more, so a Treasury's
+// off-tick line reads 110.50781, not the 32nd it rounds to.
 function llPrice(p) {
-  const t = inst().tick_size, n = p / t;
-  if (!t || Math.abs(n - Math.round(n)) <= 1e-6 || bondTick(inst().symbol)) return px(Math.round(n) * t);
-  const d = inst().decimals ?? 2, s = Number(p).toFixed(Math.max(d, 6)).replace(/0+$/, '');
-  const f = s.split('.')[1] || '';
-  return f.length < d ? Number(p).toFixed(d) : s;
+  const t = inst().tick_size;
+  if (!t) return px(p);
+  const n = p / t, s = px(Math.round(n) * t);
+  if (Math.abs(n - Math.round(n)) <= 1e-6) return s;
+  const dot = s.indexOf('.'), d = Math.max(1, dot < 0 ? 0 : s.length - dot - 1);
+  return Number(p).toFixed(d + 4).replace(new RegExp(`(\\.\\d{${d}}\\d*?)0+$`), '$1');
 }
-const llPrim = new LevelLinesPrimitive(() => (S.st.lines && !S.ext && indReady('lines')
-  ? { s: S.llSet, fmt: llPrice } : null));
+// Each Level Lines' drawing ('lines', another: 'lines_2'), made the first time it is asked for; its layer is its key's.
+const llState = (k) => (S.st[k] && !S.ext && indReady('lines') && S.llSets?.[k] ? { s: S.llSets[k], fmt: llPrice } : null);
+const llPrim = new LevelLinesPrimitive(() => llState('lines'));
 candles.attachPrimitive(llPrim);
-function renderLlInfo() {
-  const el = $('#ll-info');
-  if (!S.st.lines) { el.textContent = ''; return; }
-  const n = indReady('lines') ? levelLinesOf(S.llSet).length : 0;
-  el.textContent = n ? `${n} lines on ${S.symbol}.` : `No range or levels for ${S.symbol}: add them on the Plan tab.`;
+const llPrims = {};   // the others
+function llPrimOf(k) {
+  if (k === 'lines') return llPrim;
+  if (!llPrims[k]) {
+    const p = llPrims[k] = new LevelLinesPrimitive(() => llState(k));
+    candles.attachPrimitive(p);
+    layerZ(p);
+  }
+  return llPrims[k];
+}
+// Whose levels a symbol's first Level Lines shows: "ES/MES" on either, as NinjaTrader's waiting message names them.
+function llShared(sym = S.symbol) {
+  const full = indSym('lines', sym), micro = Object.entries(S.ind.share?.lines || {}).find(([, f]) => f === full)?.[0];
+  return micro ? `${full}/${micro}` : sym;
+}
+function renderLlInfo(k = 'lines') {
+  const el = infoEl(k);
+  if (!el) return;
+  if (!S.st[k]) { el.textContent = ''; return; }
+  const n = indReady('lines') && S.llSets?.[k] ? levelLinesOf(S.llSets[k]).length : 0;
+  if (k !== 'lines') el.textContent = n ? `${n} lines on this chart.` : 'No range or levels on this chart: add them in Settings….';
+  else el.textContent = n ? `${n} lines on ${llShared()}.` : `No range or levels for ${llShared()}: add them on the Plan tab.`;
 }
 
 // ---- Plan tab: this symbol's daily levels (as TradingView takes them), If/Then block and Level Lines ---------------------
@@ -2211,19 +2559,32 @@ $('#pl-if-save').onclick = async () => {
 };
 
 const LL_BOXES = ['#pl-ll-top', '#pl-ll-bot', '#pl-ll'];
+// The range boxes take a price as the chart writes it: on a Treasury chart 32nds (110'165, 110'16.5, 110-165) or a
+// plain number, as the levels box. A saved one shows in 32nds there when it is on the tick (110.515625: 110'165).
+const LL_32 = /^[+-]?\d+['-]\d\d?(?:\.?\d)?$/;
+function llRangeIn(text) {
+  const t = text.trim().replace(/,/g, '');
+  return t === '' ? 0 : bondTick(S.symbol) && LL_32.test(t) ? parse32(t) : Number(t);
+}
+function llRangeShown(p) {
+  if (!p) return '';
+  const t = inst().tick_size;
+  return bondTick(S.symbol) && t && Math.abs(p / t - Math.round(p / t)) < 1e-9 ? px(p) : String(p);
+}
 function renderPlanLines(fill = true) {
   if (!indReady('lines')) return;
-  const s = S.llSet;
-  fillBox($('#pl-ll-top'), s.RangeTop || '', fill);
-  fillBox($('#pl-ll-bot'), s.RangeBottom || '', fill);
+  const s = S.llSet, mode = bondTick(S.symbol) ? 'text' : 'decimal';   // a phone's keypad: 32nds need the apostrophe
+  for (const q of ['#pl-ll-top', '#pl-ll-bot']) $(q).inputMode = mode;
+  fillBox($('#pl-ll-top'), llRangeShown(s.RangeTop), fill);
+  fillBox($('#pl-ll-bot'), llRangeShown(s.RangeBottom), fill);
   fillBox($('#pl-ll'), s.CustomLevels || '', fill);
-  const n = levelLinesOf(s).length;
-  $('#pl-ll-msg').textContent = n ? `${n} lines` : '';
+  const n = levelLinesOf(s).length, both = llShared();
+  $('#pl-ll-msg').textContent = [n ? `${n} lines` : '', both !== S.symbol ? `shared by ${both}` : ''].filter(Boolean).join(', ');
+  renderLlLeft();
 }
 LL_BOXES.forEach((q) => { $(q).oninput = markDirty; });
 $('#pl-ll-save').onclick = async () => {
-  const num = (q) => ($(q).value.trim() === '' ? 0 : Number($(q).value));
-  const top = num('#pl-ll-top'), bot = num('#pl-ll-bot');
+  const top = llRangeIn($('#pl-ll-top').value), bot = llRangeIn($('#pl-ll-bot').value);
   if (!(top >= 0) || !(bot >= 0)) { toast('Range top and bottom: a price, or empty for none'); return; }
   try {
     await indPutSymbol('lines', { RangeTop: top, RangeBottom: bot, CustomLevels: $('#pl-ll').value });
@@ -2233,24 +2594,50 @@ $('#pl-ll-save').onclick = async () => {
     if (!S.st.lines) setStudy('lines', true);
   } catch (e) { fail(e); }
 };
+// A micro's own levels from before it shared its full-size contract's, set aside as that one had its own (the server's
+// ind_symbol_left): on both charts' Plan tab until dismissed, to copy what is still wanted.
+function llLeft() {
+  const full = indSym('lines');
+  return Object.entries(S.ind.left?.lines || {}).find(([micro]) => indSym('lines', micro) === full) || null;
+}
+function renderLlLeft() {
+  const el = $('#pl-ll-left'), x = llLeft();
+  el.hidden = !x;
+  if (!x) return;
+  const [micro, v] = x, full = indSym('lines', micro);
+  const range = [v.RangeTop ? `top ${llRangeShown(v.RangeTop)}` : '', v.RangeBottom ? `bottom ${llRangeShown(v.RangeBottom)}` : ''].filter(Boolean).join(', ');
+  $('#pl-ll-left-what').textContent = `${micro} had levels of its own before it shared ${full}'s. They are not shown: copy what you want into the boxes above.`;
+  $('#pl-ll-left-text').value = [range ? `Range ${range}` : '', v.CustomLevels || ''].filter(Boolean).join('\n');
+}
+$('#pl-ll-left-x').onclick = async () => {
+  const x = llLeft();
+  if (!x) return;
+  try { S.ind.left = (await api('DELETE', `/api/indicators/lines/${x[0]}/left`)).left; } catch (e) { fail(e); return; }
+  indCache();
+  renderLlLeft();
+};
 
 // ---- the Indicators dialog (indicators.js): one adapter per indicator ---------------------------------------------
 const setStudy = (k, on) => { if (replayBlocks(k)) return; S.st[k] = on; studiesChanged(k); };
 const LVL_TEXT = { name: 'lvl_text', group: '2. Daily Levels', order: 9, label: 'Paste Levels Here', type: 'text',
   description: "This symbol's levels: the one-line paste (2026-09-30, pivot, prices...) or the Pivot Level / Resistance Levels / Support Levels block. Used when no levels file or link has levels. Also on the Plan tab." };
 const IND_ORDER = ['amt', 'ifthen', 'lines', 'tpo', 'gap', 'hema', 'dsma', ...VP_KINDS];
+const indOrder = () => IND_ORDER.flatMap((k) => (MULTI.includes(k) ? instKeys(k) : [k]));   // another of one after it
 const IND_NOTES = {
   amt: 'Runs on the server for every device. All session fields are Central exchange time. The alert settings (the Alerts group, every Alert switch and the level zone width, marked with the symbol) are the symbol\'s: the same on every chart of it (one alert runner per symbol), while another symbol\'s charts keep theirs, also on Apply to all charts. The levels file is the same on every chart. Presets leave both as they are. The alerts follow their Alert switches only: a group\'s Enable switch only shows or hides it on this chart.',
   ifthen: "The block and the instrument label are this symbol's; the block is also on the Plan tab.",
-  lines: "The range and the custom levels are this symbol's; they are also on the Plan tab.",
-  gap: 'How many days it scans is in the Studies menu (History). The alert switches (marked with the symbol) are the symbol\'s: the same on every chart of it (the server\'s gap alerts for it), while another symbol\'s charts keep theirs, also on Apply to all charts. The symbol\'s gap alerts take the RTH times and minimum gap size of the chart of it that last saved them or switched them on, never another symbol\'s. Presets leave the alert switches as they are.',
-  hema: 'The source timeframe can be Minute or Day bars.',
+  lines: "The range and the custom levels are this symbol's (a micro's are its full-size contract's: MES and ES share them, as NinjaTrader's Sharing mode); they are also on the Plan tab.",
+  lines_n: "This one's range and custom levels are this chart's own, as NinjaTrader's Sharing mode Off: for extra lines on one chart only.",
+  gap: 'How many days it scans is in the Studies menu (History). The alert switches (marked with the symbol) are the symbol\'s: the same on every chart of it (the server\'s gap alerts for it), while another symbol\'s charts keep theirs, also on Apply to all charts. The symbol\'s gap alerts take the RTH times, Use Instrument Hours and minimum gap size of the chart of it that last saved them or switched them on, never another symbol\'s. Presets leave the alert switches as they are.',
+  hema: "The source can be Second, Minute, Day, Week, Month or Year bars, as NinjaTrader's time bars. A Second source is built from the stored trades and works on seconds, minute, hour and 1D charts.",
   dsma: "Daily bars from the 1-minute bars stored here (the last 1000, as NinjaTrader loads), one per CME trading day, or per regular session on an RTH chart. Plot widths are Line Width.",
   aavp: "Runs on the server from the 1-minute bars stored here, as far back as they go. Pin to visible edge keeps a long anchor's histogram on screen.",
   pvp: "Runs on the server from the 1-minute bars stored here. A line ends at the first bar that touches it after its period.",
-  prof: 'Runs on the server from every trade stored here, up or down by the tick rule. Session times are in CT (ExchangeTemplate, Chart and Central), or Eastern or UTC as picked.',
+  prof: 'Runs on the server from every trade stored here, up or down by the tick rule. Session times are in CT (ExchangeTemplate and Central), Eastern or UTC as picked, or the chart\'s own time zone (Chart: the clock\'s).',
 };
 const same = (x, y) => JSON.stringify(x ?? {}) === JSON.stringify(y ?? {});
+const IF_INPUT = { name: 'InputSeries', group: 'Data Series', order: 0, label: 'Input series', type: 'choice', default: 'Close',
+  description: "What Price source \"Input series\" reads, as NinjaTrader's Data Series > Input series: the bars as a price type (Close, Open, High, Low, Median, Typical, Weighted) or a line on this chart: an indicator's, a VWAP, an HTF EMA or a Daily SMA x4 plot. This chart's own: Apply to all charts leaves it." };
 function indAdapter(key) {
   const whose = ` Saved for ${setWhere()} only; Apply to all charts puts them on every chart.`;
   if (key === 'amt') {
@@ -2288,42 +2675,67 @@ function indAdapter(key) {
       },
     };
   }
-  const sc = S.ind.schema[key], shared = key === 'gap' ? GAP_SHARED : new Set();
+  // another of a study ('pvp_2'): its kind's settings, its own on this chart; no Apply to all charts (the others' charts
+  // have none of it), and unticked it goes (instRemove)
+  const b = baseOf(key), inst = b !== key;
+  const sc = S.ind.schema[b], shared = key === 'gap' ? GAP_SHARED : new Set();
+  // If/Then's Input series (NinjaTrader's Data Series group): this app's own setting, its choices this chart's
+  const local = key === 'ifthen' ? { InputSeries: 'Close' } : {};
+  const inputRow = () => {
+    const cur = tabSet().ifthen?.InputSeries, choices = ifInputChoices();
+    return { ...IF_INPUT, choices: cur && !choices.includes(cur) ? [...choices, cur] : choices };
+  };
+  // Level Lines 2 and on: the range and levels are the chart's own settings, not the symbol's
+  const symNames = b === 'lines' && inst ? [] : S.ind.per_symbol?.[b] || [], whoseSym = indSym(b);
   const a = {
-    key, title: sc.title.replace(/^Tatanka /, ''), version: sc.version, colorFormat: 'hex', note: `${IND_NOTES[key] || ''}${whose}`,
-    shown: () => !!S.st[key], show: (on) => setStudy(key, on),
+    key, presetKey: b, title: `${sc.title.replace(/^Tatanka /, '')}${inst ? ` ${instNo(key)}` : ''}`, version: sc.version, colorFormat: 'hex',
+    note: `${(b === 'lines' && inst ? IND_NOTES.lines_n : IND_NOTES[b]) || ''}${inst ? ` Saved for ${setWhere()} only.` : whose}`,
+    shown: () => !!S.st[key], show: (on) => (inst && !on ? instRemove(key) : setStudy(key, on)),
     // the chart's settings sit on top of the starting ones (the server's): "default" here is what those say; Gap
     // Analysis' alert switches as the server's gap alerts for the chart's symbol have them, as the AMT Toolkit's
-    schema: () => sc.settings, defaults: () => ({ ...indDefaults(key), ...(S.ind.overrides[key] || {}), ...(key === 'gap' ? gapShown() : {}) }),
-    ntDefaults: () => indDefaults(key), overrides: () => pickSet(tabSet()[key], shared, false), sharedNames: shared,
+    schema: () => (key === 'ifthen' ? [inputRow(), ...sc.settings] : sc.settings),
+    defaults: () => ({ ...indDefaults(b), ...local, ...(S.ind.overrides[b] || {}), ...(key === 'gap' ? gapShown() : {}) }),
+    ntDefaults: () => ({ ...indDefaults(b), ...local }), overrides: () => pickSet(tabSet()[key], shared, false), sharedNames: shared,
     ...(key === 'gap' ? { symbolShared: shared, allNote: () => ` The alert switches go to every ${S.symbol} chart only, and only ${S.symbol}'s gap alerts take the RTH times and minimum gap size: each symbol keeps its own.` } : {}),
-    symbolNames: S.ind.per_symbol?.[key] || [],
-    perSymbol: () => ({ ...(S.ind.symbols[key]?.[S.symbol] || {}), ...(key === 'ifthen' ? { RowsBlock: S.ifData?.rows ?? '' } : {}) }),
-    symbolDefault: (n) => (n === 'InstrumentLabel' ? S.symbol : n === 'RowsBlock' ? '' : indDefaults(key)[n]),
+    ...(key === 'ifthen' ? { allNote: () => " Input series stays each chart's own: its choices are that chart's indicators." } : {}),
+    symbolNames: symNames, symbolLabel: () => (b === 'lines' ? llShared() : S.symbol),
+    perSymbol: () => ({ ...(S.ind.symbols[b]?.[whoseSym] || {}), ...(key === 'ifthen' ? { RowsBlock: S.ifData?.rows ?? '' } : {}) }),
+    symbolDefault: (n) => (n === 'InstrumentLabel' ? S.symbol : n === 'RowsBlock' ? '' : indDefaults(b)[n]),
     async save(d, s) {
-      const mine = pickSet(d, shared, false);
+      // never the symbol's own as the chart's (a preset of Level Lines 2 loaded into the first one holds its levels)
+      const mine = pickSet(pickSet(d, shared, false), new Set(symNames), false);
       if (!same(mine, a.overrides())) tabSetSave(key, mine);
       if (s) {   // only what changed, so an unchanged If/Then block keeps its saved time
         const cur = a.perSymbol(), ch = Object.fromEntries(Object.entries(s).filter(([k, v]) => !same(v, cur[k] ?? a.symbolDefault(k))));
-        if (Object.keys(ch).length) await indPutSymbol(key, ch);
+        if (Object.keys(ch).length) await indPutSymbol(b, ch);
         if (key === 'lines') renderPlanLines(true);
       }
       if (key === 'gap') await gapAlertsFollow(S.gapSet, pickSet(d, shared, true));   // the chart's symbol's alerts
     },
     async applyAll(d) {   // every chart: these become the starting settings, and no chart keeps its own
       const full = { ...a.defaults(), ...d }, nt = indDefaults(key);
-      await indPut(key, Object.fromEntries(Object.entries(full).filter(([n, v]) => n in nt && !shared.has(n) && !same(v, nt[n]))));
+      // never the symbol's own, as save() (a preset of Level Lines 2 loaded into the first one holds its range and
+      // levels): the server refuses them, and they would be taken for the starting ones below
+      const put = Object.fromEntries(Object.entries(full).filter(([n, v]) => n in nt && !shared.has(n) && !symNames.includes(n) && !same(v, nt[n])));
+      // HTF EMA 2 keeps what it shows: its settings are what differs from these. This chart's tabs now, before they
+      // change (back as they were if the server refuses these); the other charts' and workspaces' with what this
+      // returns (allCharts), once it took them
+      const freeze = INST_RE.test(`${key}_2`) ? { nt, was: { ...nt, ...(S.ind.overrides[key] || {}) }, now: { ...nt, ...put } } : null;
+      const undo = instFreeze(key, freeze);
+      try { await indPut(key, put); } catch (e) { undo?.(); throw e; }
       // as OK does, for this symbol's alerts (another's keep theirs); this tab's own may still be in S.gapSet until allCharts
       if (key === 'gap') await gapAlertsFollow(full, pickSet(d, shared, true));
+      return freeze;
     },
   };
+  if (inst) delete a.applyAll;
   return a;
 }
 const indDlg = createIndicatorsDialog({
   root: $('#ind-dlg'), local, toast, fail: (e) => fail(e), symbol: () => S.symbol, ask: (o) => ask(o),
   templates: () => templates,   // NinjaTrader's "Save as template", on every device (defined further down)
-  adapters: () => IND_ORDER.filter((k) => (k === 'amt' ? S.amtServer.schema : S.ind.schema[k])).map(indAdapter),
-  allCharts: (key) => studyAll(key),
+  adapters: () => indOrder().filter((k) => (k === 'amt' ? S.amtServer.schema : S.ind.schema[baseOf(k)])).map(indAdapter),
+  allCharts: (key, freeze) => studyAll(key, freeze),
 });
 function openInd(key) {
   if (!S.amtServer.schema && !indReady('tpo')) { toast('Settings are still loading'); return; }
@@ -2389,14 +2801,19 @@ function toPoints(b) {
 // back to raises it (S.barCap) up to OLDER_MAX, so the live bars don't take back what was asked for.
 const BAR_CAP = 20000, OLDER_MAX = 60000;
 function trimBars() {
-  const cut = S.bars.length - S.barCap;
+  let cut = S.bars.length - S.barCap;
+  // not the bars in view (older ones scrolled back to), unless far past the most a chart holds
+  const r = chart.timeScale().getVisibleLogicalRange();
+  if (r && S.bars.length < OLDER_MAX + BAR_CAP) cut = Math.min(cut, Math.floor(r.from) - OLDER_EDGE - 50);   // (past the edge that loads them again)
+  if (cut <= 0) return;
   S.bars.splice(0, cut);
-  if (S.older) S.older.more = true;   // dropped from the left: there again to scroll back to
+  if (S.older) Object.assign(S.older, { more: true, next: null });   // dropped from the left: there again to scroll back to
   barsRedraw(-cut);
 }
 // Every bar again, the view `shift` bars along (bars added or dropped at the left).
 function barsRedraw(shift) {
   const r = chart.timeScale().getVisibleLogicalRange();
+  if (shift) drawings.shift(shift);   // the measure tool's bars (by index) move with them
   S.seqTime.clear();
   const c = [], v = [];
   for (const b of S.bars) { const [cb, vb] = toPoints(b); c.push(cb); v.push(vb); }
@@ -2443,15 +2860,28 @@ async function olderLoad(visible) {
   clearTimeout(o.poll);
   loadNote(o.fetching ? OLDER_NT : OLDER_NOTE);
   try {
-    const before = o.next ?? first.t;   // after an answer with none (a long stretch with nothing stored): on from where it got
-    const q = new URLSearchParams({ symbol: sym, spec, before, count, rth: S.rth });
+    // NinjaTrader asked for older minutes (the last answer): from the second bar, as the first (time bars: one that
+    // doesn't restart at each session) can be only part of one, built from where the stored minutes began; it comes
+    // again, whole, with the ones before it. After an answer with none (a long stretch with nothing stored): on from where
+    // it got. have: tick, volume, range and Renko bars can open on one millisecond, the ones before the chart's sent too.
+    const second = all[1], redo = !!(o.fetching && o.next == null && second && isTime());
+    const before = o.next ?? (redo ? second.t : first.t), have = o.next == null ? all.findIndex((b) => b.t !== first.t) : 0;
+    const q = new URLSearchParams({ symbol: sym, spec, before, count, rth: S.rth, have: have < 0 ? all.length : have });
     const d = await api('GET', `/api/older?${q}`, undefined, { timeout: 60_000 });
-    if (o !== S.older || all !== S.bars || all[0] !== first) return;   // another load (or a trim) meanwhile: asked again
+    if (o !== S.older || all !== S.bars || all[0] !== first) {   // another load (or a trim) meanwhile: asked again
+      if (o === S.older) setTimeout(olderAgain, 0);   // (a trim: from the new first bar; a go-to-date goes on)
+      return;
+    }
+    const got = redo ? d.bars.find((b) => b.t === first.t) : null;
+    const again = got && ['o', 'h', 'l', 'c', 'v', 'bv', 'sv', 'n'].some((k) => got[k] !== first[k]) ? got : null;
+    const bars = d.bars.filter((b) => b.t < first.t || (!redo && o.next == null && b.t === first.t));
     o.fetching = !!d.fetching;   // NinjaTrader is asked for older ones: asked again when they're in
-    o.more = d.more && (d.fetching || d.bars.length > 0 || (d.next != null && d.next < before));   // never the same ask again
-    o.next = d.bars.length ? null : d.next;
-    const bars = d.bars.filter((b) => b.t < first.t);
+    o.waiting = d.why === 'wait';   // it didn't answer: asked again when it does ('older')
+    o.next = bars.length ? null : d.next ?? (redo && d.more && !d.fetching ? first.t : null);
+    o.more = d.more && (d.fetching || bars.length > 0 || (o.next != null && o.next < before));   // never the same ask again
+    if (again) Object.assign(first, again, { seq: first.seq });   // (drawn with them)
     if (bars.length) olderPrepend(bars);
+    else if (again) barsRedraw(0);
     if (d.approx && !o.toldApprox) { o.toldApprox = true; toast(`Some older ${spec} bars are built from 1-minute bars: no trades are stored for those days`); }
     if (!d.more && !o.toldEnd) {
       o.toldEnd = true;
@@ -2482,10 +2912,12 @@ function olderPrepend(bars) {
   let seq = S.bars[0].seq - bars.length;
   for (const b of bars) b.seq = seq++;
   S.bars.splice(0, 0, ...bars);
-  S.barCap = Math.min(OLDER_MAX, Math.max(S.barCap, S.bars.length));
+  S.barCap = Math.min(OLDER_MAX, Math.max(S.barCap, S.bars.length + BAR_CAP / 4));   // room for live bars before a trim
   barsRedraw(bars.length);
+  cmpLines.forEach(cmpOlder);   // the compared symbols' lines back as far
   hemaRequest();   // these read from the first bar on
   dsmaRequest();
+  if (S.st.gap && gapSeconds()) gapRequest();
   fillsSchedule(300);
   drawings.update();
   if (anchorMs() != null) drawAvwap();
@@ -2531,16 +2963,18 @@ function applyHistory(m) {
   fpSchedule(300);
   setStudyData();
   indsUpdate(true);
-  S.hema = null;
+  hemaClear();
   hemaDraw();
   hemaRequest();
   S.dsma = null;
   S.dsmaLive.clear();   // a new load: NinjaTrader's historical bars, none of them live
   dsmaDraw();
   dsmaRequest();
+  if (S.st.gap && gapSeconds()) gapRequest(true);   // over these bars, from the first
   renderIfInfo();
   scheduleRange(0);
   S.lastBar = m.bars.at(-1) || null;
+  vpLiveTick();   // AAVP's and PVP's plots on the last bar at load (an answer that came while the old bars were shown)
   priceLineLayout();
   if (bigOn()) bigSchedule(300);
   fillsSchedule(300);
@@ -2551,12 +2985,27 @@ function applyHistory(m) {
   if (viewApply(want)) S.scaleKey = scaleKey;   // the tab's view from before (or the same bars again: as they were)
   else {
     const ro = chart.timeScale().options().rightOffset;
-    chart.timeScale().setVisibleLogicalRange({ from: c.length - 150 - ro, to: c.length + ro });
+    chart.timeScale().setVisibleLogicalRange(amtRoomSet = { from: c.length - 150 - ro, to: c.length + ro });   // not a zoom
     if (S.lock) applyLock(true);   // a locked ratio centres on the new bars
     if (scaleKey !== S.scaleKey) {   // another symbol or bar type: a fixed price range from before would show nothing
       if (S.scaleKey && !S.lock && !PS().options().autoScale) setAuto(true);
       S.scaleKey = scaleKey;
     }
+  }
+  // scrolled back into older history before (a reconnect, a gap fill's reload, another tab and back): loaded back to it
+  // (the view not if it was moved meanwhile: scrolled, zoomed, a go-to-date); and back to an anchored VWAP's anchor,
+  // so it starts there, not at the first bar loaded
+  const backView = want?.t != null && want.key === scaleKey && S.bars.length && want.t < S.bars[0].t ? want.t : null;
+  const anchor = anchorMs(), akey = `${S.symbol}|${S.spec}|${S.rth}|${anchor}`;
+  const backAnchor = anchor != null && S.bars.length && anchor < S.bars[0].t && avwapReach(anchor, akey) ? anchor : null;
+  if (backView != null || backAnchor != null) {
+    const to = Math.min(backView ?? Infinity, backAnchor ?? Infinity);
+    const atEnd = () => { const r = chart.timeScale().getVisibleLogicalRange(); return !!r && r.to >= S.bars.length - 2; };
+    olderUntil(() => S.bars[0].t <= to, () => { if (backView != null && atEnd()) viewApply(want); if (backAnchor != null) drawAvwap(); },
+      () => {   // the anchor not reached: not again on each load, if the chart is full or the stored history ended
+        const o = S.older, ended = !!o && !o.more && !o.waiting;   // (not when NinjaTrader didn't answer, or an error)
+        if (backAnchor != null && S.bars[0]?.t > backAnchor && (S.bars.length >= OLDER_MAX || ended)) avwapFar.add(akey);
+      });
   }
   if (S.goTo != null) { const ms = S.goTo; S.goTo = null; goToTime(ms); }   // a journal trade on another symbol
   if (ax.pick === 'exchange' && exch().tz !== ax.zone) setChartZone('exchange', false);   // another exchange's clock
@@ -2579,7 +3028,7 @@ function barsClear() {
   S.fp.clear();
   setStudyData();
   indsUpdate(true);
-  S.hema = null;
+  hemaClear();
   hemaDraw();
   S.dsma = null;
   S.dsmaLive.clear();
@@ -2623,10 +3072,11 @@ function applyBars(m) {
   if (closed && S.st.gap) gapRequest();
   hemaTick(closed);
   dsmaTick(closed);
+  vpLiveTick();
   if (S.st.ifthen && S.ifRows.length) {   // OnEachTick: the active band follows the price
     ifPrim.update();
     renderIfInfo();
-    if (closed && Date.now() - ifFetched > 300_000) ifRequest();   // the daily ATR rolls once a day
+    if (closed && (S.replay ? ifStale() : Date.now() - ifFetched > 300_000)) ifRequest();   // the daily ATR rolls once a day
   }
   cmpTail();
   if (!S.hovering) legend(S.lastBar);
@@ -2675,6 +3125,7 @@ function setChartZone(v, store = true) {
   clockLabel();
   $('#clock-t').textContent = ax.clock.format(Date.now());
   renderAlerts(); renderEvents(); calRender(); zoneTexts(); renderRth(); renderPlanIf(false); drawLevels(); replayUi();   // their times too
+  for (const k of vpKeys()) if (S.st[k] && baseOf(k) === 'prof' && S.vpSet[k]?.SessionTimeZone === 'Chart') vpRequest(k, true);   // its window is in this zone
   if (anchorMs() != null) drawAvwap();
   if (tapeOpen()) tapeLoad();
   if (journalOpen()) journalLoad();
@@ -2720,7 +3171,8 @@ function dataWindow(b) {
   const chg = prev ? b.c - prev.c : null, dir = chg > 0 ? 'up' : chg < 0 ? 'down' : '';
   const cells = [['O', px(b.o)], ['H', px(b.h)], ['L', px(b.l)], ['C', px(b.c), dir],
     ...(chg == null ? [] : [['', `${chg > 0 ? '+' : ''}${px(chg)} (${chg > 0 ? '+' : ''}${(chg / Math.abs(prev.c) * 100).toFixed(2)}%)`, dir]]),
-    ['R', px(b.h - b.l)], ...(b.v ? [['V', shortNum(b.v)]] : []), ...(b.d != null && !S.ext ? [['Δ', `${b.d > 0 ? '+' : ''}${shortNum(b.d)}`, b.d > 0 ? 'up' : b.d < 0 ? 'down' : '']] : [])];
+    ['R', px(b.h - b.l)], ...(b.v ? [['V', shortNum(b.v)]] : []), ...(b.d != null && !S.ext ? [['Δ', `${b.d > 0 ? '+' : ''}${shortNum(b.d)}`, b.d > 0 ? 'up' : b.d < 0 ? 'down' : '']] : []),
+    ...(i >= 0 && !S.ext ? vpDataCells(i) : [])];
   el.replaceChildren(...cells.map(([k, v, c]) => {
     const s = document.createElement('span');
     if (k) { const ki = document.createElement('i'); ki.textContent = k; s.append(ki); }
@@ -2737,21 +3189,25 @@ let lgOpen = local.get('legendOpen', window.innerWidth < 760 ? '0' : '1') === '1
 function legendRows(b) {
   const at = (vals) => vals[S.hoverIdx >= 0 && S.hoverIdx < vals.length ? S.hoverIdx : vals.length - 1];
   const rows = [];
-  for (const it of ST_CAT) {
+  for (const it of stCat()) {
     if (it.ind || it.cs) continue;   // indicators: a row per one added, below; the price line is the chart's
     if (it.key in S.stHidden) { rows.push({ id: it.id, text: it.name, hidden: true }); continue; }
     if (!stOn(it)) continue;
     let text = it.name, color = '';
     if (it.id === 've') { text = 'VWAP (session)'; if (b?.st?.[0] != null) text += ` ${px(b.st[0])}`; color = '#ffb300'; }
     else if (it.id === 'vr') { text = 'VWAP (RTH)'; if (b?.st?.[2] != null) text += ` ${px(b.st[2])}`; }
-    else if (it.id === 'hema') { const v = S.hemaVals.length ? at(S.hemaVals) : NaN; text = `${hemaTitle()}${Number.isFinite(v) ? ` ${pxTick(v)}` : ''}`; color = hemaStyle().color; }
+    else if (baseOf(it.id) === 'hema') {
+      const vals = hemaOf(it.id).vals, v = vals.length ? at(vals) : NaN;
+      text = `${hemaTitle(it.id)}${Number.isFinite(v) ? ` ${pxTick(v)}` : ''}`;
+      color = hemaStyle(it.id).color;
+    }
     else if (it.id === 'dsma') {   // each plot's value in its color, as the data box has them
       const p = dsmaPeriods();
       rows.push({ id: it.id, text: 'Tatanka Daily SMA x4', eye: true, parts: [[`Tatanka Daily SMA x4 ${p.join(' ')}`, ''],
         ...S.dsmaVals.map((vals, i) => { const v = at(vals); return [` ${Number.isFinite(v) ? pxTick(v) : '–'}`, dsmaStyle(i).color]; })] });
       continue;
     }
-    else if (VP_KINDS.includes(it.id)) { const st = vpBase(it.id); if (st) text = vpTitle(st); }
+    else if (VP_KINDS.includes(baseOf(it.id))) { const st = vpBase(it.id); if (st) text = vpTitle(st); }
     else if (TATANKA_SET.includes(it.id)) text = `Tatanka ${it.name.replace(/^Tatanka /, '')}`;
     rows.push({ id: it.id, text, color, eye: !it.anchor });
   }
@@ -2810,13 +3266,13 @@ function legendStudies(b) {
 }
 function legendSettings(id) {
   if (id.startsWith('ind:')) { const c = S.inds[Number(id.slice(4))]?.c; if (c) { stOpen = `i:${c.type}`; openSt(true); } }
-  else if (IND_ORDER.includes(id) && (id === 'amt' ? S.amtServer.schema : indReady(id))) openInd(id);
-  else if (ST_CAT.find((x) => x.id === id)?.panel) { stOpen = id; openSt(true); }
+  else if (indOrder().includes(id) && (id === 'amt' ? S.amtServer.schema : indReady(baseOf(id)))) openInd(id);
+  else if (stItem(id)?.panel) { stOpen = id; openSt(true); }
   else { openSt(true); }
   $('#st-list .st-row.open')?.scrollIntoView({ block: 'nearest' });
 }
 onMenuPress($('#legend-st'), '.lg-row', (row, x, y) => {
-  const id = row.dataset.id, off = row.classList.contains('off'), it = ST_CAT.find((s) => s.id === id);
+  const id = row.dataset.id, off = row.classList.contains('off'), it = stItem(id);
   showMenu(x, y, [
     { label: 'Settings…', fn: () => legendSettings(id) },
     ...(it?.anchor ? [] : [{ label: off ? 'Show' : 'Hide', fn: () => hideStudy(id, !off) }]),
@@ -2826,7 +3282,7 @@ onMenuPress($('#legend-st'), '.lg-row', (row, x, y) => {
 });
 function legendRemove(id) {
   if (id.startsWith('ind:')) { S.indCfg.splice(Number(id.slice(4)), 1); indsChanged(); return; }
-  const it = ST_CAT.find((x) => x.id === id);
+  const it = stItem(id);
   if (it?.key in S.stHidden) { delete S.stHidden[it.key]; saveHidden(); }
   if (it) stSet(it, false);
   legendStudies(S.lastBar);
@@ -2845,7 +3301,7 @@ function hideStudy(id, hide) {
     indsChanged();
     return;
   }
-  const it = ST_CAT.find((x) => x.id === id);
+  const it = stItem(id);
   if (!it || !it.key || replayBlocks(it.key)) return;
   if (hide) {
     S.stHidden[it.key] = S.st[it.key];
@@ -3220,7 +3676,27 @@ function cmpHistory(m) {
   c.bars = m.bars;
   c.series.setData(cmpAlign(c));
   cmpLegend();
+  cmpOlder(c);   // the chart scrolled back further than its history
   return true;
+}
+// A compared symbol's older bars, back to the chart's first (older history scrolled back to): as the chart's own, from
+// what is stored (a live symbol's; a free-data one's history is all its own already).
+async function cmpOlder(c) {
+  if (c.older || !c.id || !c.bars.length || !S.instruments[c.sym]) return;
+  c.older = true;
+  try {
+    let ask = c.bars[0].t;
+    for (let k = 0; k < 20 && cmpLines.includes(c) && S.bars.length && c.bars[0].t > S.bars[0].t; k++) {
+      const top = c.bars[0].t, q = new URLSearchParams({ symbol: c.sym, spec: S.spec, before: ask, count: 5000, rth: S.rth, have: 1 });
+      const d = await api('GET', `/api/older?${q}`, undefined, { timeout: 60_000 });
+      if (!cmpLines.includes(c) || !c.bars.length || c.bars[0].t !== top) return;   // gone, or its history again
+      const add = d.bars.filter((b) => b.t < top);
+      if (add.length) { c.bars = [...add, ...c.bars]; c.series.setData(cmpAlign(c)); ask = add[0].t; }
+      else if (d.next != null && d.next < ask) ask = d.next;   // a stretch with nothing stored: on from where it got
+      else break;
+      if (!d.more || d.fetching) break;   // (NinjaTrader's on its way: on with the chart's next older bars)
+    }
+  } catch (e) { console.warn('compare older bars', e); } finally { c.older = false; }
 }
 function cmpBars(m) {
   const c = cmpLines.find((x) => x.id === m.id);
@@ -3242,7 +3718,12 @@ async function cmpExt(c) {
     c.bars = d.bars;
     c.series.setData(cmpAlign(c));
     cmpLegend();
-  } catch (e) { if (cmpLines.includes(c) && !c.bars.length) toast(`${c.sym}: ${e.message}`); }
+  } catch (e) {
+    if (cmpLines.includes(c) && !c.bars.length) toast(`${c.sym}: ${e.message}`);
+    // refused (a free-data symbol this timeframe can't have: AAPL on 30s, a FRED series on 5m): said once, not every
+    // 30 s; asked again when the timeframe changes (cmpLoad)
+    if (e.status >= 400 && e.status < 500) return;
+  }
   if (cmpLines.includes(c)) c.timer = setTimeout(() => cmpExt(c), calSpec() ? 120e3 : 30e3);
 }
 function cmpTail() {   // the chart's newest bar: each line's value as of it
@@ -3491,22 +3972,39 @@ function studySnapshot() {
 // Shows a tab's indicators (its own, or the shared set): studies on and off, indicators, order, hidden, settings.
 function applyStudyState(t) {
   indDlg.open(false);   // its settings were the other tab's
+  const was = indSnap();   // what is drawn, before the instances below take the new tab's sets
   S.stHidden = t.hidden && typeof t.hidden === 'object' ? { ...t.hidden } : {};
   const st = studiesFrom(t.st);
   for (const k of Object.keys(STUDY_DEFAULTS)) if (S.st[k] !== st[k]) { S.st[k] = st[k]; studiesChanged(k); }
+  instFollow(st, false);
   const inds = (Array.isArray(t.inds) ? t.inds : []).map(indClean).filter(Boolean).slice(0, IND_MAX);
   if (JSON.stringify(inds) !== JSON.stringify(S.indCfg)) { S.indCfg = inds; indsChanged(); }
   setLayers(Array.isArray(t.layers) ? t.layers : []);
-  indApply();
+  indApply(was);
   renderStudiesMenu();
   legend(S.lastBar);
+}
+// The other HTF EMAs and volume profiles of a tab or template (st): the chart's go where st has none, and st's are put
+// on, on or off as st has them (save: what a template brings is saved; a tab's own are saved already).
+function instFollow(st, save) {
+  for (const k of Object.keys(S.st)) if (INST_RE.test(k) && !(k in st)) { if (save) instRemove(k); else { instDrop(k); studiesChanged(k); } }
+  for (const k of Object.keys(st)) {
+    if (!INST_RE.test(k) || S.st[k] === st[k]) continue;
+    S.st[k] = st[k];
+    indSets();
+    studiesChanged(k);
+  }
 }
 // Linked: the tab shows the chart's shared indicators (and its changes go there); unlinked: its own, starting from
 // what it shows now.
 function setTabLink(i, link) {
   const t = S.tabs[i];
   if (!t || !!t.link === link) return;
-  if (link) { delete t.own; t.link = true; } else { delete t.link; t.own = JSON.parse(JSON.stringify(i === S.tab ? studySnapshot() : sharedStudies())); }
+  if (link) { delete t.own; t.link = true; } else {   // what it shows now (read while it still reads the shared set)
+    const own = JSON.parse(JSON.stringify(i === S.tab ? studySnapshot() : sharedStudies()));
+    delete t.link;
+    t.own = own;
+  }
   saveTabs();
   renderTabs();
   if (i === S.tab) { applyStudyState(link ? sharedStudies() : t.own); amtFollow(); }
@@ -3601,9 +4099,10 @@ renderTabs();
 function applyPriceFormat() {
   const i = inst(), priceFormat = bondTick(i.symbol) ? { type: 'custom', minMove: i.tick_size, formatter: (p) => bond32(p, i.tick_size) }
     : { type: 'price', precision: i.decimals, minMove: i.tick_size };
+  S.priceFormat = priceFormat;   // the lines made later too (another HTF EMA)
   candles.applyOptions({ priceFormat });
   studyLines.forEach((l) => l.applyOptions({ priceFormat }));
-  hemaLine.applyOptions({ priceFormat });
+  hemaLines().forEach((l) => l.applyOptions({ priceFormat }));
   dsmaLines.forEach((l) => l.applyOptions({ priceFormat }));
 }
 function onSymbolChanged() {
@@ -3611,7 +4110,7 @@ function onSymbolChanged() {
   applyPriceFormat();
   indsBuild();
   indSets();
-  llPrim.update();
+  instKeys('lines').forEach((k) => llPrimOf(k).update());
   renderPlanLines(false);   // also on each hello: the same symbol's edits stay
   S.lvStatus = null;
   loadPlanLevels();
@@ -3669,7 +4168,7 @@ function renderStudiesMenu() {
     el.checked = !!S.st[el.dataset.st];
     el.disabled = (!!S.replay && el.dataset.st in REPLAY_OFF) || ext(el.dataset.st);
   });
-  document.querySelectorAll('#st-menu .seg').forEach((seg) => seg.querySelectorAll('button')
+  document.querySelectorAll('#st-menu .seg[data-st]').forEach((seg) => seg.querySelectorAll('button')
     .forEach((b) => { b.classList.toggle('on', b.dataset.v === S.st[seg.dataset.st]); b.disabled = ext(seg.dataset.st); }));
   $('#st-ext').hidden = !S.ext;
   stRender();
@@ -3694,25 +4193,99 @@ function studiesChanged(key) {
   }
   if (key === 'amt' || key === 'amtDash') { renderAmtDash(); amtPrim.update(); }
   if (key === 'tpo') tpoRequest(true);
-  if (VP_KINDS.includes(key)) vpRequest(key, true);
+  if (VP_KINDS.includes(baseOf(key)) && key in S.st) vpRequest(key, true);   // (not one just taken off: instDrop)
   if (key === 'gap') { gapRequest(true); renderGapMenu(); }
   if (key === 'ifthen') { amtLayout(); if (S.st.ifthen) ifRequest(); renderIfInfo(); ifPrim.update(); }
-  if (key === 'hema') { if (S.st.hema) hemaRequest(); else { S.hema = null; hemaDraw(); } }
+  if (baseOf(key) === 'hema' && key in S.st) {   // taken off or put on: anew (not one left on)
+    if (!S.st[key] || !hemaOf(key).data) hemaReset(key);
+    if (S.st[key]) hemaRequest(key); else hemaDraw(key);
+  }
   if (key === 'dsma') { amtLayout(); if (S.st.dsma) dsmaRequest(); else { S.dsma = null; dsmaDraw(); } }
-  if (key === 'lines') { llPrim.update(); renderLlInfo(); }
+  if (baseOf(key) === 'lines' && key in S.st) { llPrimOf(key).update(); renderLlInfo(key); }
   if (key === 'big') { tapeSync(); bigSchedule(0); bigPrim.update(); }
   if (key === 'fills') fillsSchedule(0);
-  if (TATANKA_SET.includes(key)) indDlg.refresh();
+  if (TATANKA_SET.includes(baseOf(key))) indDlg.refresh();
   if (key === 'amt' || key === 'amtDash') gapPrim.update();   // the gap table moves below the AMT dashboard
   applyStudyVisibility();
   legend(S.lastBar);
   rangePrim.update();
 }
 const replayBlocks = (k) => { if (!S.replay || !(k in REPLAY_OFF)) return false; toast('Not during replay: it is drawn from later data'); renderStudiesMenu(); return true; };
+// Another HTF EMA or volume profile on the chart (the Studies menu's + Add another): the next free key ('pvp_2'),
+// starting from the first one's settings on this chart, its Settings open. On a layout's page, the chart last clicked's.
+function instAdd(base) {
+  if (instKeys(base).length >= INST_MAX) { toast(`Up to ${INST_MAX} of each on a chart`); return null; }
+  let n = 2;
+  while (`${base}_${n}` in S.st) n += 1;
+  const k = `${base}_${n}`;
+  if (TK_MULTI) { S.st[k] = true; workspaces.toActive({ type: 'study', key: k, on: true }); stRender(); return k; }
+  instPut(k, tabSet()[base]);
+  return k;
+}
+// Another of a study (HTF EMA 2) keeps only what differs from the study's starting settings: before those change
+// (Apply to all charts on the first), each one on this chart is saved as what it shows, against the new ones: on
+// every tab with its own studies and in the linked tabs' set (tkInstFreeze, layout.js; f: { nt, was, now }). Once
+// each: the other charts of a layout do theirs ('indall'), so the page around them none. What it returns puts them
+// back as they were (the server refused the new starting settings), each tab and the shared set not changed since.
+function instFreeze(b, f) {
+  if (!f || TK_MULTI) return null;
+  const moved = [];   // [tab, its set before, after]
+  for (const t of S.tabs) {
+    if (!t.own) continue;
+    const before = t.own.set, old = before || {}, set = tkInstFreeze(old, { ...(t.own.st || {}), ...(t === ownTab() ? S.st : {}) }, b, f);
+    if (set !== old) { t.own = { ...t.own, set }; moved.push([t, before, set]); }
+  }
+  if (moved.length) saveTabs();
+  const was = S.sharedSet, set = tkInstFreeze(was, { ...rawLocal('studies', {}), ...(ownTab() ? {} : S.st) }, b, f);
+  const shared = set !== was;
+  if (shared) { S.sharedSet = set; local.set('indSet', JSON.stringify(set)); }
+  if (!moved.length && !shared) return null;
+  indApply();
+  cellPost('state');
+  return () => {
+    let n = 0;
+    for (const [t, old, now] of moved) if (S.tabs.includes(t) && t.own?.set === now) { t.own = { ...t.own, set: old }; n += 1; }
+    if (n) saveTabs();
+    if (shared && S.sharedSet === set) { S.sharedSet = was; local.set('indSet', JSON.stringify(was)); n += 1; }
+    if (!n) return;
+    indApply();
+    cellPost('state');
+  };
+}
+function instPut(k, from) {   // one added: on, with these settings (what differs from the starting ones), if any
+  if (!INST_RE.test(k) || k in S.st || instKeys(baseOf(k)).length >= INST_MAX) return;
+  S.st[k] = true;
+  indSets();
+  if (from && Object.keys(from).length) tabSetSave(k, JSON.parse(JSON.stringify(from)));
+  studiesChanged(k);
+  setLayers(S.layers);   // its layer next to the first one's
+}
+// One taken off (its box unticked, Remove): its settings go too. instDrop: only off this chart's view (a tab switch to
+// one without it), what is saved left alone.
+function instRemove(k) {
+  if (!INST_RE.test(k) || !(k in S.st)) return;
+  if (TK_MULTI) { delete S.st[k]; workspaces.toActive({ type: 'study', key: k, on: null }); stRender(); return; }
+  if (k in S.stHidden) { delete S.stHidden[k]; saveHidden(); }
+  instDrop(k);   // first: nothing asks for it again
+  if (k in tabSet()) tabSetSave(k, null);
+  studiesChanged(k);
+  setLayers(S.layers);
+  if (stOpen === k) stOpen = '';
+}
+function instDrop(k) {
+  delete S.st[k];
+  const h = S.hx[k];
+  if (h) { chart.removeSeries(h.line); delete S.hx[k]; }
+  const p = vpPrims[k] || llPrims[k];
+  if (p) { candles.detachPrimitive(p); delete vpPrims[k]; delete llPrims[k]; }
+  for (const o of [S.vp, S.vpErr, vpHeld, vpBusy, S.vpLive, vpTouchMemo]) delete o[k];   // and its live values, its touches
+  indSets();
+  legend(S.lastBar);
+}
 document.querySelectorAll('input[data-st]').forEach((el) => {   // the Studies menu and the Plan tab
   el.onchange = () => { if (replayBlocks(el.dataset.st)) return; S.st[el.dataset.st] = el.checked; studiesChanged(el.dataset.st); };
 });
-document.querySelectorAll('#st-menu .seg button').forEach((b) => {
+document.querySelectorAll('#st-menu .seg[data-st] button').forEach((b) => {   // (not the AMT Toolkit's Profile period)
   b.onclick = () => { if (replayBlocks(b.parentElement.dataset.st)) return; S.st[b.parentElement.dataset.st] = b.dataset.v; studiesChanged(b.parentElement.dataset.st); };
 });
 function openSt(open) {
@@ -3752,6 +4325,16 @@ const ST_CAT = [
   { id: 'big', name: 'Big trades', group: 'Volume', key: 'big', panel: 'big', kw: 'bubbles large orders block' },
   ...Object.entries(IND_DEFS).map(([t, d]) => ({ id: `i:${t}`, name: d.long || d.name, group: d.group, ind: t, panel: 'ind', kw: d.kw || '' })),
 ].map((it, k) => [it, k]).sort((a, b) => ST_GROUPS.indexOf(a[0].group) - ST_GROUPS.indexOf(b[0].group) || a[1] - b[1]).map(([it]) => it);   // each group together
+// The rows: ST_CAT, with another of an HTF EMA or volume profile (instAdd) after the ones before it, numbered.
+function stCat() {
+  const out = [];
+  for (const it of ST_CAT) {
+    out.push(it);
+    if (MULTI.includes(it.key)) for (const k of instKeys(it.key).slice(1)) out.push({ ...it, id: k, key: k, name: `${it.name} ${instNo(k)}`, inst: true });
+  }
+  return out;
+}
+const stItem = (id) => stCat().find((x) => x.id === id);
 let stOpen = '';   // the row whose settings show
 const stModeOf = (k) => local.get(`stMode.${k}`, ST_MODES[k]);
 function stOn(it) {
@@ -3761,7 +4344,7 @@ function stOn(it) {
   return it.key in ST_MODES ? !!S.st[it.key] && S.st[it.key] !== 'off' : !!S.st[it.key];
 }
 function stBlocked(it) {   // why it can't be switched now, or ''
-  if (S.ext && (it.key in EXT_OFF || it.anchor)) return "Needs this app's own futures trades";
+  if (S.ext && (baseOf(it.key) in EXT_OFF || it.anchor)) return "Needs this app's own futures trades";
   if (S.replay && it.key in REPLAY_OFF) return 'Not during replay: drawn from later data';
   return '';
 }
@@ -3777,6 +4360,7 @@ function stSet(it, on) {
     return;
   }
   if (replayBlocks(it.key)) return;
+  if (it.inst && !on) { instRemove(it.key); return; }   // another of a study: unticked, it goes
   S.st[it.key] = it.key in ST_MODES ? (on ? stModeOf(it.key) : 'off') : on;
   studiesChanged(it.key);
 }
@@ -3801,6 +4385,23 @@ function stRow(it, layer = false) {
   if (open) {
     const p = document.querySelector(`#st-panels .stp[data-p="${it.panel}"]`);
     if (p) {
+      if (MULTI.includes(baseOf(it.key))) {   // its kind's panel, for this one: its settings, info, another, Remove
+        p.dataset.k = it.key;
+        p.querySelector('[data-ind]').dataset.ind = it.key;
+        const more = p.querySelector('.inst-more'), del = p.querySelector('.inst-del');
+        const first = !it.inst && !S.st[it.key];   // the first one off: + Add turns it on, not a second beside it
+        more.textContent = first ? '+ Add' : '+ Add another';
+        more.disabled = !first && instKeys(baseOf(it.key)).length >= INST_MAX;
+        more.onclick = () => {
+          if (first) { stSet(it, true); renderStudiesMenu(); return; }
+          const k = instAdd(baseOf(it.key)); if (k) { stOpen = k; renderStudiesMenu(); if (!TK_MULTI) openInd(k); }
+        };
+        del.hidden = !it.inst;
+        del.onclick = () => instRemove(it.key);
+        const plan = p.querySelector('[data-plan]');
+        if (plan) plan.hidden = !!it.inst;   // Level Lines 2's levels are in its Settings, not the Plan tab's
+        if (baseOf(it.key) === 'hema') renderHemaInfo(it.key); else if (baseOf(it.key) === 'lines') renderLlInfo(it.key); else renderVpInfo(it.key);
+      }
       if (it.ind) {
         p.querySelector('.ind-eds').replaceChildren(...indEditors(it.ind));
         const more = p.querySelector('.ind-more');
@@ -3823,21 +4424,21 @@ function stRender() {
   if (words.length) {
     const q = words.join(' ');
     const rank = (it) => { const n = it.name.toLowerCase(); return n.startsWith(q) ? 0 : n.split(/[\s(/]+/).some((w) => w.startsWith(words[0])) ? 1 : n.includes(q) ? 2 : 3; };
-    const hits = ST_CAT.filter((it) => { const t = `${it.name} ${it.group} ${it.kw || ''}`.toLowerCase(); return words.every((w) => t.includes(w)); })
+    const hits = stCat().filter((it) => { const t = `${it.name} ${it.group} ${it.kw || ''}`.toLowerCase(); return words.every((w) => t.includes(w)); })
       .map((it, i) => [rank(it), i, it]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
     out.push(...(hits.length ? hits.map((it) => stRow(it)) : [Object.assign(document.createElement('p'), { className: 'hint', textContent: 'Nothing by that name.' })]));
   } else {
-    const on = ST_CAT.filter(stOn), drawn = S.layersReady ? layerPlan(S.layers).order : [];
+    const cat = stCat(), on = cat.filter(stOn), drawn = S.layersReady ? layerPlan(S.layers).order : [];
     out.push(h('On this chart'));
     if (!on.length) out.push(Object.assign(document.createElement('p'), { className: 'hint', textContent: 'Nothing yet: tick one below.' }));
     else if (drawn.length > 1) {   // the layers, front first, to drag; then the rest (drawn with the bars, or in a pane of their own)
       const box = Object.assign(document.createElement('div'), { id: 'st-layers' });
-      box.append(...drawn.map((id) => (id === 'bars' ? barsRow() : stRow(ST_CAT.find((x) => x.id === id), true))));
+      box.append(...drawn.map((id) => (id === 'bars' ? barsRow() : stRow(stItem(id), true))));
       out.push(box, ...on.filter((it) => !drawn.includes(it.id)).map((it) => stRow(it)),
         Object.assign(document.createElement('p'), { className: 'hint st-lhint', textContent: 'Drag ⋮⋮ to reorder: higher draws in front. Drawings and alerts are always in front.' }));
     } else out.push(...on.map((it) => stRow(it)));
     let group = '';
-    for (const it of ST_CAT.filter((x) => !stOn(x))) {
+    for (const it of cat.filter((x) => !stOn(x))) {
       if (it.group !== group) { group = it.group; out.push(h(group)); }
       out.push(stRow(it));
     }
@@ -3901,15 +4502,34 @@ function layerGrip(id, name) {
 function layerMove(ids, moved) {
   const was = layerPlan(S.layers).order;
   if (ids.length !== was.length || ids.every((id, i) => was[i] === id)) { stRender(); return; }   // the menu changed under it: nothing moves
-  const behind = new Map();
-  let lead = '';
-  for (const id of S.layers) {
-    if (ids.includes(id)) lead = id;
-    else behind.set(lead, [...(behind.get(lead) || []), id]);
+  if (S.cs.barsFront && moved === 'bars') {   // they stay in front: the order kept for when it is unticked stays too
+    stRender();
+    toast('The price bars stay in front of the studies: untick Price bars in front (⚙ Chart) to put a study over them');
+    return;
   }
-  setLayers([...(behind.get('') || []), ...ids.flatMap((id) => [id, ...(behind.get(id) || [])])]);
-  const now = layerPlan(S.layers).order;
-  if (now.indexOf(moved) !== ids.indexOf(moved)) toast(`${ST_CAT.find((x) => x.id === moved)?.name} can't draw there: the list shows where it draws`);
+  // Price bars in front: the list shows where each draws (the bars over the studies, line studies over the others), not
+  // the order kept for when it is unticked; only the study moved moves there, next to its new neighbour
+  const keep = S.cs.barsFront && moved !== 'bars', over = S.cs.barsFront && !BARS_UNDER.has(moved) && ids.indexOf(moved) < ids.indexOf('bars');
+  if (keep) {
+    ids = ids.filter((id) => id !== 'bars');
+    const i = ids.indexOf(moved), out = S.layers.filter((id) => id !== moved);
+    out.splice(i + 1 < ids.length ? out.indexOf(ids[i + 1]) : out.indexOf(ids[i - 1]) + 1, 0, moved);
+    setLayers(out);
+  } else {
+    const behind = new Map();
+    let lead = '';
+    for (const id of S.layers) {
+      if (ids.includes(id)) lead = id;
+      else behind.set(lead, [...(behind.get(lead) || []), id]);
+    }
+    setLayers([...(behind.get('') || []), ...ids.flatMap((id) => [id, ...(behind.get(id) || [])])]);
+  }
+  const now = layerPlan(S.layers).order.filter((id) => !keep || id !== 'bars');
+  if (over || now.indexOf(moved) !== ids.indexOf(moved)) {
+    toast(over || (S.cs.barsFront && moved === 'bars')
+      ? 'The price bars stay in front of the studies: untick Price bars in front (⚙ Chart) to put a study over them'
+      : `${stItem(moved)?.name} can't draw there: the list shows where it draws`);
+  }
   else if (now.join() !== ids.join()) toast('Behind the bars, line studies (VWAP, EMA) draw in front of the others');
 }
 $('#st-q').addEventListener('input', () => { stOpen = ''; stRender(); });
@@ -3918,7 +4538,7 @@ $('#st-q').addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { if (e.target.value) { e.target.value = ''; stRender(); } else openSt(false); }
   if (e.key === 'Enter') {   // the first match: on, with its settings open
     const first = $('#st-list .st-row');
-    const it = first && ST_CAT.find((x) => x.id === first.dataset.id);
+    const it = first && stItem(first.dataset.id);
     if (!it) return;
     if (!stOn(it) && !stBlocked(it)) stSet(it, true);
     if (it.panel) { stOpen = it.id; renderStudiesMenu(); }
@@ -3928,15 +4548,23 @@ $('#st-q').addEventListener('keydown', (e) => {
 // templates (the look: ⚙ Chart). Each under a name, saved on the server, the same on every device. ------------------
 const indTplData = () => ({ studies: Object.fromEntries(Object.entries({ ...S.st, ...S.replay?.hidden }).filter(([k]) => k !== '_preset')),   // replay hides some: saved as they will be
   inds: S.indCfg.map((c) => ({ ...c })), layers: [...S.layers] });
+// Studies a preset or template turns off: none left hidden (a dimmed row in the legend whose eye turns it back on).
+function unhideOff(st) {
+  const off = Object.keys(S.stHidden).filter((k) => k in st && (!st[k] || st[k] === 'off'));
+  off.forEach((k) => delete S.stHidden[k]);
+  if (off.length) saveHidden();
+}
 function applyIndTpl(t) {
   if (S.replay) { toast('Leave replay first'); return false; }
   const st = { ...STUDY_DEFAULTS, ...(t.studies || {}), _preset: ST_PRESET };
   if (typeof st.prof === 'string') st.prof = st.prof !== 'off';
+  unhideOff(st);
   for (const k of Object.keys(st)) {
     if (k === '_preset' || !(k in STUDY_DEFAULTS) || S.st[k] === st[k]) continue;
     S.st[k] = st[k];
     studiesChanged(k);
   }
+  instFollow(studiesFrom(st), true);
   if (Array.isArray(t.inds)) { S.indCfg = t.inds.map(indClean).filter(Boolean).slice(0, IND_MAX); indsChanged(); }
   if (Array.isArray(t.layers)) setLayers(t.layers);
   renderStudiesMenu();
@@ -4000,6 +4628,8 @@ for (const [kind, u] of Object.entries(TPL_UI)) {
 $('#st-nt').onclick = () => {   // exactly what the NinjaTrader chart set shows
   if (S.replay) { toast('Leave replay first'); return; }
   const keys = Object.keys(STUDY_DEFAULTS);
+  Object.keys(S.st).filter((k) => INST_RE.test(k)).forEach(instRemove);   // one of each: no PVP 2, HTF EMA 2...
+  unhideOff(STUDY_DEFAULTS);
   Object.assign(S.st, STUDY_DEFAULTS);
   keys.forEach((k) => studiesChanged(k));
   if (!S.cs.priceLine) { S.cs.priceLine = true; csChanged('priceLine'); }
@@ -4050,14 +4680,21 @@ const fail = (e) => toast(e.message);
 // that shows each alert's state.
 const OPS = { cross: 'Crossing', above: 'Crossing up', below: 'Crossing down', gt: 'Greater than', lt: 'Less than', enter: 'Entering channel', exit: 'Exiting channel' };
 const CHANNEL = new Set(['enter', 'exit']);
-const symTick = (sym) => S.instruments[sym]?.tick_size || inst().tick_size;
-const symDec = (sym) => S.instruments[sym]?.decimals ?? 2;
-const snap = (p, sym = S.symbol) => +(Math.round(p / symTick(sym)) * symTick(sym)).toFixed(symDec(sym));
-const fmtSym = (sym, p) => (bondTick(sym) ? bond32(p, symTick(sym)) : Number(p).toFixed(symDec(sym)));
+// A stock's, a series' or a formula's alert (no instrument): its chart's tick and decimals while it is this chart,
+// else six significant digits, as the server writes them (free_alerts.free_fmt)
+const freeOwn = (sym) => !S.instruments[sym] && sym === S.symbol && S.ext?.decimals != null;
+const symTick = (sym) => S.instruments[sym]?.tick_size || (freeOwn(sym) ? S.ext.tick : 0);
+const symDec = (sym) => S.instruments[sym]?.decimals ?? (freeOwn(sym) ? S.ext.decimals : 2);
+const snap = (p, sym = S.symbol) => (symTick(sym) ? +(Math.round(p / symTick(sym)) * symTick(sym)).toFixed(symDec(sym)) : +(+p).toPrecision(10));
+function freeFmt(p) {
+  const v = Number(p), d = v ? Math.min(10, Math.max(2, 5 - Math.floor(Math.log10(Math.abs(v))))) : 2;
+  const [w, f = ''] = v.toFixed(d).split('.');
+  return `${w}.${f.replace(/0+$/, '').padEnd(2, '0')}`;
+}
+const fmtSym = (sym, p) => (bondTick(sym) ? bond32(p, symTick(sym)) : S.instruments[sym] || freeOwn(sym) ? Number(p).toFixed(symDec(sym)) : freeFmt(p));
 const num = (v) => parse32(v);   // 110'165 (32nds) as well as 7450.25
 
-function quickAlert(price) {   // "Add alert": price crossing this level, once
-  if (S.ext) { toast('Alerts run on the live futures charts'); return Promise.resolve(); }
+function quickAlert(price) {   // "Add alert": price crossing this level, once (a stock's or a formula's on its quotes)
   const p = snap(price);
   return api('POST', '/api/alerts', { symbol: S.symbol, kind: 'price', price: p, direction: 'cross' })
     .then(() => toast(`Alert: ${S.symbol} crossing ${px(p)}`)).catch(fail);
@@ -4182,18 +4819,22 @@ function syncDlg() {
   $('#al-tol-row').hidden = price || ind;
   if (chan && !$('#al-v2').value) {   // a channel starts 20 ticks tall, under the value
     const v = num($('#al-v1').value);
-    if (Number.isFinite(v)) $('#al-v2').value = fmtSym(dlg.sym, v - 20 * symTick(dlg.sym));
+    // no tick (a stock, series or formula not on this chart): 20 steps of the value's 4th significant digit
+    const t = symTick(dlg.sym) || 10 ** (Math.floor(Math.log10(Math.abs(v) || 1)) - 3);
+    if (Number.isFinite(v)) $('#al-v2').value = fmtSym(dlg.sym, v - 20 * t);
   }
   setTrig(dlg.repeat);
 }
-function openAlertDialog({ price, alert } = {}) {
+function openAlertDialog({ price, alert, sym } = {}) {   // sym: another symbol's (the watchlist's), the chart kept
   closeCtx();
-  if (!alert && S.ext) { toast('Alerts run on the live futures charts'); return; }
   const a = alert || null, p = a?.params || {}, chan = a?.kind === 'price' && CHANNEL.has(p.direction);
   dlg.edit = a;
-  dlg.sym = a?.symbol || S.symbol;
+  dlg.sym = a?.symbol || sym || S.symbol;
+  // a stock, a series or a formula: price alerts only, on its quotes (the others need a live future's trades)
+  const free = !S.instruments[dlg.sym];
+  for (const o of $('#al-src').querySelectorAll('option, optgroup')) if (o.value !== 'price') o.hidden = o.disabled = free;
   // a new one starts at the last price: the chart's, or the quote's where there are no bars (the page around a layout's charts)
-  const at = a?.kind === 'price' ? (chan ? p.price2 : p.price) : price ?? (dlg.sym === S.symbol && S.lastBar ? S.lastBar.c : S.quotes[wlKey(dlg.sym, S.instruments)]?.last);
+  const at = a?.kind === 'price' ? (chan ? p.price2 : p.price) : price ?? (dlg.sym === S.symbol && S.lastBar ? S.lastBar.c : symQuote(dlg.sym)?.last);
   $('#al-title').textContent = `${a ? 'Edit' : 'Create'} alert on ${dlg.sym}`;
   $('#al-src').value = !a || a.kind === 'price' ? 'price' : a.kind === 'level' ? 'level' : a.kind === 'ind' ? `i:${indBase(p.a.ind)}` : p.study;
   indDlgFill(a?.kind === 'ind' ? p : null);
@@ -4275,9 +4916,8 @@ $('#al-form').onsubmit = async (e) => {
       else patch.tolerance_ticks = b.tolerance_ticks;
       await api('PATCH', `/api/alerts/${a.id}`, patch);
       toast('Alert saved');
-    } else {
-      await api('POST', '/api/alerts', b);
-      await api('DELETE', `/api/alerts/${a.id}`);
+    } else {   // another kind of alert: the new one in its place, in one step
+      await api('POST', '/api/alerts', { ...b, replaces: a.id });
       toast('Alert saved');
     }
     closeAlertDialog();
@@ -4756,7 +5396,7 @@ $('#chart-wrap').addEventListener('pointerdown', (e) => {
   // holds it at once.
   const touch = e.pointerType !== 'mouse';
   if (!touch) alLock(true);
-  alDrag = { a: h.a, key: h.key, x0: e.clientX, y0: h.y, p: null, moved: false, touch };
+  alDrag = { a: h.a, key: h.key, x0: e.clientX, y0: h.y, p: null, moved: false, touch, t0: performance.now() };
 }, true);
 window.addEventListener('pointermove', (e) => {
   if (!alDrag) {
@@ -4778,7 +5418,9 @@ window.addEventListener('pointerup', () => {
   if (!g) return;
   alDrag = null;
   alLock(false);
-  if (!g.moved || g.p == null || g.p === g.a.params[g.key]) { alertPrim.update(); if (!g.moved) openAlertDialog({ alert: g.a }); return; }
+  // a tap opens it; a finger held still (a long press, the crosshair's elsewhere) does not
+  const tap = !g.moved && !(g.touch && performance.now() - g.t0 > 400);
+  if (!g.moved || g.p == null || g.p === g.a.params[g.key]) { alertPrim.update(); if (tap) openAlertDialog({ alert: g.a }); return; }
   const old = g.a.params;
   g.a.params = { ...old, [g.key]: g.p };   // drawn at the new price until the server's list arrives
   alertPrim.update();
@@ -4920,13 +5562,13 @@ let replayJumps = 0;   // every replay start and jump, over every replay: an ans
 // A replay start, jump or exit: the profiles drawn for the view before (live, or another clock) go until the new ones
 // come (TPO and Gap Analysis are asked anew, emptied, by subscribe()).
 function replayClearStudies() {
-  for (const k of VP_KINDS) { S.vp[k] = null; vpPrims[k].update(); }
+  for (const k of vpKeys()) { S.vp[k] = null; vpPrim(k).update(); }
   S.rangeProfile = null;
   rangePrim.update();
 }
 let replayRange = 0;
 function replayStudies() {
-  for (const k of VP_KINDS) if (S.st[k]) vpRequest(k);   // one at a time each: playing fast, the latest clock next
+  for (const k of vpKeys()) if (S.st[k]) vpRequest(k);   // one at a time each: playing fast, the latest clock next
   if (S.st.right !== 'off' && !replayRange) replayRange = setTimeout(() => { replayRange = 0; fetchRange(); }, 300);
   amtReplayAsk();
   replayLevels();
@@ -5005,19 +5647,20 @@ function replayStart(at) {
 }
 async function replayLoad() {
   const r = S.replay, req = ++r.req;
-  r.busy = true;
+  r.busy = r.loading = true;   // loading: the bars shown are the old clock's until applyHistory
   replayUi();
   try {
     const d = await api('GET', `/api/replay?symbol=${S.symbol}&spec=${S.spec}&at=${Math.round(r.at)}&rth=${S.rth}`);
     if (S.replay !== r || req !== r.req) return;
     Object.assign(r, { data: d.bars, kind: d.kind, period: d.kind === 'time' ? specSeconds(d.spec) * 1000 : 0, days: daysSpec(d.spec), nextAt: d.next_at, endAt: d.end_at, empty: 0 });
     r.idx = shownCount(d.bars, r.at, r.kind, r.period, r.days, d.end_at ?? d.next_at);
+    r.loading = false;
     applyHistory({ kind: d.kind, bars: d.bars.slice(0, r.idx) });
     if (!r.idx) toast(d.bars.length ? 'No bars before that time: press ▶ or ⏭ to start at the first one' : 'No stored bars around that time on this chart');
   } catch (e) {
     if (S.replay === r) { fail(e); loadNote(e.message); }
   } finally {
-    if (S.replay === r && req === r.req) { r.busy = false; replayUi(); }
+    if (S.replay === r && req === r.req) { r.busy = r.loading = false; replayUi(); }
   }
 }
 function replayStep() {
@@ -5320,7 +5963,7 @@ function scrollBars(f) {
 }
 function resetView() {
   const n = S.bars.length, ro = chart.timeScale().options().rightOffset;   // as a fresh load: the room amtLayout gives the labels
-  chart.timeScale().setVisibleLogicalRange({ from: n - 150 - ro, to: n + ro });
+  chart.timeScale().setVisibleLogicalRange(amtRoomSet = { from: n - 150 - ro, to: n + ro });   // not a zoom (amtRoomCheck)
   setAuto(true);
 }
 // Go to date (TradingView's Alt+G): a moment on the chosen zone's clock, centred at the zoom you have, the crosshair on
@@ -5590,6 +6233,7 @@ function csChanged(k) {
   if (k === 'sessions') sessionBreaks.update();
   if (k === 'countdown') countdown.update();
   if (k === 'dataWin') legend(S.lastBar);
+  if (k === 'barsFront') { applyLayers(); stRender(); }
 }
 document.querySelectorAll('#cs-menu input[data-cs], #cs-menu select[data-cs]').forEach((el) => {
   if (el.type === 'range') el.oninput = () => { S.cs[el.dataset.cs] = Number(el.value); $('#pl-op').textContent = `${el.value}%`; priceLineLayout(true); };
@@ -5785,7 +6429,7 @@ function subscribe() {
   tapeSymbol();
   amtRequest();
   tpoRequest(true);
-  vpAll(VP_KINDS.some((k) => S.vp[k] && S.vp[k].symbol !== S.symbol));
+  vpAll(vpKeys().some((k) => S.vp[k] && S.vp[k].symbol !== S.symbol));
   gapRequest(true);
   S.ifData = null;
   S.ifRows = [];
@@ -5822,6 +6466,7 @@ function onMessage(m) {
       cellPost('state');
       if (TK_MULTI && workspaces.activeState()) hostActive(workspaces.activeState());   // heard before this hello
       notifyStatus(m.notify);
+      pushHello();
       subscribe();
       break;
     case 'update': updateNote(m); break;
@@ -5860,7 +6505,10 @@ function onMessage(m) {
       renderGapMenu();
       indDlg.refresh();
       break;
-    case 'older': if (m.symbol === S.symbol && S.older?.fetching) olderAgain(); break;   // NinjaTrader's older bars are in
+    case 'older':   // NinjaTrader's older bars are in (or it answers again): a chart waiting for them asks again
+      if (m.symbol === S.symbol && (S.older?.fetching || S.older?.waiting)) { if (S.older.waiting) Object.assign(S.older, { more: true, waiting: false, toldEnd: false }); olderAgain(); }
+      cmpLines.filter((c) => c.sym === m.symbol).forEach(cmpOlder);
+      break;
     case 'reload': if (m.id === S.subId && !S.replay) { toast(`${S.symbol}: history filled in from NinjaTrader`); subscribe(); } else cmpReload(m.id); break;
     case 'quotes': m.quotes.forEach((q) => { S.quotes[q.s] = q; }); watch.onQuotes(m.quotes); extQuote(m.quotes); header(); break;
     case 'watchlists': watch.setDoc(m.watchlists); break;
@@ -5885,8 +6533,9 @@ function onMessage(m) {
       indCache();
       indApply();
       indDlg.refresh();
-      if (m.key === 'lines' && m.symbol === S.symbol) renderPlanLines(false);
+      if (m.key === 'lines' && m.symbol === indSym('lines')) renderPlanLines(false);
       break;
+    case 'indicators_left': S.ind.left = m.left; indCache(); renderLlLeft(); break;   // dismissed on another device
     case 'amt_levels': if (m.symbol === S.symbol) { S.lvStatus = m.status; renderPlanLevels(false); } break;
     case 'alert':
       S.events.unshift(m.event); renderEvents();
@@ -6021,10 +6670,15 @@ function cnRender(list) {
   box.scrollTop = top;
 }
 function cnDots() {   // on each list's fold: what is on, with its state
+  // the simulator (not a card: CHART_FEED=sim) feeds the futures and the quotes: said, not "none on"
+  const sim = cn.list.some((c) => c.id === 'ninjatrader' && /^Simulator running/.test(c.status || ''));
   for (const sec of $('#cn-list').querySelectorAll('.cn-sec')) {
     const on = cn.list.filter((c) => c.group === sec.dataset.group && c.listed && c.state !== 'off');
+    const none = sim && ['Futures feed', 'Quotes'].includes(sec.dataset.group)
+      ? cnEl('span', { title: 'Invented trades and quotes (CHART_FEED=sim in .env)' }, cnEl('i', { className: 'cn-dot ok' }), 'Simulator')
+      : cnEl('span', { className: 'dim', textContent: 'none on' });
     sec.querySelector('.cn-dots').replaceChildren(...(on.length ? on.map((c) => cnEl('span', { title: c.status },
-      cnEl('i', { className: `cn-dot ${c.state}` }), c.title)) : [cnEl('span', { className: 'dim', textContent: 'none on' })]));
+      cnEl('i', { className: `cn-dot ${c.state}` }), c.title)) : [none]));
   }
 }
 function cnAddable(items) {   // what a list's + offers
@@ -6476,7 +7130,8 @@ function setupShow(st) {
         const set = async () => {
           if (a.value.length < 8) { msg.className = 'cn-msg bad'; msg.textContent = 'At least 8 characters'; return; }
           if (a.value !== b.value) { msg.className = 'cn-msg bad'; msg.textContent = "The two don't match"; return; }
-          try { await api('PUT', '/api/auth/password', { new: a.value, label: deviceLabel() }); st.login = true; go(2); } catch (e) { msg.className = 'cn-msg bad'; msg.textContent = e.message; }
+          const push = await pushEndpoint();   // this device's app notifications stay
+          try { await api('PUT', '/api/auth/password', { new: a.value, label: deviceLabel(), ...(push ? { push } : {}) }); st.login = true; go(2); } catch (e) { msg.className = 'cn-msg bad'; msg.textContent = e.message; }
         };
         ft.append(btn('Back', () => go(0)), st.local ? btn('Skip: only this PC opens it', () => go(2)) : null, btn('Set password', set, true));
       }
@@ -6528,8 +7183,9 @@ function loginPart(c) {
   };
   const row = (label, input) => cnEl('label', { className: 'cn-fld' }, cnEl('span', { textContent: label }), cnEl('span', { className: 'cn-in' }, input));
   const cur = pw('Current password', 'current-password'), nw = pw('New password (8+ characters)', 'new-password'), again = pw('The same again', 'new-password');
-  const setIt = async (body, note) => {
-    try { await api('PUT', '/api/auth/password', { ...body, label: deviceLabel() }); await refresh(note); } catch (e) { say(e.message, false); }
+  const setIt = async (body, note) => {   // push: this device's app notifications stay (with login off, the server can't tell them)
+    const push = await pushEndpoint();
+    try { await api('PUT', '/api/auth/password', { ...body, label: deviceLabel(), ...(push ? { push } : {}) }); await refresh(note); } catch (e) { say(e.message, false); }
   };
   const newOk = () => {
     if (nw.value.length < 8) { say('At least 8 characters', false); return false; }
@@ -6615,11 +7271,24 @@ function pushWhyNot() {   // why this browser can't take app notifications, or '
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return "This browser can't show app notifications.";
   return '';
 }
-async function pushMine(devices) {   // this device's subscription, if the server still has it
+async function pushSub() {   // this browser's push subscription, if it has one
   if (pushWhyNot()) return null;
   const reg = await navigator.serviceWorker.getRegistration();
-  const sub = reg && await reg.pushManager.getSubscription();
+  return (reg && await reg.pushManager.getSubscription()) || null;
+}
+async function pushMine(devices) {   // this device's subscription, if the server still has it
+  const sub = await pushSub();
   return sub && devices.some((d) => d.id === pushIdGet()) ? sub : null;
+}
+const pushEndpoint = () => pushSub().then((sub) => sub?.endpoint || null, () => null);
+let pushHeard = false;
+async function pushHello() {   // once a page, connected: the server ties this device's app notifications to its sign-in
+  if (pushHeard || TK_CELL !== null) return;   // (turned on with login off, by an older version, or before its sign-in
+  pushHeard = true;                            // ran out), so signing it out ends them; and says if it still has them
+  try {
+    const endpoint = await pushEndpoint();
+    if (endpoint) pushIdSet((await api('POST', '/api/push/mine', { endpoint })).id || 0);
+  } catch { /* the server is away: asked again on the next page */ }
 }
 function pushPart(c) {
   const box = cnEl('div', { className: 'cn-push' });
@@ -6887,11 +7556,10 @@ const watch = createWatchlist({
     setSymbol(sym);
     if (phoneLayout()) { setSide(false); tapeSync(); }
   },
-  alert: (sym) => {   // a live future's chart symbol ("ES"): its quote is ES1!'s
-    const price = S.quotes[wlKey(sym, S.instruments)]?.last;
+  alert: (sym) => {   // a chart symbol: a live future's ("ES", its quote ES1!'s), a stock's or a formula's
+    const price = symQuote(sym)?.last;
     if (TK_MULTI) { workspaces.toActive({ type: 'alert', sym, price }); return; }
-    setSymbol(sym);
-    openAlertDialog({ price });
+    openAlertDialog({ price, sym });   // as TradingView: the chart stays as it is
   },
 });
 // On a computer the drawing tools are a column beside the chart, as TradingView's, so they cover none of it; a phone
@@ -6946,6 +7614,9 @@ async function bigFetch() {
   // to the replay clock in a replay (its last bar is not the live edge: each step past it asks again)
   const end = i1 + 1 < S.bars.length ? S.bars[i1 + 1].t : S.replay ? S.replay.at : Date.now() + 60_000;
   const start = Math.max(S.bars[i0].t, end - 3 * 86_400_000), sym = S.symbol, min = bigMin();
+  // The bars shown are not the clock's yet (a replay started from the live chart, or jumped back, while its bars load):
+  // nothing to ask for, its bars ask again when they come (applyHistory).
+  if (start > end) return;
   const key = `${sym} ${min}`, live = !S.replay && i1 + 1 >= S.bars.length;
   // Already have it: fetched to the live edge, the stream (onTrades) has kept it up since.
   if (key === S.bigKey && start >= S.bigFrom && (S.bigTo === Infinity || end <= S.bigTo)) return;
@@ -6964,9 +7635,11 @@ async function bigFetch() {
 }
 // The bar a trade (a big one, a fill) printed in, or null where none of the chart's holds it: the hours an RTH chart
 // leaves out (the night, the pre-market), on a time chart past the last bar's end, not the next bar. On tick, volume,
-// range and Renko bars the forming one holds every trade since it opened, however much longer than the others it runs.
+// range and Renko bars the forming one holds every trade since it opened, however much longer than the others it runs;
+// in replay the last bar shown is not forming: it ends where the next one opens (the clock, typed or jumped to, can be
+// well inside that one, which is not shown yet).
 function tradeBar(t) {
-  const bars = S.bars, rth = S.rth && !S.ext && inst().rth;
+  const bars = S.bars, rth = S.rth && !S.ext && inst().rth, r = S.replay;
   if (rth) {
     const sec = Math.floor(ctWall(t) / 1000) % 86400, [a, b] = rth.map((v) => +v.slice(0, 2) * 3600 + +v.slice(3, 5) * 60);
     if (sec < a || sec >= b) return null;
@@ -6975,6 +7648,7 @@ function tradeBar(t) {
     const i = barIndexTo(bars, t);
     return i >= 0 && t < barEnd(bars, i, 'time', specSeconds(S.spec) * 1000, daysSpec(S.spec)) ? i : null;
   }
+  if (r?.idx && t >= barEnd(r.data, r.idx - 1, r.kind, r.period, r.days, r.endAt ?? r.nextAt)) return null;
   if (t > bars.at(-1).t) return bars.length - 1;
   const l = drawings.timeToLogical(t);
   return l == null || l < 0 ? null : Math.floor(l + 1e-9);
@@ -7386,20 +8060,26 @@ candles.attachPrimitive(fillPrim);
 // always in front of the drawn ones, and in front of the bars a drawn study can't sit between two line studies: the
 // menu shows the order as drawn. Drawings and alert lines are always in front.
 const LAYER_PRIMS = { fills: fillPrim, big: bigPrim, lines: llPrim, amt: amtPrim, tpo: tpoPrim, gap: gapPrim, ifthen: ifPrim,
-  econ: econPrim, right: rangePrim, ...vpPrims };
+  econ: econPrim, right: rangePrim };
+const layerPrims = () => ({ ...LAYER_PRIMS, ...vpPrims, ...llPrims });   // with the volume profiles on the chart and Level Lines 2, each its own
 const vwapLines = (k) => { const w = VWAPS.find((x) => x.key === k); return [w.mid, ...w.bands.flatMap((b) => [b.up, b.dn])]; };
-const LAYER_LINES = { ve: () => vwapLines('ve'), vr: () => vwapLines('vr'), avwap: () => [avwap], hema: () => [hemaLine], dsma: () => dsmaLines,
+const LAYER_LINES = { ve: () => vwapLines('ve'), vr: () => vwapLines('vr'), avwap: () => [avwap], hema: () => [hemaOf().line], dsma: () => dsmaLines,
   ...Object.fromEntries(Object.keys(IND_DEFS).filter((t) => !IND_DEFS[t].pane)
     .map((t) => [`i:${t}`, () => S.inds.filter((x) => x.c.type === t).flatMap((x) => x.plots.map((p) => p.s))])) };
 // As it was drawn before there was a choice: front first.
 const LAYER_DEFAULT = ['fills', 'big', 'lines', 'amt', 'tpo', 'gap', 'ifthen', ...VP_KINDS, ...Object.keys(LAYER_LINES).filter((id) => id.startsWith('i:')),
   'hema', 'dsma', 'avwap', 'vr', 've', 'bars', 'econ', 'right'];
-for (const p of Object.values(LAYER_PRIMS)) for (const v of p.views) { const z = v.zOrder; v.zOrder = () => p._z || z(); }
+function layerZ(p) { for (const v of p.views) { const z = v.zOrder; v.zOrder = () => p._z || z(); } }   // its pass: applyLayers
+Object.values(LAYER_PRIMS).forEach(layerZ);
+// Another HTF EMA or volume profile is a layer of its own, after the ones before it.
+const layerDefault = () => LAYER_DEFAULT.flatMap((id) => (MULTI.includes(id) ? instKeys(id) : [id]));
+const layerLines = (id) => (baseOf(id) === 'hema' ? [hemaOf(id).line] : LAYER_LINES[id]());
+const isLineLayer = (id) => id in LAYER_LINES || baseOf(id) === 'hema';
 function layersClean(a) {   // every layer once; one it has not seen goes next to its neighbour in the default
-  const out = Array.isArray(a) ? [...new Set(a.filter((id) => LAYER_DEFAULT.includes(id)))] : [];
-  LAYER_DEFAULT.forEach((id, i) => {
+  const def = layerDefault(), out = Array.isArray(a) ? [...new Set(a.filter((id) => def.includes(id)))] : [];
+  def.forEach((id, i) => {
     if (out.includes(id)) return;
-    const prev = LAYER_DEFAULT.slice(0, i).reverse().find((x) => out.includes(x));
+    const prev = def.slice(0, i).reverse().find((x) => out.includes(x));
     out.splice(prev ? out.indexOf(prev) + 1 : 0, 0, id);
   });
   return out;
@@ -7408,17 +8088,22 @@ function loadLayers() {
   return layersClean(ownTab() ? ownTab().own.layers : rawLocal('layers', []));
 }
 S.layers = loadLayers();
-const layerOn = (id) => id === 'bars' || stOn(ST_CAT.find((x) => x.id === id));
+const layerOn = (id) => id === 'bars' || (!!stItem(id) && stOn(stItem(id)));
+// ⚙ Chart's "Price bars in front" (the default): the candles over every study, whatever the layer order, but your fills
+// and big-trade bubbles (marks on the bars) still in front of them.
+const BARS_UNDER = new Set(['fills', 'big']);
+const barsForward = (order) => [...order.filter((id) => BARS_UNDER.has(id)), 'bars', ...order.filter((id) => id !== 'bars' && !BARS_UNDER.has(id))];
 // The studies that are on, as drawn (front first), and the pass each paints in.
 function layerPlan(order) {
-  const on = order.filter(layerOn), b = on.indexOf('bars'), front = on.slice(0, b), back = on.slice(b + 1), line = (id) => id in LAYER_LINES;
+  if (S.cs.barsFront) order = barsForward(order);
+  const on = order.filter(layerOn), b = on.indexOf('bars'), front = on.slice(0, b), back = on.slice(b + 1), line = isLineLayer;
   const k = front.findIndex(line), top = k < 0 ? front : front.slice(0, k), under = k < 0 ? [] : front.slice(k);
   const lines = under.filter(line), normal = under.filter((id) => !line(id)), backLines = back.filter(line), bottom = back.filter((id) => !line(id));
   return { top, lines, normal, backLines, bottom, order: [...top, ...lines, ...normal, 'bars', ...backLines, ...bottom] };
 }
 // The line studies and the bars, back to front: the series order of the price pane.
 function layerSeries() {
-  const plan = layerPlan(S.layers), lines = (ids) => ids.slice().reverse().flatMap((id) => LAYER_LINES[id]());
+  const plan = layerPlan(S.layers), lines = (ids) => ids.slice().reverse().flatMap(layerLines);
   const want = [...lines(plan.backLines), vol, ...(altSeries ? [altSeries] : []), candles, ...lines(plan.lines)];   // alt bars under the see-through candles
   const all = chart.panes()[0].getSeries(), order = [...want.filter((s) => all.includes(s)), ...all.filter((s) => !want.includes(s))];
   if (order.every((s, i) => all[i] === s)) return;
@@ -7427,10 +8112,13 @@ function layerSeries() {
 let layerAttached = [];
 function applyLayers() {
   const plan = layerPlan(S.layers);
-  for (const [z, ids] of [['top', plan.top], ['normal', plan.normal], ['bottom', plan.bottom]]) for (const id of ids) LAYER_PRIMS[id]._z = z;
-  const back2front = (ids) => ids.slice().reverse().map((id) => LAYER_PRIMS[id]);
+  plan.order.filter((id) => VP_KINDS.includes(baseOf(id))).forEach(vpPrim);   // (one just put on: drawn from now)
+  plan.order.filter((id) => baseOf(id) === 'lines').forEach(llPrimOf);
+  const prims = layerPrims();
+  for (const [z, ids] of [['top', plan.top], ['normal', plan.normal], ['bottom', plan.bottom]]) for (const id of ids) prims[id]._z = z;
+  const back2front = (ids) => ids.slice().reverse().map((id) => prims[id]);
   const drawn = [...back2front(plan.bottom), ...back2front(plan.normal), ...back2front(plan.top)];
-  const seq = [...Object.values(LAYER_PRIMS).filter((p) => !drawn.includes(p)), sessionBreaks, fpPrim, dsmaPrim, ...drawn, alertPrim, drawings.prim, countdown];
+  const seq = [...Object.values(prims).filter((p) => !drawn.includes(p)), sessionBreaks, fpPrim, dsmaPrim, ...drawn, alertPrim, drawings.prim, countdown];
   if (seq.some((p, i) => layerAttached[i] !== p)) {   // attach order is paint order within a pass
     for (const p of seq) if (p.p) candles.detachPrimitive(p);
     for (const p of seq) candles.attachPrimitive(p);
@@ -7553,9 +8241,17 @@ function hostActive(m) {
     const inds = m.inds.map(indClean).filter(Boolean).slice(0, IND_MAX);
     if (JSON.stringify(inds) !== JSON.stringify(S.indCfg)) S.indCfg = inds;
   }
-  if (Array.isArray(m.layers)) S.layers = layersClean(m.layers);
   if (m.hidden && typeof m.hidden === 'object') S.stHidden = { ...m.hidden };
-  if (m.st) { S.st = { ...S.st, ...m.st }; renderStudiesMenu(); indDlg.refresh(); }
+  if (m.st && typeof m.st === 'object') {   // the other HTF EMAs and volume profiles: its own, none of the last chart's
+    const st = { ...S.st, ...m.st }, inst = (o) => Object.keys(o).filter((k) => INST_RE.test(k)).sort().join();
+    for (const k of Object.keys(st)) if (INST_RE.test(k) && !(k in m.st)) delete st[k];
+    const moved = inst(st) !== inst(S.st);
+    S.st = st;
+    if (moved) indSets();
+    renderStudiesMenu();
+    indDlg.refresh();
+  }
+  if (Array.isArray(m.layers)) S.layers = layersClean(m.layers);   // (after its studies: their layers)
   if (SPEC_RE.test(m.spec || '')) S.spec = m.spec;   // the alert dialog's default timeframe
   if (typeof m.rth === 'boolean') S.rth = m.rth;   // and the hours a new indicator alert computes on, as the chart shows
   if (!chartSym(m.sym) || m.sym === S.symbol) return;
@@ -7595,12 +8291,13 @@ if (TK_CELL !== null) {
       linkedChange = !!m.link;
       try { if (m.type === 'symbol') setSymbol(m.sym); else setSpec(m.spec); } finally { linkedChange = false; }
     }
+    else if (m.type === 'study' && INST_RE.test(m.key)) { if (m.on === null) instRemove(m.key); else if (!(m.key in S.st)) instPut(m.key, tabSet()[baseOf(m.key)]); else { S.st[m.key] = !!m.on; studiesChanged(m.key); } }
     else if (m.type === 'study') { if (!replayBlocks(m.key)) { S.st[m.key] = m.on; studiesChanged(m.key); } }
     else if (m.type === 'indset' && typeof m.key === 'string' && m.value && typeof m.value === 'object') tabSetSave(m.key, m.value);
-    else if (m.type === 'indall' && typeof m.key === 'string') studyAllHere(m.key);
+    else if (m.type === 'indall' && typeof m.key === 'string') studyAllHere(m.key, m.freeze);
     else if (m.type === 'stpart') cellPart(m.part, m.value);
     else if (m.type === 'set' && m.key === 'chartSet') { try { const cs = JSON.parse(m.value); applyCs(cs); csToAllTabs(csFrom(cs)); } catch { /* not settings */ } }
-    else if (m.type === 'alert') { setSymbol(m.sym); openAlertDialog({ price: m.price }); }
+    else if (m.type === 'alert') openAlertDialog({ price: m.price, sym: m.sym });
     else if (m.type === 'key') quickOpen(m.key);
     else if (m.type === 'journal') journalShow({ symbol: m.symbol, entry_ts: m.entry_ts });   // a trade clicked in the page's Journal
     else if (m.type === 'xhair') {

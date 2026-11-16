@@ -146,7 +146,7 @@ def test_the_prior_day_comes_from_ninjatraders_tick_history_when_the_add_on_can_
 
 
 def test_older_days_stay_on_their_minutes(monkeypatch):
-    """Past PD_TRADE_DAYS (beyond the 20 days of lines kept) a day is never asked for."""
+    """Past Value From Ticks (Sessions) (NinjaTrader's 5 most recent sessions) a day is never asked for."""
     r = amt_runner.AmtRunner("ES", 0.25, 5, amt_runner.Settings())
     monkeypatch.setattr(amt_runner.time, "time", lambda: NOW)
     old = datetime(2026, 9, 1, 8, 30)

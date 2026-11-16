@@ -6,25 +6,32 @@
 Generates synthetic 1-minute Globex data, groups it into the chart's bars and records what the indicator
 sees with Calculate.OnPriceChange: each bar several times as it grows, plus SessionKey probes and Snapshot
 calls over random visible ranges. Replays the record through both engines and compares every value.
-rth: an RTH chart's bars (the instrument's regular hours, from the RTH open), as on an RTH trading-hours template."""
+rth: an RTH chart's bars (the instrument's regular hours, from the RTH open), as on an RTH trading-hours template.
+Use Instrument Hours (UseInstrumentHours, on by default): the port runs the RTH times at the root's own hours
+(gaps_service.own_hours and check_hours, config/futures.json's), the C# (v1.1.0) moves them itself from the typed ones and
+the root (InstrumentHours.Apply, its own table); both print the times they run, or why they make no session there. A
+v1.0.0 C# runs them as typed, so it matches with UseInstrumentHours false only."""
 import json
 import random
 import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from amt_parity import synth                         # noqa: E402
 from chartsrv import gaps                            # noqa: E402
 from chartsrv.amt_runner import ct                   # noqa: E402
+from chartsrv.gaps_service import check_hours, own_hours   # noqa: E402
 from chartsrv.sessions import SessionClock, to_ct    # noqa: E402
 from chartsrv.studies import RthClock                # noqa: E402
 from chartsrv.tpo_service import session_end         # noqa: E402
 
-ROOTS = {"ES": (0.25, 6800.0), "NQ": (0.25, 25000.0), "CL": (0.01, 65.0), "GC": (0.10, 3500.0)}
-RTHS = {"ES": ("08:30", "15:00"), "NQ": ("08:30", "15:00"), "CL": ("08:00", "13:30"), "GC": ("07:20", "12:30")}
+ROOTS = {"ES": (0.25, 6800.0), "NQ": (0.25, 25000.0), "CL": (0.01, 65.0), "GC": (0.10, 3500.0), "SI": (0.005, 40.0)}
+RTHS = {"ES": ("08:30", "15:00"), "NQ": ("08:30", "15:00"), "CL": ("08:00", "13:30"), "GC": ("07:20", "12:30"),
+        "SI": ("07:25", "12:25")}
 
 
 def D(x):
@@ -35,9 +42,10 @@ def T(t):
     return t.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def record(m1, minutes, s, seed, rth=None):
+def record(m1, minutes, s, seed, rth=None, root="ES"):
+    """s: the settings as typed (the C# moves the RTH times itself, given the root and Use Instrument Hours)."""
     rng = random.Random(seed)
-    lines = [f"S|{s['RthStart']}|{s['RthEnd']}|{D(s['MinimumGapPoints'])}"]
+    lines = [f"S|{s['RthStart']}|{s['RthEnd']}|{D(s['MinimumGapPoints'])}|{root}|{int(s['UseInstrumentHours'])}"]
     day = datetime(2026, 10, 14)
     for sec in range(0, 86400 + 1, 450):                 # SessionKey probes around the clock
         lines.append(f"K|{T(day + timedelta(seconds=sec))}")
@@ -72,15 +80,26 @@ def G(o, tag, g):
              f"{D(g.SettlePrice)}|{D(g.FillEdge)}|{D(g.Size)}|{int(g.Filled)}|{g.BarsToFill}|{D(g.FillPercent)}")
 
 
-def replay_python(lines):
+def replay_python(lines, s, rth):
+    """s: the settings as typed; rth: the root's regular hours, for Use Instrument Hours."""
     e, o = None, []
     PT = lambda x: datetime.strptime(x, "%Y-%m-%dT%H:%M:%S")   # noqa: E731
+    clock = lambda v: f"{v // 10000:02d}:{v // 100 % 100:02d}:{v % 100:02d}"   # noqa: E731   (TimeSpan's)
     for line in lines:
         p = line.split("|")
         if p[0] == "S":
             ok_a, a = gaps.GapEngine.TryParseTime(int(p[1]))
             ok_b, b = gaps.GapEngine.TryParseTime(int(p[2]))
             o.append(f"S|{int(ok_a)}|{int(ok_b)}")
+            if s["UseInstrumentHours"]:
+                try:
+                    check_hours(s, {p[4]: SimpleNamespace(rth=rth)})
+                except ValueError as ex:
+                    o.append(f"R|{ex}")
+                    return o
+                own = own_hours(s, rth)
+                o.append(f"H|{clock(own['RthStart'])}|{clock(own['RthEnd'])}")
+                a, b = gaps.GapEngine.TryParseTime(own["RthStart"])[1], gaps.GapEngine.TryParseTime(own["RthEnd"])[1]
             e = gaps.GapEngine(a, b, float(p[3]))
         elif p[0] == "K":
             k = e.SessionKey(PT(p[1]))
@@ -129,12 +148,12 @@ def main():
     rth = RTHS[root] if len(argv) < len(sys.argv) else None
     tick, price = ROOTS[root]
     m1 = synth(days, seed, datetime(2026, 10, 16, 12, 7), tick, price)
-    lines = record(m1, minutes, s, seed, rth)
+    lines = record(m1, minutes, s, seed, rth, root)
     rec_path, cs_out = work / "gap_record.txt", work / "gap_cs.txt"
     rec_path.write_text("\n".join(lines) + "\n")
     subprocess.run(["mono", str(work / "harness.exe"), str(rec_path), str(cs_out)], check=True)
     cs = cs_out.read_text().splitlines()
-    py = replay_python(lines)
+    py = replay_python(lines, s, RTHS[root])
     bad = [(i, a, b) for i, (a, b) in enumerate(zip(cs, py)) if not same(a, b)]
     if len(cs) != len(py) or bad:
         print(f"PARITY FAIL: {len(cs)} C# lines, {len(py)} Python lines, {len(bad)} differ")
@@ -142,7 +161,11 @@ def main():
             print(f"  line {i}\n    C#: {a}\n    py: {b}")
         sys.exit(1)
     count = lambda tag: sum(1 for x in py if x.startswith(tag + "|"))   # noqa: E731
-    print(f"PARITY OK: {root} {minutes}m{' RTH' if rth else ''}, {days} days, {count('U') or sum(1 for x in lines if x[0] == 'U')} updates, "
+    if count("R"):
+        print(f"PARITY OK: {root}: refused by both, {py[-1][2:]}")
+        return
+    hours = (lambda o: f"{o['RthStart']}-{o['RthEnd']}")(own_hours(s, RTHS[root]))
+    print(f"PARITY OK: {root} {minutes}m{' RTH' if rth else ''} RTH {hours} (Use Instrument Hours {'on' if s['UseInstrumentHours'] else 'off'}), {days} days, {count('U') or sum(1 for x in lines if x[0] == 'U')} updates, "
           f"{count('H')} gaps ({count('X')} filled), {count('F')} snapshots, {len(py)} lines; every value equal")
 
 

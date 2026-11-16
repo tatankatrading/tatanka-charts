@@ -3,7 +3,8 @@
 /api/gaps runs the engine over the chart's bars, rebuilt from stored 1-minute bars (tpo_service.chart_bars; an RTH
 chart's of the regular hours only, from the RTH open), for the last N days, forming bar included, as the indicator
 does with Calculate.OnPriceChange. The chart then applies fills from its own live bar until it asks again at the
-next bar.
+next bar. A seconds chart (NinjaTrader allows Minute and Second charts) runs it over its own bars from its first one
+on, built from the stored trades as the chart builds them (SecondsRun), as NinjaTrader runs it over the bars loaded.
 
 Alerts are opt-in per symbol: one 1-minute engine per alerting symbol, loaded from stored history and fed
 every live price change (switched on from an RTH chart, only the regular hours' minutes, so gaps fill as there). Like
@@ -14,6 +15,7 @@ import asyncio
 import logging
 import sqlite3
 import time
+from collections import OrderedDict
 from dataclasses import replace
 from itertools import chain
 from types import SimpleNamespace
@@ -21,21 +23,31 @@ from types import SimpleNamespace
 from . import gaps, sessions
 from .amt import price_str
 from .amt_runner import ct
+from .bars import BarSpec, make_series
 from .config import futures_catalog, load_instruments
 from .gapfill import filling
-from .models import Bar
-from .sessions import session_start
-from .store import iter_bars_1m
+from .models import Bar, Tick
+from .sessions import SessionClock, session_start
+from .store import connect, iter_bars_1m
 from .studies import RthClock
-from .tpo_service import BarBuilder, chart_bars
+from .tpo_service import BarBuilder, chart_bars, session_end
 
 log = logging.getLogger(__name__)
+ROLL_GAPS = "gap_roll_skip"   # setting: the gaps across a contract roll not alerted, per symbol
+ROLL_GAPS_KEPT = 10
+
+
+def _gap_key(g) -> list:
+    return [int(g.Direction), round(float(g.OpenPrice), 6), round(float(g.SettlePrice), 6)]
 DAYS_DEFAULT = 90
 DAYS_MAX = 180
 ALERT_HISTORY_DAYS = 90
 LIVE_BAR_AGE_MS = 6 * 60_000   # minutes older than this (buffered data catching up) never alert
 SEEN = SimpleNamespace(answered=True)   # held for a new gap in buffered trades: sent with the next live update
 SWITCHES = ("new", "fill")   # the alert switches (Alert on new gap, Alert on full gap fill); on where none is saved
+SECONDS_KEPT = 16            # seconds charts' runs kept: each asks again at every bar, and only new trades are read
+SECONDS_TRADES = 1_000_000    # a seconds chart's run reads at most this many stored trades back (about 2 s of CPU in a
+                             # thread): further back, from the bar of the oldest of them on
 SYMBOL_SWITCHES = "gap_symbol_switches"   # the store's: symbol -> its alert switches (every chart of it has them)
 
 
@@ -67,9 +79,93 @@ def payload(eng: gaps.GapEngine, opens: list[int], minutes: int) -> dict:
     }
 
 
+class SecondsRun:
+    """A seconds chart's Gap Analysis: its own bars, built from the stored trades from its first bar's open on as the
+    chart builds them (TimeSeries: from each session's open, an RTH chart's from the RTH open, a bar only where a trade
+    printed), each through the engine with its end time (NinjaTrader stamps a bar at its end; the last one of a session
+    ends there) once it is complete, and the forming one as it is now. Kept: an ask reads only the trades stored since
+    the one before (read)."""
+
+    def __init__(self, s: dict, spec: BarSpec, inst, rth: bool, start: int):
+        self.engine = gaps.engine_for(s)
+        hours = inst.rth if rth else None
+        self.series = make_series(spec, inst.tick_size, inst.decimals, 2, inst.rth, studies=False, rth_only=bool(hours),
+                                  group=inst.calendar)
+        self.period, self.start = spec.size * 1000, start
+        self.clock, self.hours = SessionClock(), RthClock(hours) if hours else None
+        self.opens: list[int] = []   # each bar's open, by index
+        self.cur = None              # the forming bar (a Bar the series grows)
+        self.after = (start, 0)      # live: (ts, rowid) to read on from (the forming bar's open, the last trade read)
+        self.upto = start            # replay: the clock read to
+        self.lock = asyncio.Lock()
+
+    def _end(self, t: int) -> int:
+        e = self.hours.window(sessions.to_ct(t))[1] if self.hours else session_end(self.clock.locate(t))
+        return min(t + self.period, e)
+
+    def _update(self):
+        b = self.cur
+        self.engine.Update(len(self.opens) - 1, ct(self._end(b.t)), b.o, b.h, b.l, b.c)
+
+    def feed(self, ticks):
+        for tk in ticks:
+            got = self.series.on_tick(tk)
+            if not got:
+                continue
+            if got[0] is not self.cur:
+                if self.cur is not None:
+                    self._update()   # the bar before it is complete
+                self.cur = got[0]
+                self.opens.append(self.cur.t)
+
+    def read(self, db_path, symbol: str, until: int | None = None):
+        """The trades stored since the last read, in time order. Live: those with a later rowid from the forming bar's
+        open on (a late print of it is in it, as on the chart). Replay (until, its clock, never earlier than the last):
+        those from the last clock to this one, by time (trades filled in later have later rowids)."""
+        db = connect(db_path, readonly=True)
+        try:
+            if until is None:
+                ts, rowid = self.after
+                cur = db.execute("SELECT rowid, ts, price, size, side FROM ticks WHERE symbol=? AND ts>=? AND rowid>? "
+                                 "ORDER BY ts, rowid", (symbol, ts, rowid))
+            else:
+                rowid = 0
+                cur = db.execute("SELECT rowid, ts, price, size, side FROM ticks WHERE symbol=? AND ts>=? AND ts<? "
+                                 "ORDER BY ts, rowid", (symbol, self.upto, until))
+            last = rowid
+            while rows := cur.fetchmany(50_000):
+                last = max(last, max(r[0] for r in rows))
+                self.feed(Tick(symbol, t, px, sz, side) for _, t, px, sz, side in rows)
+            if until is None:
+                self.after = (self.cur.t if self.cur is not None else self.after[0], last)
+            else:
+                self.upto = until
+        finally:
+            db.close()
+
+    def payload(self, s: dict) -> dict:
+        if self.cur is not None:
+            self._update()   # the forming bar as it is now (again as it grows: Calculate.OnPriceChange)
+        return {**payload(self.engine, self.opens, 0), "seconds": self.period // 1000, "from": self.start,
+                "hours": f"{s['RthStart'] // 100:04d}-{s['RthEnd'] // 100:04d}"}
+
+
+def trades_floor(db_path, symbol: str, before: int, n: int) -> int:
+    """The time of the nth stored trade of `symbol` back from `before` (0 when fewer are stored)."""
+    db = connect(db_path, readonly=True)
+    try:
+        row = db.execute("SELECT ts FROM ticks WHERE symbol=? AND ts<? ORDER BY ts DESC LIMIT 1 OFFSET ?",
+                         (symbol, before, n - 1)).fetchone()
+        return row[0] if row else 0
+    finally:
+        db.close()
+
+
 def own_hours(s: dict, rth) -> dict:
-    """The RTH times, written for ES's 08:30-15:00 CT, moved to the instrument's own regular hours (sessions.rth_mover)."""
-    move = sessions.rth_mover(rth)
+    """The RTH times, written for ES's 08:30-15:00 CT, moved to the instrument's own regular hours (sessions.rth_mover),
+    each on its own, while Use Instrument Hours is on (the default; a config from before it has it on); off, as typed on
+    every instrument. The NinjaTrader Gap Analysis' InstrumentHours.Apply (v1.1.0)."""
+    move = sessions.rth_mover(rth) if s.get("UseInstrumentHours", True) else None
     return {**s, "RthStart": sessions.move_hhmmss(s["RthStart"], move), "RthEnd": sessions.move_hhmmss(s["RthEnd"], move)}
 
 
@@ -77,7 +173,8 @@ def check_hours(s: dict, instruments: dict):
     """The RTH times on each instrument's own hours: ValueError naming the first they make no session on, or another
     one (a time nearer the open moves with the open, one nearer the close with the close, so two can land on the same
     minute, 11:00-12:00 is 10:30-10:30 on CL's 08:00-13:30, or past each other, 09:50-09:30 on GC's 07:20-12:30: a
-    session through the night, GapEngine.SessionKey's start > end)."""
+    session through the night, GapEngine.SessionKey's start > end). With Use Instrument Hours off nothing moves, so
+    none is refused."""
     clock = lambda v: f"{v // 10000:02d}:{v // 100 % 100:02d}"   # noqa: E731
     for sym, inst in instruments.items():
         own = own_hours(s, inst.rth)
@@ -90,7 +187,7 @@ def check_hours(s: dict, instruments: dict):
                 continue
             why = f"the start and end past each other ({clock(own['RthStart'])}-{clock(own['RthEnd'])})"
         raise ValueError(f"RTH {clock(s['RthStart'])}-{clock(s['RthEnd'])} is no session on {sym}: its regular hours "
-                         f"({'-'.join(inst.rth or ())} CT) move {why}. Enter other times.")
+                         f"({'-'.join(inst.rth or ())} CT) move {why}. Enter other times, or turn Use Instrument Hours off.")
 
 
 class GapWatch:
@@ -100,7 +197,7 @@ class GapWatch:
 
     def __init__(self, cfg: dict, rth=None):
         self.cfg = cfg
-        self.engine = gaps.engine_for(own_hours(gaps.settings({k: cfg[k] for k in gaps.DEFAULTS}), rth))
+        self.engine = gaps.engine_for(own_hours(gaps.settings({k: cfg[k] for k in gaps.DEFAULTS if k in cfg}), rth))
         self.hours = RthClock(rth) if rth and cfg.get("rth") else None   # a config without the flag: all hours
         self.bars = BarBuilder(max(1, int(cfg.get("minutes") or 1)), rth if self.hours else None)
         self.bar = -1
@@ -145,9 +242,13 @@ class GapService:
         for sym, cfg in self.alert_cfg.items():
             self.alert_cfg[sym] = {**cfg, **self.switches_of(sym)}
         self.watches: dict[str, GapWatch] = {}
+        # gaps across a contract roll (symbol -> [direction, open, RTH close] of each, the last ROLL_GAPS_KEPT): neither
+        # they nor their fills are sent, also after the watch loads again (a fill, a restart)
+        self.roll_gaps: dict = market.store.get_setting(ROLL_GAPS, None) or {}
         self.held: dict = {}   # symbol -> the fill window of the stretch before the live trades a new gap came during
                                # (SEEN: it came in buffered trades)
         self.refused: dict[str, str] = {}   # symbol -> why its alerts were not started (start())
+        self.seconds: OrderedDict = OrderedDict()   # (symbol, spec, rth, settings, first bar) -> SecondsRun
 
     def _migrate(self, every: dict | None) -> dict:
         """The first start since the alert switches are each symbol's: the ones every chart had (every, as stored)
@@ -199,12 +300,42 @@ class GapService:
             return {**payload(eng, opens, minutes), "hours": f"{s['RthStart'] // 100:04d}-{s['RthEnd'] // 100:04d}"}
         return await asyncio.to_thread(work)
 
+    async def get_seconds(self, sym: str, spec: BarSpec, s: dict, start: int, rth: bool = False,
+                          until: int | None = None) -> dict:
+        """A seconds chart's gaps from its first bar (start, its open) on, or from SECONDS_TRADES trades back. Kept per
+        chart, settings and live or replay: each ask reads the trades since the last; a replay's clock moved back
+        works it out again."""
+        self.m.flush_for_read()
+        inst = self.m.instruments[sym]
+        rth = bool(rth and inst.rth)
+        if until is not None:
+            until = until // 1000 * 1000
+        key = (sym, spec.text, rth, tuple(sorted(s.items())), start, until is not None)
+        run = self.seconds.get(key)
+        if run is None or until is not None and until < run.upto:
+            floor = await asyncio.to_thread(trades_floor, self.m.store.path, sym, until if until is not None else 1 << 62,
+                                            SECONDS_TRADES)
+            run = self.seconds[key] = SecondsRun(s, spec, inst, rth, max(start, floor))
+            while len(self.seconds) > SECONDS_KEPT:
+                self.seconds.popitem(last=False)
+        self.seconds.move_to_end(key)
+        async with run.lock:
+            if until is not None and until < run.upto:   # an ask with a later clock got in first: this one on its own
+                run = SecondsRun(s, spec, inst, rth, run.start)
+            await asyncio.to_thread(run.read, self.m.store.path, sym, until)
+            return run.payload(s)
+
+    def forget(self, sym: str):
+        """Stored history of `sym` changed (a gap fill): its seconds charts' runs are built again."""
+        for k in [k for k in self.seconds if k[0] == sym]:
+            del self.seconds[k]
+
     # --- alerts -----------------------------------------------------------------------------------------
     def set_alerts(self, sym: str, cfg: dict):
         """cfg: on, rth and the chart's RthStart, RthEnd and MinimumGapPoints (and minutes, its timeframe: the alerts are
         on its bars); the alert switches are the symbol's."""
         cfg = {k: v for k, v in cfg.items() if v is not None}   # minutes not given: 1-minute bars, as before
-        s = gaps.settings({k: cfg[k] for k in gaps.DEFAULTS})     # raises ValueError on bad times...
+        s = gaps.settings({k: cfg[k] for k in gaps.DEFAULTS if k in cfg})   # raises ValueError on bad times...
         if cfg.get("on"):   # ...or on ones its own hours make no session of (switching off: never refused)
             check_hours(s, {sym: self.m.instruments[sym]})
         self.alert_cfg[sym] = {**cfg, **self.switches_of(sym)}
@@ -223,9 +354,14 @@ class GapService:
             raise ValueError("Give RthStart and RthEnd together.")
         # raises ValueError on bad times, or on ones the symbol's own hours make no session of (with no symbol: any
         # instrument's, or one's off Instruments whose alerts are kept on, at the hours it would be back with): nothing
-        # stored
+        # stored. When s changes the hours, each is checked as its config would be with s on it: UseInstrumentHours alone
+        # can make the times it keeps no session
+        gaps.settings({k: s[k] for k in gaps.DEFAULTS if k in s})
         hours = {sym: self.m.instruments[sym]} if sym else {**self.m.instruments, **self._kept()}
-        check_hours(gaps.settings({k: s[k] for k in gaps.DEFAULTS if k in s}), hours)
+        if any(k in s for k in ("RthStart", "RthEnd", "UseInstrumentHours")):
+            for x, inst in hours.items():
+                cfg = {**(self.alert_cfg.get(x) or {}), **s}
+                check_hours(gaps.settings({k: cfg[k] for k in gaps.DEFAULTS if k in cfg}), {x: inst})
         syms = [sym] if sym else sorted({*self.m.instruments, *self.symbol_switches, *self.alert_cfg})
         sw = {k: s[k] for k in SWITCHES if k in s}
         per = {x: {**self.switches_of(x), **sw} for x in syms if sw}
@@ -342,6 +478,15 @@ class GapService:
                 u.FilledGaps = [*(u.FilledGaps or ()), g]
         tick = self.m.instruments[sym].tick_size
         px = lambda v: price_str(v, sym, tick)   # noqa: E731
+        if u.NewGap is not None and self._across_roll(sym, w):
+            # from the old contract's RTH close to the new one's open: the roll's spread, not a gap (nor its fill)
+            log.info("gap alert %s: across a contract roll, not sent (%s pts)", sym, px(u.NewGap.Size))
+            kept = [k for k in self.roll_gaps.get(sym, []) if k != _gap_key(u.NewGap)] + [_gap_key(u.NewGap)]
+            self.roll_gaps[sym] = kept[-ROLL_GAPS_KEPT:]
+            self.m.store.set_setting(ROLL_GAPS, self.roll_gaps)
+            u.NewGap = None
+        if u.FilledGaps:
+            u.FilledGaps = [g for g in u.FilledGaps if _gap_key(g) not in self.roll_gaps.get(sym, [])] or None
         if w.cfg.get("new", True) and u.NewGap is not None:
             g = u.NewGap
             self._emit(sym, b.c, f"[{sym}] GAP {'UP' if g.Direction > 0 else 'DOWN'} {px(g.Size)} pts | "
@@ -350,6 +495,15 @@ class GapService:
             for g in u.FilledGaps:
                 self._emit(sym, b.c, f"[{sym}] GAP {'UP' if g.Direction > 0 else 'DOWN'} FILLED | {px(g.Size)} pts "
                                      f"in {g.BarsToFill} bars")
+
+    def _across_roll(self, sym: str, w: GapWatch) -> bool:
+        """Whether `sym` rolled to another contract since the RTH close its newest gap is measured from (no
+        regular-hours minute from the roll to the gap's open)."""
+        from .gapfill import ROLLED
+        got = self.m.store.get_setting(ROLLED, {}) or {}
+        at = got.get(sym) if isinstance(got, dict) else None
+        return isinstance(at, (int, float)) and w.gap_t is not None and w.gap_t - 4 * 86_400_000 < at <= w.gap_t \
+            and not self._rth_in(sym, w, int(at))
 
     def _rth_in(self, sym: str, w: GapWatch, start: int) -> bool:
         """Whether a regular-hours minute the watch takes, the market open, came from `start` to its newest gap's:

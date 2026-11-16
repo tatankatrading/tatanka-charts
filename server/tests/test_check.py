@@ -1,7 +1,7 @@
 """Check all: every connection in use tried at once; the report; the PC's own command."""
 import httpx
 
-from chartsrv import check
+from chartsrv import backup, check
 from chartsrv import connections as conns
 from test_app import client  # noqa: F401  the app on the sim feed
 
@@ -13,6 +13,7 @@ def test_check_all_and_report(client, monkeypatch):  # noqa: F811
         tried.append(cid)
         return {"ok": cid != "yahoo", "message": "Yahoo did not answer" if cid == "yahoo" else "fine"}
     monkeypatch.setattr(conns, "test", fake_test)
+    monkeypatch.setattr(backup, "LOW_DISK", 0)   # the backup's state, whatever this computer has free
     d = client.post("/api/connections/check").json()
     by = {r["id"]: r for r in d["results"]}
     assert sorted(tried) == ["fred", "yahoo"]   # the sim server uses only the free data; the rest is off

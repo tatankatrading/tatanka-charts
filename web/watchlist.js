@@ -126,13 +126,15 @@ function createWatchlist(env) {
   }
   const quoteKey = (t) => wlKey(t, env.instruments());   // its quote's key, as the server has it
   const isLive = (c) => !!(c && env.instruments()[c]);
-  function decimals(sym, v) {
+  function decimals(sym, v, q) {
     const c = chartFor(sym), b = wlBare(sym), m = WL_FUT.exec(b);
     if (bondTick(isLive(c) ? c : m?.[1])) return { bond: isLive(c) ? env.instruments()[c].tick_size : bondTick(m[1]) };   // 32nds
     if (isLive(c)) return env.instruments()[c].decimals ?? 2;
+    if (m && q?.dec != null) return q.dec;   // its tick's (the server's futures list): RB 2.1534, 6S 1.25065
     if (m && WL_ROOT_DEC[m[1]] != null) return WL_ROOT_DEC[m[1]];
     if (/^[A-Z]{6}$/.test(b) && WL_FX.has(b.slice(0, 3)) && WL_FX.has(b.slice(3))) return b.endsWith('JPY') ? 3 : 5;
-    return v != null && Math.abs(v) < 1 ? 4 : 2;
+    // under 1: four significant digits at least (SHIB 0.00001234, not 0.0000)
+    return v != null && v !== 0 && Math.abs(v) < 1 ? Math.min(10, Math.max(4, 3 - Math.floor(Math.log10(Math.abs(v))))) : 2;
   }
   function quoteOf(sym) {
     const Q = env.quotes();
@@ -294,7 +296,7 @@ function createWatchlist(env) {
     c.rt.textContent = RT[q.rt]?.[0] || '';
     c.rt.className = `rt ${q.rt || ''}`;
     c.rt.title = rtText(q);
-    const d = decimals(r.sym, q.last), dir = q.chg > 0 ? 'up' : q.chg < 0 ? 'down' : '';
+    const d = decimals(r.sym, q.last, q), dir = q.chg > 0 ? 'up' : q.chg < 0 ? 'down' : '';
     const now = performance.now();
     if (r.last != null && q.last !== r.last && !(now - r.flashed < WL_FLASH_GAP_MS)) {   // flash the price the way it moved
       // A new animation name restarts it (two of each, taken in turn) with no forced layout; it fades an overlay's
@@ -382,7 +384,7 @@ function createWatchlist(env) {
       W.detailSym = null;
       return;
     }
-    const sym = items()[i], b = wlBare(sym), q = quoteOf(sym), chart = chartFor(sym), d = decimals(sym, q?.last);
+    const sym = items()[i], b = wlBare(sym), q = quoteOf(sym), chart = chartFor(sym), d = decimals(sym, q?.last, q);
     const tk = document.createElement('b'), nm = document.createElement('span');
     tk.className = 'wd-sym';
     tk.textContent = b;
@@ -632,7 +634,10 @@ function createWatchlist(env) {
   }
   function addSymbols(text, names = {}) {
     if (flagView()) { env.toast('A flagged list shows the symbols flagged that color: flag one in any list'); return; }
-    const want = text.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean).map(wlNorm);
+    // commas or spaces between symbols; spaces around a formula's + - * / ( ) are its own ("AAPL / MSFT": one formula,
+    // as the quick switch charts it); a section's name keeps its spaces
+    const want = text.split(',').flatMap((p) => (wlIsSection(p.trim()) ? [p.trim()]
+      : p.replace(/\s*([+\-*/()])\s*/g, '$1').split(/\s+/))).filter(Boolean).map(wlNorm);
     const bad = want.filter((t) => !wlIsSection(t) && (!WL_SYM.test(t) || !wlTokens(t).length));
     const only = env.onlyFutures?.();   // a bare ZB as ZB1!, as the server saves it: so it is found in its section
     const good = want.filter((t) => !bad.includes(t)).map((t) => (wlIsSection(t) ? t : wlAsFuture(t, only)));
@@ -799,7 +804,7 @@ function createWatchlist(env) {
     const at = (fn) => () => { const j = findNth(items(), sym, n); if (j >= 0) fn(j); };
     flags.classList.add('menu-flags');
     env.menu(x, y, [
-      ...(c ? [{ label: `Open ${c} chart`, fn: () => env.open(c), key: 'Enter' }, ...(isLive(c) ? [{ label: 'Create alert…', fn: () => env.alert(c) }] : []), 'sep'] : []),
+      ...(c ? [{ label: `Open ${c} chart`, fn: () => env.open(c), key: 'Enter' }, { label: 'Create alert…', fn: () => env.alert(c) }, 'sep'] : []),
       flags,
       ...(flagView() ? [] : [{ label: 'Add section above…', fn: () => addSection(sym, n) }]),
       ...(navigator.clipboard ? [{ label: 'Copy symbol', fn: () => navigator.clipboard.writeText(wlBare(sym)).then(() => env.toast(`Copied ${wlBare(sym)}`), env.fail) }] : []),

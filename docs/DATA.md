@@ -57,7 +57,10 @@ row count before and after. Without Docker, run from the `server` folder, e.g.
 
 To check the stored data against NinjaTrader's, day by day: `docker compose exec chart python -m chartsrv.dayvol NQ 15`
 prints each trading day's volume, 1-minute bar count (a full Globex day is about 1380), high and low, to compare with
-a NinjaTrader Daily chart's Data Box.
+a NinjaTrader Daily chart's Data Box. A holiday halt's session counts toward the next trade date, as the daily bars
+have it, so that day has more minutes (the halt's too). The day after Thanksgiving is an early close that also holds
+Thanksgiving's session: about 2295 for ES and NQ. An early close on its own (Christmas Eve) has fewer, about 1155
+for ES and NQ.
 
 ## Databento import (ticks)
 
@@ -76,9 +79,10 @@ that history, and fills minutes missing while NinjaTrader or the PC was off. Com
 
 - Reads `*.trades.csv.zst` and `*.trades.csv` (an unzipped copy of a day is skipped), `*.trades.dbn.zst`, Databento
   batch `.zip` downloads holding either (with their `symbology.json`), and NinjaTrader `NQ 03-24.Last.txt` tick
-  exports (no buyer/seller side unless they carry bid and ask; their time zone is found by lining them up with the
-  stored 1-minute bars, or give `--last-tz America/New_York`). Without Docker on Python 3.15, DBN files wait for a
-  databento-dbn made for it (0.72.0 stops at 3.14).
+  exports (no buyer/seller side unless they carry bid and ask: without one, footprints split a trade by the tick
+  rule; their time zone is found by lining them up with the stored 1-minute bars, or give
+  `--last-tz America/New_York`). Without Docker on Python 3.15, DBN files wait for a databento-dbn made for it
+  (0.72.0 stops at 3.14).
 - The contract for each session: the outright whose prices match the 1-minute bars already stored (your NinjaTrader
   history, so it rolls on the same day), else the most traded. Spreads are left out. Prices are unadjusted.
 - Never doubles: a session that already has ticks (live feed or an earlier run) is skipped, so running it again is

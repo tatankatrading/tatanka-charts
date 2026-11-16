@@ -1,8 +1,8 @@
 """AAVP on an intraday chart: NinjaTrader's minute series loads the chart's days, so its profile starts no earlier than
 the chart's first bar. This app's holds the anchor's whole stretch (a Year from Jan 1); its left edge was counted back
 from the first bar by the bar length over every night and weekend, far off the chart, and the histogram (30% of that
-span) with it: nothing showed. It is drawn from the first bar now, as in NinjaTrader; a profile starting inside the
-loaded bars is where it was."""
+span) with it: nothing showed. It is drawn from where the first bar opens now, as in NinjaTrader (GetXByTime puts that
+one bar spacing left of the bar's center); a profile starting inside the loaded bars is where it was."""
 import json
 import subprocess
 
@@ -38,8 +38,8 @@ const W = n * sp;
 const draw = (start) => {
   drawn = null;
   const v = vpView(chart, series, bars, P, 1000);
-  drawAavp(null, W, 1000, v, { set, bars, d: { profile: { start, last: bars[n - 1].t + P } } });
-  return drawn && { left: Math.round(drawn.left), right: Math.round(drawn.right), width: Math.round(drawn.width) };
+  drawAavp(null, W, 1000, v, { set, bars, periodMs: P, d: { profile: { start, last: bars[n - 1].t + P } } });
+  return drawn && { left: drawn.left, right: drawn.right, width: drawn.width };
 };
 console.log(JSON.stringify({ year: draw(ct('2025-12-31T17:00:00')), inside: draw(bars[1000].t), W, first: bars[0].t }));
 """
@@ -51,6 +51,7 @@ def test_a_year_anchor_before_the_first_bar_is_drawn_from_the_first_bar():
                                                                 "vpLayout", "drawAavp")))
     out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
     year, inside, w = out["year"], out["inside"], out["W"]
-    # from the first bar to the last: 30% of the chart, on screen (before: left at about -9000 px, all of it off it)
-    assert year["left"] == 0 and year["right"] == w and year["width"] == round(0.3 * w)
-    assert inside["left"] == 500 and inside["width"] == round(0.3 * (inside["right"] - 500))   # where it was
+    # from the first bar's open to the last bar: 30% of the chart, on screen (before: left at about -9000 px, all of it
+    # off it); the bars' centers are at (i + 0) * 0.5, so the first bar opens at -0.5 and the last closes at w - 0.5
+    assert year["left"] == -0.5 and year["right"] == w - 0.5 and abs(year["width"] - 0.3 * w) < 1e-9
+    assert inside["left"] == 499.5 and abs(inside["width"] - 0.3 * (inside["right"] - 499.5)) < 1e-9   # where it was

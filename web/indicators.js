@@ -52,7 +52,16 @@ function createIndicatorsDialog(env) {
   const nChanged = (a) => (a.schema() || []).filter((x) => changed(a, x)).length;
   // What the dialog shows (D.shown, as last drawn or edited): refresh() redraws only when that changed, since a box
   // keeps what is typed only on 'change' and a redraw for nothing (the same levels or block again) would drop it.
+  // another of a study taken off (unticked here, or by another chart of the layout) has no adapter now: its drafts go,
+  // and the dialog shows the first one instead
+  const prune = () => {
+    const keys = new Set(env.adapters().map((a) => a.key));
+    for (const k of Object.keys(D.drafts)) if (!keys.has(k)) delete D.drafts[k];
+    for (const k of Object.keys(D.symDrafts)) if (!keys.has(k)) delete D.symDrafts[k];
+    if (D.key && !keys.has(D.key)) D.key = env.adapters()[0]?.key ?? null;
+  };
   const shownNow = () => {
+    prune();
     const a = ad();
     return JSON.stringify([env.adapters().map((b) => [b.key, b.title, b.version, b.shown(), nChanged(b)]), a.note,
       (a.schema() || []).map((x) => [x, value(a, x), ntDef(a, x.name), defaultText(a, x)])]);
@@ -62,6 +71,10 @@ function createIndicatorsDialog(env) {
   const argbHex = (c) => `#${((c >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
   const argbOpacity = (c) => Math.round((((c >>> 0) >>> 24) & 255) / 255 * 100);
   const toArgb = (hex, pct) => ((Math.round(Math.min(100, Math.max(0, pct)) / 100 * 255) << 24) >>> 0) + parseInt(hex.slice(1), 16);
+
+  // a color with opacity: '#rrggbbaa' (CSS order, alpha last), or '#rrggbb' when fully opaque
+  const hexOpacity = (h) => (h.length === 9 ? Math.round(parseInt(h.slice(7), 16) / 255 * 100) : 100);
+  const withOpacity = (hex, pct) => (pct >= 100 ? hex : `${hex}${Math.round(pct / 100 * 255).toString(16).padStart(2, '0')}`);
 
   function control(a, x, row) {
     const v = value(a, x), done = (nv) => { setValue(a, x, nv); row.classList.toggle('changed', changed(a, x)); row.classList.remove('bad'); info(); };
@@ -107,30 +120,61 @@ function createIndicatorsDialog(env) {
       const lab = el('label', { className: 'chk' });
       lab.append(none, ' None');
       c.append(pick, lab);
+    } else if (x.type === 'color' && x.alpha) {   // a brush with its opacity: '#rrggbb' opaque, else '#rrggbbaa'
+      c = el('span', { className: 'col' });
+      const pick = el('input', { type: 'color', value: v.slice(0, 7) }), op = el('input', { type: 'number', min: 0, max: 100, step: 1, value: hexOpacity(v), title: 'Opacity %' });
+      pick.setAttribute('aria-label', `${x.label} color`);
+      op.setAttribute('aria-label', `${x.label} opacity, percent`);
+      pick.onchange = op.onchange = () => {
+        const o = Number(op.value);
+        if (!(Number.isInteger(o) && o >= 0 && o <= 100)) { row.classList.add('bad'); env.toast('Opacity 0 to 100'); return; }
+        done(withOpacity(pick.value, o));
+      };
+      c.append(pick, op, '%');
     } else if (x.type === 'color') {
       c = el('input', { type: 'color', value: v });
       c.setAttribute('aria-label', `${x.label} color`);
       c.onchange = () => done(c.value);
-    } else if (x.type === 'stroke') {   // NinjaTrader's Stroke: color, dash style, width (nowidth: another setting's)
+    } else if (x.type === 'stroke') {   // NinjaTrader's Stroke: color, dash style, width (nowidth: another setting's), opacity
       c = el('span', { className: 'col' });
       const pick = el('input', { type: 'color', value: v.color }), dash = el('select'), w = el('input', { type: 'number', min: 0.5, max: 10, step: 0.5, value: v.width, title: 'Width', hidden: !!x.nowidth });
+      const op = x.opacity ? el('input', { type: 'number', min: 0, max: 100, step: 1, value: v.opacity ?? 100, title: 'Opacity %' }) : null;
       dash.append(...IND_DASHES.map((o) => new Option(o, o)));
       dash.value = v.dash;
       pick.setAttribute('aria-label', `${x.label} color`);
       dash.setAttribute('aria-label', `${x.label} dash style`);
       w.setAttribute('aria-label', `${x.label} width`);
-      const set = () => { const n = Number(w.value); if (!(n >= 0.5 && n <= 10)) { row.classList.add('bad'); env.toast('Width 0.5 to 10'); return; } done({ color: pick.value, dash: dash.value, width: n }); };
+      op?.setAttribute('aria-label', `${x.label} opacity, percent`);
+      const set = () => {
+        const n = Number(w.value), o = op ? Number(op.value) : 100;
+        if (!(n >= 0.5 && n <= 10)) { row.classList.add('bad'); env.toast('Width 0.5 to 10'); return; }
+        if (!(Number.isInteger(o) && o >= 0 && o <= 100)) { row.classList.add('bad'); env.toast('Opacity 0 to 100'); return; }
+        done({ color: pick.value, dash: dash.value, width: n, ...(op ? { opacity: o } : {}) });
+      };
       pick.onchange = dash.onchange = w.onchange = set;
       c.append(pick, dash, w);
-    } else if (x.type === 'font') {
+      if (op) { op.onchange = set; c.append(op, '%'); c.classList.add('wide'); }
+    } else if (x.type === 'font') {   // NinjaTrader's SimpleFont: family, size, Bold, Italic
       c = el('span', { className: 'col' });
       const fam = el('select'), size = el('input', { type: 'number', min: 6, max: 48, step: 1, value: v.size, title: 'Size' });
+      const flag = (name, on) => {
+        const box = el('input', { type: 'checkbox', checked: !!on }), lab = el('label', { className: 'chk' });
+        box.setAttribute('aria-label', `${x.label} ${name.toLowerCase()}`);
+        lab.append(box, ` ${name}`);
+        return [box, lab];
+      };
+      const [bold, boldLab] = flag('Bold', v.bold), [italic, italicLab] = flag('Italic', v.italic);
       fam.append(...['Arial', 'Segoe UI', 'Consolas', 'Verdana', 'Tahoma'].map((o) => new Option(o, o)));
       if (![...fam.options].some((o) => o.value === v.family)) fam.append(new Option(v.family, v.family));
       fam.value = v.family;
-      const set = () => { const n = Number(size.value); if (!(n >= 6 && n <= 48)) { row.classList.add('bad'); env.toast('Size 6 to 48'); return; } done({ family: fam.value, size: n }); };
-      fam.onchange = size.onchange = set;
-      c.append(fam, size, 'pt');
+      const set = () => {
+        const n = Number(size.value);
+        if (!(n >= 6 && n <= 48)) { row.classList.add('bad'); env.toast('Size 6 to 48'); return; }
+        done({ family: fam.value, size: n, bold: bold.checked, italic: italic.checked });
+      };
+      fam.onchange = size.onchange = bold.onchange = italic.onchange = set;
+      c.append(fam, size, 'pt', boldLab, italicLab);
+      c.classList.add('wide');
     } else if (x.type === 'text' || x.name === 'lvl_text') {
       c = el('textarea', { value: v, spellcheck: false, rows: x.name === 'RowsBlock' || x.name === 'CustomLevels' ? 8 : 3 });
       c.onchange = () => done(c.value);
@@ -143,9 +187,9 @@ function createIndicatorsDialog(env) {
   }
   function defaultText(a, x) {
     const v = isSym(a, x.name) ? (a.symbolDefault?.(x.name) ?? a.defaults()[x.name]) : ntDef(a, x.name);
-    if (x.type === 'color') return a.colorFormat === 'argb' ? `${argbHex(v)}, ${argbOpacity(v)}% opaque` : v === 'transparent' ? 'none' : v;
-    if (x.type === 'stroke') return x.nowidth ? `${v.color} ${v.dash}` : `${v.color} ${v.dash} ${v.width}`;
-    if (x.type === 'font') return `${v.family} ${v.size}`;
+    if (x.type === 'color') return a.colorFormat === 'argb' ? `${argbHex(v)}, ${argbOpacity(v)}% opaque` : v === 'transparent' ? 'none' : x.alpha ? `${v.slice(0, 7)}, ${hexOpacity(v)}% opaque` : v;
+    if (x.type === 'stroke') return `${v.color} ${v.dash}${x.nowidth ? '' : ` ${v.width}`}${x.opacity ? `, ${v.opacity ?? 100}% opaque` : ''}`;
+    if (x.type === 'font') return `${v.family} ${v.size}${v.bold ? ' bold' : ''}${v.italic ? ' italic' : ''}`;
     if (x.type === 'bool') return v ? 'on' : 'off';
     return String(v).length > 40 ? `${String(v).slice(0, 40)}…` : String(v) || 'empty';
   }
@@ -174,6 +218,7 @@ function createIndicatorsDialog(env) {
   // ---- right: the selected indicator's properties ------------------------------------------------------------------
   function renderBody() {
     const a = ad(), schema = a.schema() || [], groups = new Map();
+    $q('.ind-all').hidden = !a.applyAll;   // another of an indicator on one chart (PVP 2): its settings are this chart's
     if (D.sym !== null && D.sym !== env.symbol()) {   // the chart's symbol changed: edits of the last one's settings that
       // every chart of a symbol shares are not this one's (it shows its own), as a symbol's own settings
       for (const [k, d] of Object.entries(D.drafts)) {
@@ -196,7 +241,7 @@ function createIndicatorsDialog(env) {
         row.dataset.name = x.name;
         row.dataset.text = `${g} ${x.label} ${x.description || ''} ${x.name}`.toLowerCase();
         const lab = el('label', { textContent: x.label, title: x.description || '' });
-        if (isSym(a, x.name) || a.symbolShared?.has(x.name)) lab.append(el('em', { className: 'sym', textContent: ` (${env.symbol()})` }));
+        if (isSym(a, x.name) || a.symbolShared?.has(x.name)) lab.append(el('em', { className: 'sym', textContent: ` (${a.symbolLabel?.() ?? env.symbol()})` }));
         const ctl = control(a, x, row);
         lab.htmlFor = ctl.id || '';
         const undo = el('button', { type: 'button', className: 'undo', textContent: '↺', title: `Back to NinjaTrader's default (${defaultText(a, x)})` });
@@ -244,17 +289,19 @@ function createIndicatorsDialog(env) {
   // fills the dialog; Apply or OK uses it. Only the chart's own: the settings charts share (the alert switches, every
   // chart of the symbol's; the levels file, every chart's) are not saved in one and stay as they are when one loads.
   // (Chart and indicator templates are the chart's, in its own menus.)
+  // presets by the kind ('pvp' for PVP 2 too): every one of a study shares them
+  const presetKind = () => `ind:${ad()?.presetKey || D.key}`;
   const presetPart = (a, d, shared = false) => Object.fromEntries(Object.entries(d || {}).filter(([k]) => !!a.sharedNames?.has(k) === shared));
   function renderTpl() {
     const sel = $q('.ind-tpl'), T = env.templates?.();
     if (!sel || !T || !D.key) return;
-    const kind = `ind:${D.key}`, names = T.names(kind);
+    const kind = presetKind(), names = T.names(kind);
     sel.replaceChildren(new Option('Presets ▾', ''), ...names.map((n) => new Option(`Load: ${n}`, `a:${n}`)),
       new Option('Save as preset…', 's'), ...names.map((n) => new Option(`Delete: ${n}`, `d:${n}`)));
     sel.value = '';
   }
   $q('.ind-tpl').onchange = async (e) => {
-    const v = e.target.value, T = env.templates?.(), kind = `ind:${D.key}`;
+    const v = e.target.value, T = env.templates?.(), kind = presetKind();
     e.target.value = '';
     if (!v || !T) return;
     try {
@@ -264,7 +311,9 @@ function createIndicatorsDialog(env) {
         await T.save(kind, name, { settings: presetPart(ad(), draft()) });
         env.toast(`Preset "${name}" saved on every device`);
       } else if (v.startsWith('a:')) {
-        D.drafts[D.key] = { ...presetPart(ad(), draft(), true), ...presetPart(ad(), T.data(kind, v.slice(2))?.settings) };
+        // not a symbol's own (a Level Lines 2 preset holds that one's range and levels, the first one's are the symbol's)
+        const got = Object.entries(presetPart(ad(), T.data(kind, v.slice(2))?.settings)).filter(([k]) => !isSym(ad(), k));
+        D.drafts[D.key] = { ...presetPart(ad(), draft(), true), ...Object.fromEntries(got) };
         renderList();
         renderBody();
         env.toast('Loaded: Apply or OK uses it');
@@ -290,6 +339,7 @@ function createIndicatorsDialog(env) {
     try {
       for (const k of keys) {
         const a = ad(k);
+        if (!a) continue;   // taken off since
         const same = (x, y) => JSON.stringify(x || {}) === JSON.stringify(y || {});
         const d = D.drafts[k], s = symSave(a);
         if ((d && !same(d, a.overrides())) || (s && !same(s, a.perSymbol()))) await a.save(d ?? a.overrides(), s);
@@ -342,8 +392,8 @@ function createIndicatorsDialog(env) {
     try {
       const s = symSave(a);
       if (s && JSON.stringify(s) !== JSON.stringify(a.perSymbol() || {})) await a.save(a.overrides(), s);   // the symbol's own, as Apply
-      await a.applyAll(draft(a.key));
-      const n = await env.allCharts(a.key);
+      const freeze = await a.applyAll(draft(a.key));   // (what the other charts' HTF EMA 2 and the like need to keep theirs)
+      const n = await env.allCharts(a.key, freeze);
       delete D.drafts[a.key];
       delete D.symDrafts[a.key];
       renderList();

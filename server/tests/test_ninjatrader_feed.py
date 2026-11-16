@@ -175,7 +175,7 @@ def test_a_failed_database_write_keeps_the_connection():
     """A line whose write fails (the disk full, the database locked by an import past the busy timeout) is logged and
     skipped: the connection goes on, not dropped to come back and fail the same way on every connect."""
     class Full:
-        def on_feed(self, sym, price):
+        def on_feed(self, sym, price, first=True):
             raise sqlite3.OperationalError("database or disk is full")
 
     async def go():

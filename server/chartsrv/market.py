@@ -23,7 +23,7 @@ from .notify import Notifier
 from .store import Store, bar_1m_start, drop_settlement_bars, drop_weekend_prints, iter_bars_1m, iter_ticks, sweeps
 from .studies import ProfileBook, range_profile
 from .vp_service import VpService
-from .gapfill import GapFill
+from .gapfill import ROLLED, GapFill
 from .settlement import Settlements
 from .daily_levels import DailyLevels
 from .indicators import IndicatorSettings
@@ -42,6 +42,7 @@ from .feeds.eia import EiaData
 from .feeds.fred import FredData
 from .feeds.sdk import without_keys
 from .feeds.yahoo import CloseFill, market_day
+from .free_alerts import FreeAlerts
 from .ind_alerts import IndicatorAlerts
 from .packages import Installer
 from .updates import Updates
@@ -85,6 +86,7 @@ WEEKEND_DROPPED = "closed_prints_dropped"   # once: the prints stored over a wee
                                             # feeds left them out ("weekend_prints_dropped" before the holidays were in)
 OLD_NAMES = "contracts_old_names"   # {instrument: its stored contract}, noted once at the first start after the IBKR
                                     # futures plugin named contracts by their month; each used up at its next report
+QUOTE_CONTRACTS = "quote_contracts"   # {root: "ZN 03-27"}: the contract NinjaTrader quotes a future only listed on
 
 
 class Client:
@@ -127,6 +129,7 @@ class SeriesEntry:
         self.subs: set[tuple[Client, int]] = set()
         self.idle_since = time.monotonic()
         self.error: str | None = None
+        self.built: int | None = None   # when its history was built (ms): its sessions from then on from their trades
 
 
 class BookEntry:
@@ -206,6 +209,7 @@ class Market:
                    for sym, i in instruments.items()}
         self.books: dict[str, BookEntry] = {}
         self.contracts: dict[str, str] = dict(store.get_setting("contracts", {}) or {})   # symbol -> "ES 03-27"
+        self.quote_contracts: dict[str, str] = dict(store.get_setting(QUOTE_CONTRACTS, {}) or {})   # quote_contract
         self.old_names = self._old_names()   # symbol -> its stored contract, perhaps in the IBKR plugin's old naming
         self.gapfill = GapFill(self)
         self.settlements = Settlements(self, getattr(settings, "config_dir", None))
@@ -248,13 +252,23 @@ class Market:
         self.clients: set[Client] = set()
         self.quotes: dict[str, dict] = {}
         self.quotes_dirty: set[str] = set()
-        self.quote_from: dict[str, tuple[str, int]] = {}   # symbol -> (source, when it last quoted)
+        self.quote_from: dict[str, tuple] = {}   # symbol -> (source, when it last quoted, that quote's own time)
+        try:   # a future's quote carries its tick's decimals (the watchlist's RB 2.1534, 6S 1.25065, not 2.15 and 1.25)
+            self.quote_dec = {r["symbol"]: _tick_decimals(r["tick_size"]) for r in futures_catalog(settings.config_dir)}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("config/futures.json not read for quote decimals: %s", e)
+            self.quote_dec = {}
         # symbol -> (its trading day, the previous close its quotes are set against that day): any source's, or the
         # fill's, for a quote that comes without one (not a future's: its settlement's)
         self.closes: dict[str, tuple] = {}
         self.close_fill = CloseFill(self)   # Yahoo's previous close of a stock no source gave one for
         self.alerts = AlertEngine(store, instruments, self.levels, self._on_alert)
         self.alerts.on_change = self._alert_expired
+        self.free_alerts = FreeAlerts(self)   # price alerts on stocks, series and formulas: on their quotes
+        # one on a stock whose ticker became a live future's root while the server was off: its notice once running
+        self.paused_at_start = self._pause_shadowed()
+        self.free_alerts.index()
+        self.watch_keys |= set(self.free_alerts.keys)
         self.study_sources = StudySources(self)
         self.alerts.studies = self.study_sources.value
         self.ind_alerts = IndicatorAlerts(self)
@@ -287,6 +301,7 @@ class Market:
                 self.last_tick[sym] = tk
                 self.alerts.last_px[sym] = tk.price   # a cross during a restart still fires on the next tick
                 self.alerts.last_ts[sym] = tk.ts
+        self.free_alerts.seed()   # ...and on a stock's, a series' or a formula's next value
 
     async def start(self, feeds: list):
         self.seed()
@@ -298,6 +313,8 @@ class Market:
         self.tasks = [asyncio.create_task(c) for c in loops]
         self.cleaning = asyncio.create_task(self._clean_up())   # in the background: the start never waits for it
         self.tasks.append(self.cleaning)
+        self._paused_notices(self.paused_at_start)   # (the alert list goes to each page as it connects)
+        self.paused_at_start = []
         self.amt.ensure_alert_runners()
         self.gaps.start()
         self.study_sources.ensure()
@@ -486,6 +503,8 @@ class Market:
         for sym, i in added.items():
             self.m1[sym] = make_series(one_min, i.tick_size, i.decimals, maxlen=5, studies=False)
             self.by_symbol.setdefault(sym, [])
+        paused = self._pause_shadowed()   # a stock's alert whose ticker is one of theirs (MetLife's MET, Micro Ether's)
+        self.free_alerts.index()   # a formula's part that is one of them: worked out from its trades now
         self.watch_keys = self._watch_set()   # their futures, and a list's bare root of one is that future now
         for f in self.feed_objs:
             if hasattr(f, "charts_added"):
@@ -496,6 +515,9 @@ class Market:
                 f.fill_added(self, list(added))
         self.broadcast({"type": "instruments", "instruments": {s: i.to_dict() for s, i in self.instruments.items()},
                         "catalog": self.catalog(), "config": self.config_hash()})
+        if paused:
+            self.broadcast({"type": "alerts", "alerts": self.alerts.list()})
+            self._paused_notices(paused)
         self.levels_changed()   # their daily levels' sets (a micro's are its parent's, which may be read already)
         # the alerts kept for one taken off Instruments before (gap, AMT, study and indicator alerts) run again; last, so
         # that whatever goes wrong there leaves it live. They send nothing until the fill of the stretch it was off is
@@ -504,6 +526,31 @@ class Market:
         self.gaps.start()
         self.study_sources.ensure()
         self.ind_alerts.ensure()
+
+    def _paused_notices(self, paused: list[tuple]):
+        """The notice for each (alert, root) _pause_shadowed paused: a future added live, or at the start."""
+        for a, root in paused:
+            asyncio.get_running_loop().create_task(self.notifier.send("Alert paused", (
+                f"Your alert on {a.symbol} is paused: {root} is the {self.instruments[root].name} future's chart "
+                f"here now, not the stock it was set on.")))
+
+    def _pause_shadowed(self) -> list[tuple]:
+        """Pauses each stock's price alert (alone or in a formula) whose ticker is a live future's root here now (set
+        on MetLife's MET before Micro Ether MET was added): one can't be set so (ext.chart_symbol), as that symbol is
+        the future's (its stock is quoted here no more), and it never runs on the future's prices. Returns (alert,
+        root) for each."""
+        out = []
+        for a in list(self.alerts.alerts.values()):
+            if a.enabled and a.kind == "price" and a.params.get("free") and (root := self.free_alerts.shadowed(a)):
+                a.enabled = False
+                try:
+                    self.store.update_alert(a.id, enabled=False)
+                except sqlite3.Error as e:   # not written (a full disk): off all the same (free_alerts.index skips it)
+                    log.warning("alert %s not paused in the database: %s", a.id, e)
+                log.warning("alert %s on %s paused: %s is a live future here now, not the stock it was set on",
+                            a.id, a.symbol, root)
+                out.append((a, root))
+        return out
 
     def data_source(self, code: str):
         """DATA:<code>: (the series store, code, "data") from the data plugin turned on that has it, or None."""
@@ -577,11 +624,15 @@ class Market:
         gf = self.gapfill
         for sym in [s for s in self.trade_owner if s not in before]:
             gf.queue.pop(sym, None)
-            if gf.windows.pop(sym, None) is not None:
+            gf.reopen.discard(sym)
+            if sym in gf.windows:   # NinjaTrader's answer, still coming, is dropped till its Z (gave_up); the plugin opens
+                gf.gave_up(sym)     # its own window when it starts, if the stretch needs one
                 gf.status[sym] = {**gf.status.get(sym, {}), "state": "dropped", "note": "another feed supplies it now"}
             gf.settle(sym)   # holes NinjaTrader filled before: what came reloads now
         gf.forget_asked([s for s in set(before) | set(self.trade_owner) if before.get(s) != self.trade_owner.get(s)])
         back = [s for s in before if s not in self.trade_owner and s in self.instruments]
+        for sym in back:   # the plugin's own window: its answer won't come now
+            gf.windows.pop(sym, None)
         for f in self.feed_objs:
             if hasattr(f, "charts_added"):
                 f.charts_added(self, back)
@@ -632,6 +683,13 @@ class Market:
             t.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
         self.flush_for_read()   # a failed write (a full disk) is logged: the store still closes, and a restart happens
+        self._save_free_alerts()
+
+    def _save_free_alerts(self):
+        try:
+            self.free_alerts.save()   # each stock's, series' and formula's last value checked, for after a restart
+        except sqlite3.Error as e:
+            log.warning("free alerts' last values not saved: %s", e)
 
     async def _run_feed(self, feed):
         while True:
@@ -656,7 +714,12 @@ class Market:
         if minute != self._snap_min:   # session state only changes on the hour; cache it per minute
             self._snap_min, self._snap_open = minute, sessions.is_open(tk.ts)
         if not self._snap_open:
-            tk.ts = sessions.snap(tk.ts)
+            ts = sessions.snap(tk.ts)
+            if ts < tk.ts and ts < self._rolled_at(tk.symbol):   # back into a session before its contract roll: the
+                log.info("%s: a print at %s CT after its roll to %s left out (that session is the old contract's)",
+                         tk.symbol, sessions.to_ct(tk.ts).strftime("%Y-%m-%d %H:%M:%S"), self.contracts.get(tk.symbol))
+                return   # (the new contract's: NinjaTrader replays its last trade on switching to it)
+            tk.ts = ts
         self.m1_ticked.add(tk.symbol)
         self.tick_buf.append(tk)
         for b in self.m1[tk.symbol].on_tick(tk):
@@ -686,11 +749,18 @@ class Market:
         if live:
             self.alerts.on_tick(tk)
             self.amt.on_live_tick(tk)
+            if tk.symbol in self.free_alerts.roots:   # a formula alert with this future in it
+                self.free_alerts.moved(f"{tk.symbol}1!", tk.ts)
         if len(self.tick_buf) % 20_000 == 0:   # a burst of trades: written every 20k, not only once a second
             try:
                 self.flush()
             except Exception:   # they stay buffered for the store loop's next try; the feed carries on
                 self._write_failed("store flush failed")
+
+    def _rolled_at(self, sym: str) -> int:
+        """When `sym` last rolled to another contract (ms), 0 if never."""
+        got = self.store.get_setting(ROLLED, {}) or {}
+        return int(got.get(sym, 0)) if isinstance(got, dict) else 0
 
     def history_changed(self, sym: str, charts: bool = True):
         """Stored history of `sym` changed under the running server (a gap fill): open charts reload, the studies
@@ -715,6 +785,7 @@ class Market:
         self.tpo.forget(sym)
         dsma.forget(sym)
         htfema.forget(sym)
+        self.gaps.forget(sym)
         if self.gaps.watches.pop(sym, None) is not None:
             self.gaps.start()
         self.books.pop(sym, None)   # the profiles POC/VAH/VAL alerts read: ensure() loads them again with the rest
@@ -779,8 +850,25 @@ class Market:
             self.gapfill.rolled(symbol, now_ms())   # no hole from before it: history now is the new contract's
             self.settlements.rolled(symbol)          # the change from the new contract's settlement, not the old one's
             self.alerts.rolled(symbol)               # the jump to the new contract's first trade crosses nothing
+            self.free_alerts.rolled(symbol)          # nor a formula's with it
+            self.ind_alerts.rolled(symbol, now_ms())  # nor an indicator alert's, nor the AMT Toolkit's
+            self.amt.rolled(symbol)
             asyncio.get_running_loop().create_task(self.notifier.send(
                 "Contract roll", f"{symbol} is now {contract} (was {old}). Earlier bars are not adjusted for the roll."))
+
+    def quote_contract(self, root: str, contract: str):
+        """The contract NinjaTrader quotes `root` on, a future only listed (not charted here): the add-on's
+        C|ROOT|contract|quote line, on each connect and when it first quotes it (add-on 22), and at a roll (any add-on).
+        One other than the contract stored is a roll, seen even when NinjaTrader was closed at its roll date: the
+        settlements known are the old contract's, and the jump to the new one's quotes crosses no price alert."""
+        old = self.quote_contracts.get(root)
+        if old == contract:
+            return
+        self.quote_contracts[root] = contract
+        self.store.set_setting(QUOTE_CONTRACTS, self.quote_contracts)
+        log.info("%s quoted on %s%s", root, contract, f" (was {old})" if old else "")
+        self.settlements.rolled(root)
+        self.free_alerts.rolled(root)
 
     def quote_wanted(self, symbol: str, source: str) -> bool:
         """False while a better-ranked source, or another of the same rank, has quoted the symbol in the last
@@ -808,11 +896,18 @@ class Market:
         if not self.quote_wanted(symbol, source):
             return
         now = now_ms()
-        self.quote_from[symbol] = (source, now)
+        ts = min(at or now, now)
+        shown = self.quotes.get(symbol)
+        if shown is not None and shown.get("src") != source and at and ts < shown.get("ts", 0):
+            return   # older than another source's price shown: Yahoo's futures, 10 minutes behind, filling in when
+                     # NinjaTrader's quotes stop at the close, never put back a price from before it
+        held = self.quote_from.get(symbol)
+        if not held or held[0] != source or not at or not held[2] or at > held[2]:
+            self.quote_from[symbol] = (source, now, at)   # quoting: a feed re-sending an old trade (Alpaca's last IEX
+                                                          # print every 5 s) holds the symbol no longer than its hold
         prev = prev_close if prev_close is not None and prev_close == prev_close else None
         if prev == 0 and source not in ("fred", "eia", "data"):   # a series' 0 is a value (FRED:USREC); a price's is none
             prev = None
-        ts = min(at or now, now)
         root = wl.future_root(symbol)
         try:   # a future: from its latest settlement until the next one; a stock never from its root's (ZS from ZS1!'s)
             ref = self.settlements.reference(root, now) if root else None
@@ -827,8 +922,11 @@ class Market:
         vol = volume if volume is not None and volume == volume and volume >= 0 else None
         self.quotes[symbol] = {"s": symbol, "last": last, "prev": prev, "chg": chg,
                                "pct": chg / abs(prev) * 100 if prev else None, "vol": vol, "ts": ts, "src": source,
-                               "rt": self._rt(source, at, now), **({"settle_t": ref["t"]} if ref else {})}
+                               "rt": self._rt(source, at, now), **({"settle_t": ref["t"]} if ref else {}),
+                               **({"dec": self.quote_dec[root]} if root in self.quote_dec else {})}
         self.quotes_dirty.add(symbol)
+        if symbol in self.free_alerts.keys:   # a price alert on it (or on a formula with it): checked as heard, not at
+            self.free_alerts.moved(symbol, now)   # the quote's own time (a series' observation date, weeks old)
 
     def _close_for(self, symbol: str, prev: float | None, ts: int) -> float | None:
         """The previous close a stock's, ETF's, index's, currency pair's or crypto's quote at `ts` is set against: its
@@ -864,6 +962,15 @@ class Market:
             self.quotes[symbol] = {**q, "prev": float(prev), "chg": chg, "pct": chg / abs(prev) * 100}
             self.quotes_dirty.add(symbol)
         return True
+
+    def remark_quotes(self, now: int | None = None):
+        """Each quote's marker worked out again from its age (once a minute): set as it came, a feed that went quiet
+        (disconnected, turned off, a weekend) left "live" on a price days old."""
+        now = now_ms() if now is None else now
+        for k, q in list(self.quotes.items()):   # (an IBKR quote's time is when it came: it carries none of its own)
+            if q.get("rt") in ("live", "delayed") and now - (q.get("ts") or now) > 3_600_000:
+                self.quotes[k] = {**q, "rt": "closed"}
+                self.quotes_dirty.add(k)
 
     def _rt(self, source: str, at: int | None, now: int) -> str:
         """How current a quote is, for the watchlist's marker: live, delayed, closed (its last trade is over an hour
@@ -947,7 +1054,8 @@ class Market:
             del self.chart_keys[k]
         # a free-data chart's MET (MetLife) once MET runs here is MET1!'s (on_quote): the stock feeds stop quoting it
         keys = wl.quote_keys(self.wl, self.instruments) | {f"{s}1!" for s in self.instruments} \
-            | {k for k in self.chart_keys if k not in self.instruments}
+            | {k for k in self.chart_keys if k not in self.instruments} \
+            | {k for k in self.free_alerts.keys if k not in self.instruments}
         for k in [k for k in self.quotes if k not in keys]:   # off the lists, its chart closed: not kept, nor in each hello
             del self.quotes[k]
             self.quote_from.pop(k, None)
@@ -1175,8 +1283,9 @@ class Market:
     async def _load(self, entry: SeriesEntry, spec: BarSpec, cutoff: int, split_t: int, key: tuple):
         t0 = time.perf_counter()
         try:
+            entry.built = now_ms()
             entry.series = await workers.run("chart", workers.build_series, self.store.path, entry.series, entry.symbol,
-                                             spec, cutoff, split_t, now_ms())
+                                             spec, cutoff, split_t, entry.built)
             await self._older_days(entry.symbol, entry.series, spec)   # first: trades arriving while it asks Yahoo wait in pending_ticks
             for tk in entry.pending_ticks:
                 entry.series.on_tick(tk)
@@ -1278,9 +1387,16 @@ class Market:
 
     # --- alerts --------------------------------------------------------------------------------
     def alerts_changed(self):
-        self.alerts.reload()
+        fresh = self.free_alerts.index(self.alerts.reload())
+        keys = self._watch_set()   # an alert's stock or formula parts quoted while it is on
+        if keys != self.watch_keys:
+            self.watch_keys = keys
+            for f in self.feed_objs:
+                if hasattr(f, "watch_changed"):
+                    f.watch_changed(self)
         self.study_sources.ensure()
         self.ind_alerts.ensure()
+        self.free_alerts.recheck(fresh, now_ms())   # a new, edited or restarted one on the value shown now
         self.broadcast({"type": "alerts", "alerts": self.alerts.list()})
 
     def _alert_expired(self):
@@ -1404,6 +1520,9 @@ class Market:
                     for f in self.feed_objs:
                         if hasattr(f, "watch_changed"):
                             f.watch_changed(self)
+            self.remark_quotes()
+            self.alerts.expire(now_ms())   # one past its expiration with no trade or new value to check it on
+            self._save_free_alerts()
             cutoff = time.monotonic() - IDLE_SERIES_S
             idle = sorted(((e.idle_since, key) for key, e in self.series.items() if not e.subs and e.ready.is_set()),
                           key=lambda x: x[0])
@@ -1433,3 +1552,9 @@ class Market:
             "gaps": self.gaps.health(),
             "close_fill": {**self.close_fill.stats, "waiting": len(self.close_fill.queue)},
         }
+
+
+def _tick_decimals(tick) -> int:
+    """The decimals a price on this tick has (0.25: 2, 0.0001: 4, 0.00005: 5)."""
+    from decimal import Decimal
+    return max(0, -Decimal(str(tick)).normalize().as_tuple().exponent)

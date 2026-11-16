@@ -13,9 +13,14 @@ row of none when they go), so bar replay shows the levels the chart had at a pas
 or pasted line holds only the current day.
 
 A file is re-read when it changes (checked every 5 s). A link is asked at once when the setting is set or changed
-(and when the server starts), then every 2 minutes while the market is open, and not while it is shut. A file or
-link that fails keeps the last good levels and says why. The Daily levels study, level alerts and /api/levels take
-these levels too (levels.py), made again on every change (Market.levels_changed)."""
+(and when the server starts), then on the NinjaTrader Toolkit's schedule (LevelLink.NextAsk, next_ask) while the
+market is open, and not while it is shut: until the levels of the latest 8:15 or 16:45 CT publish are in hand, every
+15 s for 10 minutes and then every minute to the end of the hour; for 30 minutes after a new answer, every 2 minutes;
+otherwise every 30 minutes. Failures back off from 1 to 15 minutes (1 at most while a publish is due); a link the
+levels service says is not active, or has nothing for the symbol yet, is asked every 30 minutes. An answer that has
+not changed (ETag, 304) counts as an answer. A file or link that fails keeps the last good levels and says why. The
+Daily levels study, level alerts and /api/levels take these levels too (levels.py), made again on every change
+(Market.levels_changed)."""
 import json
 import logging
 import ntpath
@@ -33,7 +38,14 @@ log = logging.getLogger(__name__)
 MICRO_PARENT = {"MES": "ES", "MNQ": "NQ", "MCL": "CL", "MGC": "GC"}   # MathEx.LevelsRoot
 DEFAULT_FILE = r"%USERPROFILE%\Documents\Tatanka\levels\{root}.txt"
 FILE_CHECK_S = 5
-LINK_EVERY_MS = 120_000   # a levels link, while the market is open
+# The NinjaTrader Toolkit's LevelLink: the levels are published at 8:15 CT (RTH) and 4:45 PM CT (Globex); the levels
+# site marks its own answers (a 403 or 404 without the mark came from something in between: retried as a failure).
+PUBLISH_TIMES = (timedelta(hours=8, minutes=15), timedelta(hours=16, minutes=45))
+SERVICE_HEADER = "X-Tatanka-Levels"
+# 24-hour clock only ("Published: 2026-10-15 16:45 CT"); a 12-hour time is ignored rather than misread
+PUBLISHED_LINE = re.compile(r"^[ \t]*Published[ \t]*:[ \t]*(\d{4}-\d{2}-\d{2})[ T]+(\d{1,2}:\d{2})(?::\d{2})?"
+                            r"(?![\d:]|[ \t]*[AaPp]\.?[Mm]\b)", re.M | re.I)
+NONE = datetime.min
 KEPT_DAYS = 4             # bar replay: kept levels for a trade date at most this many days before (a weekend, a holiday)
 DOCS_RE = re.compile(r"^(?:%USERPROFILE%|[A-Za-z]:\\Users\\[^\\]+)\\(?:OneDrive[^\\]*\\)?Documents\\(.+)$", re.I)
 WINDOWS = os.name == "nt"   # the server runs on Windows itself (no Docker)
@@ -56,6 +68,64 @@ def local_path(spec: str, docs_dir: Path | None) -> Path | None:
     return Path(os.path.expanduser(spec))
 
 
+def published(text: str) -> datetime:
+    """LevelLink.Published: the levels' "Published: yyyy-MM-dd H:mm" time (CT), or NONE."""
+    m = PUBLISHED_LINE.search(text or "")
+    if not m or not (m[1] + m[2]).isascii():
+        return NONE
+    try:
+        return datetime.strptime(f"{m[1]} {m[2]}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return NONE
+
+
+def _publishes_around(now: datetime):
+    day = datetime(now.year, now.month, now.day)
+    return [day + timedelta(days=d) + t for d in (0, 1) for t in PUBLISH_TIMES]
+
+
+def _in_hand(at: datetime, stamp: datetime, changed: datetime) -> bool:
+    """A publish's levels are in hand: published at most 30 minutes before its time, or changed since its window opened."""
+    return stamp >= at - timedelta(minutes=30) or changed >= at - timedelta(minutes=1)
+
+
+def next_ask(now: datetime, stamp: datetime, changed: datetime, failures: int, status: int) -> datetime:
+    """LevelLink.NextAsk: when to ask next (CT), from the last answer's publish time (stamp), when its text last changed,
+    the failures in a row and the last status."""
+    wait = timedelta(minutes=30)
+    quiet, due = status in (403, 404), False
+    if not quiet:
+        for at in _publishes_around(now):
+            if at - timedelta(minutes=1) <= now < at + timedelta(minutes=60) and not _in_hand(at, stamp, changed):
+                due = True
+                wait = min(wait, timedelta(seconds=15) if now < at + timedelta(minutes=10) else timedelta(minutes=1))
+    if not quiet and failures > 0:
+        backoff = timedelta(minutes=min(15, 1 << min(4, failures - 1)))
+        wait = min(backoff, timedelta(minutes=1)) if due else backoff
+    elif not quiet and now - changed < timedelta(minutes=30):
+        wait = min(wait, timedelta(minutes=2))
+    nxt = now + wait
+    if not quiet:   # wake for the next publish instead of sleeping through it
+        for at in _publishes_around(now):
+            if now < at - timedelta(minutes=1) < nxt and not _in_hand(at, stamp, changed):
+                nxt = at - timedelta(minutes=1)
+    return nxt
+
+
+@dataclass
+class LinkState:
+    """A link's schedule (LevelLink's fields), from when it is set or changed."""
+    etag: str = ""
+    failures: int = 0
+    status: int = 0
+    stamp: datetime = NONE        # the answer's publish time (its Published line), when the text last changed
+    changed: datetime = NONE      # when the text last changed (not the first answer)
+    body: str = ""                # the last text, whatever it held
+    answered: bool = False        # a first text came
+    problem: str = ""             # why that text gave no levels: a 304 (the same text) keeps saying so, as NinjaTrader's
+                                  # chart parses each text once and keeps its error until another comes
+
+
 @dataclass
 class Source:
     """What a symbol's levels came from, for the Plan tab."""
@@ -68,6 +138,7 @@ class Source:
     mtime: float | None = None
     next_ask_ms: int = 0          # a link's next ask (0: at once)
     url: str = ""                 # the link asked
+    link: LinkState | None = None
 
 
 def _redact(url: str) -> str:
@@ -250,28 +321,52 @@ class DailyLevels:
         s.text, s.date, s.read_ms, s.mtime, s.error = text, date, now_ms, st.st_mtime, ""
 
     async def _read_link(self, root: str, url: str, s: Source, now_ms: int):
-        if s.origin != "link" or s.url != url:   # set, changed, or the server just started: asked at once
-            s.next_ask_ms = 0
+        if s.origin != "link" or s.url != url or s.link is None:   # set, changed, or the server just started: asked at
+            s.next_ask_ms, s.link = 0, LinkState()                  # once, its schedule from the start
         s.origin, s.where, s.url = "link", _redact(url), url
         if now_ms < s.next_ask_ms:
             return
         groups = [self.m.instruments[x].calendar for x in self.m.instruments if levels_root(x) == root]
         if s.next_ask_ms and not any(sessions.is_open(now_ms, g) for g in groups):
             return   # shut: the last levels stand, and it is asked at the first check once the market opens
-        s.next_ask_ms = now_ms + LINK_EVERY_MS
+        k, now = s.link, datetime.fromtimestamp(now_ms / 1000, sessions.CT).replace(tzinfo=None)
         try:
-            r = await self.m.http.get(url, timeout=15, follow_redirects=True)
-            if r.status_code in (401, 403, 404, 410):
-                s.error = f"The levels link was refused (HTTP {r.status_code}): check the link."
+            try:
+                r = await self.m.http.get(url, timeout=15, follow_redirects=True,
+                                          headers={"If-None-Match": k.etag} if k.etag else {})
+            except Exception as e:   # network: keep the last good levels
+                k.status, k.failures = 0, k.failures + 1
+                s.error = f"Levels link unreachable ({type(e).__name__}): keeping the last good levels."
                 return
-            r.raise_for_status()
-            text = r.text
-            levels, date, _ = amt.parse_levels(text)
-            if not levels:
-                raise ValueError("no levels in the answer")
-        except Exception as e:   # network, HTTP or parse: keep the last good levels
-            s.error = f"Levels link unreachable ({type(e).__name__}): keeping the last good levels."
-            return
-        if text != s.text:
-            s.text, s.date, s.read_ms = text, date, now_ms
-        s.error = ""
+            code, headers = r.status_code, getattr(r, "headers", None) or {}
+            # a 403 or 404 the levels service did not mark came from something in between: retried as a failure
+            k.status = 502 if code in (403, 404) and headers.get(SERVICE_HEADER) != "1" else code
+            if code == 304:
+                k.failures, s.error = 0, k.problem
+                return
+            if code != 200:
+                k.failures += 1
+                s.error = (f"The levels link was refused (HTTP {code}): check the link." if code in (401, 403, 404, 410)
+                           else f"Levels link unreachable (HTTP {code}): keeping the last good levels.")
+                return
+            k.failures, k.etag, text = 0, headers.get("ETag", "") or "", r.text
+            if text != k.body or not k.answered:   # a new text: the publish it is (its Published line), or this answer
+                if k.answered:
+                    k.changed = now
+                k.stamp = published(text)
+                if k.stamp == NONE and k.answered:   # (a first answer without one may be yesterday's)
+                    k.stamp = now
+                k.body, k.answered = text, True
+            try:
+                levels, date, _ = amt.parse_levels(text)
+                if not levels:
+                    raise ValueError("no levels in the answer")
+            except ValueError as e:   # keep the last good levels
+                k.problem = s.error = f"Levels link unreachable ({type(e).__name__}): keeping the last good levels."
+                return
+            k.problem = ""
+            if text != s.text:
+                s.text, s.date, s.read_ms = text, date, now_ms
+            s.error = ""
+        finally:
+            s.next_ask_ms = now_ms + int((next_ask(now, k.stamp, k.changed, k.failures, k.status) - now).total_seconds() * 1000)

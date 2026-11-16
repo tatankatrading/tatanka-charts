@@ -258,7 +258,7 @@ function createDrawings(env) {
     let vol = 0;
     for (let i = lo; i <= hi; i++) vol += bars[i].v || 0;
     const t0 = logicalToTime(m.a.l), t1 = logicalToTime(m.b.l), pv = env.pointValue ? env.pointValue() : 0;
-    const money = pv ? `  ${sg}$${(Math.abs(dp) * pv).toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '';
+    const money = pv ? `  ${sg}$${(Math.abs(dp) * pv).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
     return [`${sg}${env.fmt(Math.abs(dp))} (${sg}${Math.round(Math.abs(dp) / tick)} ticks)${money}`,
             `${sg}${(Math.abs(dp) / Math.abs(m.a.p || 1) * 100).toFixed(2)}%  ·  ${n} bar${n === 1 ? '' : 's'}${t0 != null && t1 != null && t0 !== t1 ? `, ${span(Math.abs(t1 - t0))}` : ''}`,
             `Vol ${kfmt(vol)}`];
@@ -291,6 +291,7 @@ function createDrawings(env) {
     ctx.fill();
     ctx.fillStyle = '#ffffff';
     ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';   // (not the last drawing's: a range's 'center' put the text beside its box)
     lines.forEach((t, i) => ctx.fillText(t, bx + 8, by + 6 + i * 16));
   }
 
@@ -515,7 +516,7 @@ function createDrawings(env) {
   }
   function money(points, qty) {
     const pv = env.pointValue ? env.pointValue() : 0;
-    return pv ? `${points < 0 ? '−' : ''}$${Math.abs(points * pv * qty).toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '';
+    return pv ? `${points < 0 ? '−' : ''}$${Math.abs(points * pv * qty).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
   }
   function drawPosition(ctx, d, W) {
     if (d.pts.length < 3) d = { ...d, pts: positionFrom(d.type, d.pts[0]) };   // being placed: one point so far
@@ -969,6 +970,8 @@ function createDrawings(env) {
     D.drag = null; D.creating = null; D.down = null; lockChart(false); prim.update();
   }, true);
   document.addEventListener('keydown', (e) => {
+    // Esc in the drawing's own edit bar (a Text drawing's label, focused once placed): done with it, as anywhere else
+    if (e.key === 'Escape' && env.ui.edit?.contains(e.target)) { e.target.blur?.(); letGo(); return; }
     if (e.target.closest('textarea, select, input:not([type=checkbox]):not([type=color]):not([type=button])')) return;   // typing
     if (e.key === 'Escape') letGo();
     else if ((e.key === 'Delete' || e.key === 'Backspace') && D.selected) { e.preventDefault(); remove(D.selected); }
@@ -1253,7 +1256,11 @@ function createDrawings(env) {
       try { localStorage.setItem('drawMagnet', D.magnet ? '1' : '0'); } catch { /* private mode */ }
       b.classList.toggle('on', D.magnet);
     } else if (b.dataset.act === 'hide') setHidden(!D.hidden);
-    else if (b.dataset.act === 'paste') env.ui.paste.hidden = !env.ui.paste.hidden;
+    else if (b.dataset.act === 'paste') {
+      env.ui.paste.hidden = !env.ui.paste.hidden;
+      const mode = bondTick(env.symbol()) ? 'text' : 'decimal';   // a phone's keypad: 32nds need the apostrophe
+      for (const k of ['top', 'bottom']) env.ui.paste.querySelector(`[data-k=${k}]`).inputMode = mode;
+    }
     else if (b.dataset.act === 'clear') {
       if (!D.list.size || (await env.ask({ title: `Delete all ${D.list.size} drawings on ${env.symbol()}?`, message: 'Ctrl+Z brings them all back.', input: false, ok: 'Delete', danger: true })) === null) return;
       const all = [...D.list.values()];
@@ -1268,6 +1275,13 @@ function createDrawings(env) {
   env.ui.bar.querySelector('[data-act=magnet]').classList.toggle('on', D.magnet);
   env.ui.bar.querySelector('[data-act=hide]').classList.toggle('on', D.hidden);
 
+  // A typed price: spaces in a number go (7 845.75), not after a dash ('- 7845' is a bullet); on a Treasury in 32nds
+  // too, as its chart shows and copies them (110'165, 110'16.5, 110-16). NaN when it is none (empty too).
+  function typedPrice(text) {
+    const n = text.replace(/(\d)\s+/g, '$1').trim();
+    if (!n) return NaN;
+    return bondTick(env.symbol()) && /^[+-]?\d+['-]\d\d?(?:\.?\d)?$/.test(n) ? parse32(n, env.tick()) : Number(n);
+  }
   // Pasted levels: "7845.75|VAH, 7830|POC; 7810" (commas, semicolons or new lines) become labelled lines.
   function parseLevels(text) {
     const out = [], bad = [];
@@ -1275,10 +1289,8 @@ function createDrawings(env) {
       const item = raw.trim();
       if (!item) continue;
       const [price, ...rest] = item.split('|');
-      const n = price.replace(/(\d)\s+/g, '$1').trim();   // spaces in a number go (7 845.75), not after a dash: '- 7845' is a bullet
-      // Treasuries: in 32nds too, as their chart shows and copies them (110'165, 110'16.5, 110-16)
-      const p = bondTick(env.symbol()) && /^[+-]?\d+['-]\d\d?(?:\.?\d)?$/.test(n) ? parse32(n, env.tick()) : Number(n);
-      if (price.trim() && Number.isFinite(p)) out.push({ p, text: rest.join('|').trim() });   // below 0 too (FRED:T10Y2Y)
+      const p = typedPrice(price);
+      if (Number.isFinite(p)) out.push({ p, text: rest.join('|').trim() });   // below 0 too (FRED:T10Y2Y)
       else bad.push(item);
     }
     return { out, bad };
@@ -1286,8 +1298,10 @@ function createDrawings(env) {
   env.ui.paste.querySelector('[data-act=add]').onclick = async () => {
     const box = env.ui.paste, { out, bad } = parseLevels(box.querySelector('textarea').value);
     const color = box.querySelector('[data-k=pcolor]').value, bars = env.bars();
-    const num = (k) => { const v = box.querySelector(`[data-k=${k}]`).value.trim(); return v === '' ? NaN : Number(v); };   // empty: no range
-    const top = num('top'), bottom = num('bottom'), range = Number.isFinite(top) && Number.isFinite(bottom);
+    // the range boxes are text boxes, read as a level is (a number box dropped the apostrophe: 110'165 was 110165)
+    const typed = ['top', 'bottom'].map((k) => box.querySelector(`[data-k=${k}]`).value.replace(/,/g, ''));
+    const [top, bottom] = typed.map(typedPrice), range = Number.isFinite(top) && Number.isFinite(bottom);   // empty: no range
+    if (typed.some((v, i) => v.trim() && !Number.isFinite([top, bottom][i]))) { env.toast('Range top and bottom: a price, or empty for none'); return; }
     if (!out.length && !range) { env.toast(bad.length ? `Not prices: ${bad.slice(0, 3).join(', ')}` : 'Nothing to add'); return; }
     if (box.querySelector('[data-k=replace]').checked) {   // the set this tab shows: another tab's own set stays
       await Promise.all([...D.list.values()].filter((d) => d.style.group === 'paste' && onTab(d)).map((d) => remove(d.id, false)));
@@ -1444,6 +1458,11 @@ function createDrawings(env) {
     save(d, null);
     select(d.id);
   }
-  return { load, onMessage, setTool, update: () => { prim.update(); renderEdit(); }, state: D, prim, parseLevels, timeToLogical, logicalToTime, addHline,
+  // bars added or dropped at the left (older history, a trim): the measure (by bar index) stays on its bars
+  function shift(n) {
+    if (D.measure) { D.measure.a.l += n; D.measure.b.l += n; }
+    if (D.drag && D.drag.l0 != null) D.drag.l0 += n;
+  }
+  return { load, onMessage, setTool, shift, update: () => { prim.update(); renderEdit(); }, state: D, prim, parseLevels, timeToLogical, logicalToTime, addHline,
     select, letGo, showTree, templatesChanged: () => { const d = D.list.get(D.selected); if (d) renderTemplates(d); } };
 }

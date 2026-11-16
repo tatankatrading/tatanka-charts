@@ -18,10 +18,10 @@ def _trade_date(t: int) -> date:   # a daily bar is stamped at its session's 17:
 
 
 def _day_live(m, sym: str, now: int) -> dict | None:
-    """Today's session so far, or the last one (a weekend, the break, a closed holiday), from this server's own minutes
-    (open, high, low)."""
+    """Today's trade date so far, or the last one (a weekend, the break, a closed holiday), from this server's own
+    minutes (open, high, low): after a holiday halt, from the halt's session on, as its 1D bar has it."""
     m.flush_for_read()
-    start = sessions.previous_session_start(now + 1)
+    start = sessions.trade_key(sessions.previous_session_start(now + 1), m.instruments[sym].calendar)
     row = m.store.db.execute("SELECT MIN(l), MAX(h) FROM bars_1m WHERE symbol=? AND t>=?", (sym, start)).fetchone()
     first = m.store.db.execute("SELECT o FROM bars_1m WHERE symbol=? AND t>=? ORDER BY t LIMIT 1", (sym, start)).fetchone()
     if not first or row[0] is None:

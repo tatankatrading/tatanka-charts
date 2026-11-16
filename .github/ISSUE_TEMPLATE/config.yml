@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/tatankatrading/tatanka-charts#documentation
+    about: Setup, data feeds, NinjaTrader, alerts, the phone app and troubleshooting.
+  - name: Report a security problem
+    url: https://github.com/tatankatrading/tatanka-charts/security/advisories/new
+    about: Privately, not as an issue.

@@ -194,12 +194,12 @@ def test_quote_moves_a_crypto_day_week_or_month_bar_to_midnight_utc():
 PIVOTS_JS = """
 /*TA*/
 const NY = { tz: 'America/New_York', rth: ['09:30', '16:00'], day: '00:00' };
-const S = { ext: { exchange: NY }, spec: '1D', seqTime: new Map(), fp: { clear() {} }, dsmaLive: { clear() {} }, viewWant: null };
+const S = { ext: { exchange: NY }, spec: '1D', seqTime: new Map(), fp: { clear() {} }, dsmaLive: { clear() {} }, viewWant: null, st: {} };
 const noop = () => {}, series = { setData: noop }, ax = { pick: '' };
-const [cmpClear, altSetData, fpSchedule, setStudyData, indsUpdate, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo,
-  scheduleRange, priceLineLayout, bigSchedule, fillsSchedule, goToTime, setChartZone, cmpLoad, legend, loadNote, header] = Array(20).fill(noop);
+const [cmpClear, altSetData, fpSchedule, setStudyData, indsUpdate, hemaClear, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo,
+  scheduleRange, priceLineLayout, bigSchedule, fillsSchedule, goToTime, setChartZone, cmpLoad, legend, loadNote, header, vpLiveTick] = Array(22).fill(noop);
 const $ = () => ({ classList: { add: noop } }), toPoints = () => [{}, {}], vol = series, candles = series, inst = () => ({});
-const bigOn = () => false, viewKey = () => '', viewApply = () => true;
+const bigOn = () => false, viewKey = () => '', viewApply = () => true, anchorMs = () => null;
 /*APP*/
 const bars = BARS, out = {};
 for (const spec of ['5m', '1D']) { S.spec = spec; applyHistory({ kind: 'time', bars }); out[spec] = sessionClockKey; }

@@ -131,7 +131,7 @@ def test_amt_settings_and_alert_switches(client):
         r = client.put("/api/amt/settings", json=bad)
         assert r.status_code == 400 and msg in r.json()["detail"], (bad, r.json())
     d = client.get("/api/amt").json()
-    assert d["symbols"]["ES"]["LevelAlertMode"] == "Both" and len(d["schema"]) == 271
+    assert d["symbols"]["ES"]["LevelAlertMode"] == "Both" and len(d["schema"]) == 274   # with Use Instrument Hours (v1.2.4) and the two tick settings
     assert {x["name"] for x in d["schema"]} == set(d["defaults"]) - {"lvl_text"}
     assert next(x for x in d["schema"] if x["name"] == "row_scale")["choices"][0] == "Auto"
 
@@ -176,7 +176,8 @@ def test_cl_runs_at_its_own_regular_hours():
     hub.m = SimpleNamespace(instruments={"CL": Instrument("CL", "Crude", 0.01, 1000, "CL", rth=("08:00", "13:30"), calendar="energy")})
     hub._set({}, {})   # every chart's settings and the symbols' alert settings at the defaults
     s = hub.settings_for("CL")
-    assert (s.ib_session, s.amt_sess, s.pd_sess_time, s.ib_stop_time) == ("0800-0900", "1700-0800:123456", "0800-1330", "0800-1330")
+    assert (s.ib_session, s.amt_sess, s.pd_sess_time, s.ib_stop_time, s.amt_del_sess) == \
+        ("0800-0900", "1700-0800:123456", "0800-1330", "0800-1345", "1330-1335")   # NinjaTrader's 0830-1515 and 1500-1505, moved
     r = AmtRunner("CL", 0.01, 5, s, rth_session=sessions.move_session("0830-1500", sessions.rth_mover(("08:00", "13:30"))))
     price = lambda t: 61.0 if (t.hour, t.minute) >= (13, 30) or (t.hour, t.minute) < (8, 0) else 60.0 if (t.hour, t.minute) >= (9, 0) else 62.0   # noqa: E731
     for m in _bars(datetime(2026, 10, 19, 17, 0), datetime(2026, 10, 20, 15, 0), price):
@@ -184,7 +185,7 @@ def test_cl_runs_at_its_own_regular_hours():
     r.commit_ready()
     assert r.engine.settle == 60.0                          # the 13:25-13:30 bar's close, not 15:00's 61
     assert (r.engine.ibH, r.engine.ibL) == (62.0, 62.0)     # 08:00-09:00
-    assert hub.settings_for.__doc__ and amt_hub.engine_settings({}).ib_stop_time == "0830-1500"
+    assert hub.settings_for.__doc__ and amt_hub.engine_settings({}).ib_stop_time == "0830-1515"
 
 
 def test_mlk_day_counts_toward_tuesday():
@@ -206,17 +207,20 @@ def test_mlk_day_counts_toward_tuesday():
     assert e.ovnH == 7100.0   # Monday's trading is Tuesday's overnight
 
 
-def test_ovn_lines_stay_to_the_globex_open():
-    """The OVN High/Low lines show from the RTH open to 17:00, then a new overnight starts."""
-    r = AmtRunner("ES", 0.25, 5, amt.Settings())
-    r.commit_visuals = True
+def test_ovn_lines_go_at_the_rth_close():
+    """The OVN High/Low lines show from the RTH open to Delete OVN Lines At, NinjaTrader's 1500-1505 by default (they
+    stayed to the 17:00 open here before); set to 1700-1705 they stay to the 17:00 open. A new overnight starts then."""
     price = lambda t: 7100.0 if t.hour < 8 or t.hour >= 17 else 7050.0   # noqa: E731
-    lines = {}
-    for m in _bars(datetime(2026, 10, 19, 17, 0), datetime(2026, 10, 20, 17, 10), price):
-        r.add_minute(m)
-        r.commit_ready()
-        f, _ = r.preview()
-        if f is not None:
-            lines[f.Bar.Start.strftime("%H:%M")] = {x.Name for x in f.Lines}
-    assert "OVN High" in lines["09:00"] and "OVN High" in lines["15:55"] and "OVN Low" in lines["15:55"]
-    assert "OVN High" not in lines["17:05"]
+    for overrides, last in (({}, "14:55"), ({"amt_del_sess": "1700-1705"}, "16:55")):
+        r = AmtRunner("ES", 0.25, 5, amt.Settings(overrides))
+        r.commit_visuals = True
+        lines = {}
+        for m in _bars(datetime(2026, 10, 19, 17, 0), datetime(2026, 10, 20, 17, 10), price):
+            r.add_minute(m)
+            r.commit_ready()
+            f, _ = r.preview()
+            if f is not None:
+                lines[f.Bar.Start.strftime("%H:%M")] = {x.Name for x in f.Lines}
+        drawn = [k for k, v in sorted(lines.items()) if "OVN High" in v and "OVN Low" in v and "08:30" <= k < "17:00"]
+        assert drawn[0] == "08:30" and drawn[-1] == last, (overrides, drawn[:2], drawn[-2:])
+        assert "OVN High" not in lines["17:05"]

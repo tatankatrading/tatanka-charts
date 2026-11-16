@@ -1,5 +1,6 @@
 // Parity harness for chartsrv/gaps.py: replays a recorded input file through the original C# GapEngine
-// (pasted from TatankaGapAnalysis.cs between ENGINE_BEGIN and ENGINE_END by build.sh) and prints every result.
+// (pasted from TatankaGapAnalysis.cs between ENGINE_BEGIN and ENGINE_END by build.sh; HOURS: v1.1.0's InstrumentHours,
+// Use Instrument Hours) and prints every result.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -35,6 +36,21 @@ public static class Harness
                     TimeSpan a, b;
                     bool okA = GapEngine.TryParseTime(int.Parse(p[1]), out a), okB = GapEngine.TryParseTime(int.Parse(p[2]), out b);
                     o.Append("S|").Append(okA ? 1 : 0).Append('|').Append(okB ? 1 : 0).Append('\n');
+#if HOURS
+                    // v1.1.0, Use Instrument Hours: S|start|end|minimum|root|on. On, the RTH times at the root's own hours
+                    // (printed), or why they make no session there (and the run ends); off prints what v1.0.0 does.
+                    if (p.Length > 5 && p[5] == "1")
+                    {
+                        string why = InstrumentHours.Apply(int.Parse(p[1]), int.Parse(p[2]), p[4], ref a, ref b);
+                        if (why != null)
+                        {
+                            o.Append("R|").Append(why).Append('\n');
+                            File.WriteAllText(args[1], o.ToString());
+                            return;
+                        }
+                        o.Append("H|").Append(a.ToString()).Append('|').Append(b.ToString()).Append('\n');
+                    }
+#endif
                     e = new GapEngine(a, b, PD(p[3]));
                     break;
                 case "K":

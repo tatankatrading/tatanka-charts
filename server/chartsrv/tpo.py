@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Tatanka Trading LLC.
 # This Source Code Form is subject to the Mozilla Public License, v. 2.0.
 # If a copy of the MPL was not distributed with this file, obtain one at https://mozilla.org/MPL/2.0/.
-"""Tatanka TPO Profile v1.0.0, ported from the NinjaTrader 8 source
+"""Tatanka TPO Profile v1.1.0, ported from the NinjaTrader 8 source
 (tatankatrading/tatanka-indicators, ninjatrader/TatankaTpoProfile.cs).
 
 TpoProfile mirrors the C# OnBarUpdate, session, row and value-area code statement for statement and keeps
@@ -18,7 +18,7 @@ import re
 import sys
 from datetime import datetime, timedelta
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 DMIN = datetime.min
 ATR_PERIOD = 10
@@ -28,6 +28,7 @@ ATR_PERIOD = 10
 DEFAULTS = {
     "FilterByTime": True,
     "SessionTime": "0830-1500",
+    "UseInstrumentHours": True,   # Session Time at the instrument's own hours (tpo_service.own_hours), v1.1.0
     "BlockMinutes": 30,
     "AutoRowHeight": True,
     "TargetRows": 80,

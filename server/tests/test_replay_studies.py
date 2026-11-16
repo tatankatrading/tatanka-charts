@@ -112,6 +112,8 @@ def test_volume_profiles_in_replay_play_forward_and_jump_back(tmp_path, monkeypa
         got = []
         for cut in (T1, T2, T0):
             clock["t"] = NOW
+            await replaying.vp.get(kind, "ES", until=cut)
+            await replaying.vp.settled()   # SVP: the finished sessions' per-bar values, worked out in the background
             got.append(await replaying.vp.get(kind, "ES", until=cut))
         for i, cut in enumerate((T1, T2, T0)):
             (tmp_path / str(i)).mkdir()
@@ -119,6 +121,8 @@ def test_volume_profiles_in_replay_play_forward_and_jump_back(tmp_path, monkeypa
             live, _ = build_market(tmp_path / str(i), monkeypatch)
             write(live, *data, before=cut)
             clock["t"] = cut
+            await live.vp.get(kind, "ES")
+            await live.vp.settled()
             want = await live.vp.get(kind, "ES")
             assert same(got[i], want), (kind, i)
         if kind == "pvp":   # went back: a new build (its finished profiles may start elsewhere)

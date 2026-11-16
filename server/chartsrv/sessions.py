@@ -4,6 +4,7 @@ Exchange holidays come from config/holidays.json (set_calendar): halts and early
 closed days shut it all day, per product group. Session boundaries stay at 17:00; is_open(ts, group) and
 trade_key(session, group) apply the holidays (the watchdog, and daily bars that fold a holiday's no-settlement
 session into the next trade date), and market_ms(ts, group) counts only the time the market trades (drawn lines)."""
+import re
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime, timedelta
 from functools import lru_cache
@@ -361,20 +362,32 @@ def rth_mover(rth):
     return move
 
 
+def move_window(a: int, b: int, move) -> tuple[int, int]:
+    """A window's start and end (minutes of the day) moved by rth_mover's function, as a whole: each end on its own,
+    unless that changes the window's order. Two ends either side of 11:45 and closer than the open's and close's moves
+    differ by land on the same minute or past each other (11:00-12:00 would be 10:30-10:30 on CL's 08:00-13:30, all
+    day, and 09:50-09:30 on GC's 07:20-12:30, through the night): then both move as the window's middle does, keeping
+    its length (CL 10:30-11:30, GC 09:50-10:50)."""
+    if not move:
+        return a, b
+    x, y = move(a), move(b)
+    if a == b or ((a < b) == (x < y) and x != y):
+        return x, y
+    mid = (a + (b - a) % 1440 // 2) % 1440
+    d = move(mid) - mid
+    return (a + d) % 1440, (b + d) % 1440
+
+
 def move_session(v: str, move) -> str:
-    """"HHmm-HHmm" (optionally ":days") moved by rth_mover's function; anything else as it is."""
+    """"HHmm-HHmm" (optionally ":days") moved by rth_mover's function (move_window); anything else as it is."""
     if not move or not isinstance(v, str):
         return v
     rng, sep, days = v.partition(":")
     ends = rng.split("-")
     if len(ends) != 2 or not all(e.strip().isdigit() and 3 <= len(e.strip()) <= 4 for e in ends):
         return v
-    out = []
-    for e in ends:
-        e = e.strip().zfill(4)
-        m = move(int(e[:2]) * 60 + int(e[2:]))
-        out.append(f"{m // 60:02d}{m % 60:02d}")
-    return "-".join(out) + sep + days
+    a, b = (int(e.strip().zfill(4)[:2]) * 60 + int(e.strip().zfill(4)[2:]) for e in ends)
+    return "-".join(f"{m // 60:02d}{m % 60:02d}" for m in move_window(a, b, move)) + sep + days
 
 
 def move_hhmmss(v: int, move) -> int:
@@ -385,12 +398,38 @@ def move_hhmmss(v: int, move) -> int:
     return m // 60 * 10000 + m % 60 * 100 + v % 100
 
 
+_CLOCK = re.compile(r"(?:(\d{1,2}):(\d{2})|(\d{2}):(\d{2}):(\d{2}))")   # Session VP's times: HH:mm, H:mm, HH:mm:ss
+
+
+def _clock(v) -> tuple[int, int] | None:
+    """A Session VP time (vp.parse_time's "08:30", "8:30" or "08:30:00") as minutes of the day and seconds, else None."""
+    m = _CLOCK.fullmatch(v) if isinstance(v, str) else None
+    if not m:
+        return None
+    h, mi, se = (int(x) if x else 0 for x in (m[1] or m[3], m[2] or m[4], m[5]))
+    return (h * 60 + mi, se) if h <= 23 and mi <= 59 and se <= 59 else None
+
+
+def _clock_text(m: int, se: int) -> str:
+    return f"{m // 60:02d}:{m % 60:02d}" + (f":{se:02d}" if se else "")
+
+
 def move_clock(v: str, move) -> str:
-    """"HH:mm" (Session VP's 08:30) moved by rth_mover's function; anything else as it is."""
-    if not move or not isinstance(v, str) or len(v) != 5 or v[2] != ":" or not (v[:2] + v[3:]).isdigit():
-        return v
-    m = move(int(v[:2]) * 60 + int(v[3:]))
-    return f"{m // 60:02d}:{m % 60:02d}"
+    """A Session VP time ("08:30"; also "8:30" and "08:30:00", as it takes them) moved by rth_mover's function, its
+    seconds kept, as "HH:mm" ("HH:mm:ss" with seconds); anything else as it is."""
+    c = _clock(v) if move else None
+    return _clock_text(move(c[0]), c[1]) if c else v
+
+
+def move_clocks(start: str, end: str, move) -> tuple[str, str]:
+    """A window's start and end as Session VP takes them ("08:30" and "15:00", also "8:30" or "08:30:00") moved by
+    rth_mover's function as a whole (move_window), seconds kept, as "HH:mm" ("HH:mm:ss" with seconds): the NinjaTrader
+    Session Volume Profile's InstrumentHours.MoveTimes (v1.1.0). Either one that isn't a time: both as they are."""
+    a, b = (_clock(start), _clock(end)) if move else (None, None)
+    if not (a and b):
+        return start, end
+    x, y = move_window(a[0], b[0], move)
+    return _clock_text(x, a[1]), _clock_text(y, b[1])
 
 
 def trade_key(start_ms: int, group: str) -> int:

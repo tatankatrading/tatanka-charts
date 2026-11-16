@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 LIVE_WINDOW_MS = 10_000
 IDLE_TIMEOUT_S = 30        # the add-on sends a heartbeat every 5 s
 QUIET_S = 10               # a connection quiet this long is replaced by a new one; one talking keeps the feed
-ADDON_VERSION = 20         # ninjatrader/TatankaChartFeed.cs's Version: an older one is told to update
+ADDON_VERSION = 22         # ninjatrader/TatankaChartFeed.cs's Version: an older one is told to update
 CONTRACT_RE = re.compile(r"^[A-Z0-9]{1,8} (\d\d-\d\d|[A-Z]{3}\d\d)$")   # NinjaTrader's names: "ES DEC26" or "ES 12-26"
 
 
@@ -47,6 +47,7 @@ class NinjaTraderFeed:
         self.writer: asyncio.StreamWriter | None = None
         self.heard = 0.0           # when the connection last sent a line (monotonic)
         self.warned = None         # the connection a turned-away one was logged against (once each)
+        self.settled: set[str] = set()   # the roots this connection has sent a settlement for (S lines; add-on 21-)
         self.stats = {"connected": False, "ticks": 0, "bad_lines": 0, "last_msg_ms": None}
 
     def close(self):
@@ -96,6 +97,7 @@ class NinjaTraderFeed:
                 self.writer.close()
             self.writer = writer
             self.heard = time.monotonic()
+            self.settled = set()
             self.stats["connected"] = True
             self.stats.pop("refused", None)
             self.stats["version"] = int(hello[2]) if len(hello) > 2 and hello[2].isdigit() else 0
@@ -113,8 +115,8 @@ class NinjaTraderFeed:
             self._send_watch(market, writer)
             await writer.drain()
             while line := await asyncio.wait_for(reader.readline(), IDLE_TIMEOUT_S):
-                if self.writer is not writer:
-                    break  # replaced
+                if self.writer is not writer or not line.endswith(b"\n"):
+                    break  # replaced, or the connection cut off in the middle of a line (not one to read)
                 self.heard = time.monotonic()
                 self._line(market, line)
         except asyncio.TimeoutError:
@@ -127,6 +129,11 @@ class NinjaTraderFeed:
                 self.stats["connected"] = False
                 log.warning("NinjaTrader add-on disconnected")
                 gf = getattr(market, "gapfill", None)
+                if gf is not None and hasattr(gf, "fail_values"):
+                    gf.fail_values()   # the AMT's sessions asked for: from the trades stored here (before their windows go)
+                if gf is not None and hasattr(gf, "nt_out"):   # its answers won't come now
+                    gf.nt_out.clear()
+                    gf.reopen.clear()
                 owned = getattr(market, "trade_owner", {})
                 for sym in [s for s in getattr(gf, "windows", {}) if s not in owned]:   # its answers won't come now (asked
                     del gf.windows[sym]   # again at the next connect): its alerts wait for none (gapfill.filling)
@@ -135,8 +142,6 @@ class NinjaTraderFeed:
                     gf.older_ok, gf.older_busy = False, None
                 for sym in list(getattr(gf, "changed", ())):   # holes left unasked: what was filled reloads now
                     gf.settle(sym)
-                if gf is not None and hasattr(gf, "fail_values"):
-                    gf.fail_values()   # the AMT's sessions asked for: from the trades stored here
             writer.close()
 
     def _send_charts(self, market, writer):
@@ -198,6 +203,10 @@ class NinjaTraderFeed:
             if sym in owned:
                 continue   # another feed's: that feed fills it (FeedPlugin.fill_added); the answer here would be dropped
             span = gf.open(sym, now, reach=gf.reach()) if gf else None
+            if span and sym in gf.nt_out:   # its last request still answered: this stretch asked after its Z (owed_done),
+                gf.windows[sym].hold = gf.windows[sym].discard = True   # its alerts held till then
+                gf.reopen.add(sym)
+                continue
             if span:
                 self.writer.write(f"GAP|{sym}|{span[0]}|{span[1]}{'|live' if self._live() else ''}\n".encode())
 
@@ -246,25 +255,37 @@ class NinjaTraderFeed:
             elif p[0] == "Q" and len(p) == 5:   # with the day's volume
                 vol = float(p[4])
                 market.on_quote(f"{p[1]}1!", _num(p[2]), _num(p[3]), vol if math.isfinite(vol) and vol >= 0 else None)
-            elif p[0] == "S" and len(p) == 3:   # the settlement its exchange published (add-on 9+)
+            elif p[0] == "S" and (len(p) == 3 or len(p) == 4 and p[3] == "held"):   # its exchange's settlement (add-on 9+)
                 price = float(p[2])
                 if not (math.isfinite(price) and price > 0):
                     raise ValueError("out of range")
+                # held (add-on 22): the one NinjaTrader held (its first after subscribing or after its data connection
+                # was down), or one sent over 30 minutes after it was heard (the server away), maybe since a day missed;
+                # without, a change it heard live in the last 30 minutes. From an older add-on, the first for a root on a
+                # connection is taken as held.
+                first = len(p) == 4 or self.stats.get("version", 0) < 22 and p[1] not in self.settled
+                self.settled.add(p[1])
                 if hasattr(market, "settlements"):
-                    market.settlements.on_feed(p[1], price)
+                    market.settlements.on_feed(p[1], price, first=first)
             elif p[0] == "C" and len(p) == 3:
                 if p[1] not in market.instruments or p[1] in getattr(market, "trade_owner", {}):
                     return   # not charted here, or another feed supplies it (its contract is the one charted)
                 if not CONTRACT_RE.match(p[2]):
                     raise ValueError("bad contract")
                 market.on_contract(p[1], p[2])
-            elif p[0] == "C" and len(p) == 4 and p[3] == "quote":   # a watchlist future's quote rolled (add-on 12)
-                if p[1] in market.instruments:
+            elif p[0] == "C" and len(p) == 4 and p[3] == "quote":   # a watchlist future's quote contract: at a roll
+                if p[1] in market.instruments:   # (add-on 12), on connect and when first quoted too (add-on 22)
                     return   # charted here: its own C line rolls it
                 if not CONTRACT_RE.match(p[2]):
                     raise ValueError("bad contract")
-                if hasattr(market, "settlements"):
-                    market.settlements.rolled(p[1])   # the settlements known are the old contract's
+                if hasattr(market, "quote_contract"):
+                    market.quote_contract(p[1], p[2])   # one other than the contract stored: a roll
+            elif p[0] in "XYZ" and len(p[0]) == 1 and len(p) > 1 and p[1] in getattr(getattr(market, "gapfill", None), "nt_out", ()):
+                if p[0] == "Z":   # the end of an answer given up on: what is due for the symbol now
+                    if (nxt := market.gapfill.owed_done(p[1])) and self.writer is not None:
+                        self.writer.write((nxt + "\n").encode())
+                    if self.writer is not None and (nxt := market.gapfill.next_older()):
+                        self.writer.write((nxt + "\n").encode())
             elif p[0] in "XYZ" and len(p[0]) == 1 and (not hasattr(market, "gapfill") or
                                                        (len(p) > 1 and p[1] in getattr(market, "trade_owner", {}))):
                 pass   # another feed supplies it: its window is that feed's

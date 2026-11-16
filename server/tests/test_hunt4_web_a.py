@@ -319,7 +319,7 @@ def test_htf_ema_is_asked_again_at_a_closed_bar_only_when_its_answer_may_have_ch
     """Every closed chart bar asked the server for the HTF EMA again: on a seconds or tick chart, 14 to 400 days of
     1-minute bars worked out every second for the same answer. It is asked again when the forming HTF bar has closed,
     the chart's first bar is another, a bar of several sessions was over, or the last ask failed."""
-    out = run_app(["hemaBusy", "hemaRequest", "hemaTick"], HEMA_JS)
+    out = run_app(["hemaEach", "hemaRequest", "hemaTick"], HEMA_JS)
     assert out == {"seconds": 1, "htfClosed": 2, "after": 2, "afterAgain": 2, "trimmed": 3, "trimmedAfter": 3,
                    "calendar": 4, "failed": 5}
 

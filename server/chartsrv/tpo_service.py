@@ -25,6 +25,19 @@ DAILY_TTL_S = 900       # reread daily bars this often, so a backfill shows up w
 DAILY_SETTLED = 200     # bar replay: the kept daily bars do if they start this many calendar days before its day
 
 
+def own_hours(s: dict, rth) -> dict:
+    """The settings with Session Time, written for ES's 08:30-15:00 CT, at the instrument's own regular hours rth (CT
+    "HH:MM" open and close) as a whole (sessions.move_window: CL's 0830-1500 is 0800-1330), while Use Instrument Hours
+    is on (the default); off, as typed on every instrument. Only a Session Time the profile reads moves (ParseSession):
+    one it doesn't ("0860-1500") filters nothing on every instrument. The NinjaTrader TPO Profile's RunSessionTime
+    (v1.1.0) on Central time, as this app's chart time is."""
+    move = sessions.rth_mover(rth) if s.get("UseInstrumentHours", True) else None
+    ok, a, b = tpo.TpoProfile.ParseSession(s["SessionTime"])
+    if not (move and ok):
+        return s
+    return {**s, "SessionTime": "-".join(f"{m // 60:02d}{m % 60:02d}" for m in sessions.move_window(a, b, move))}
+
+
 def session_end(start_ms: int) -> int:
     """16:00 CT on the trading date of the session opening at start_ms."""
     return epoch_ms((ct(start_ms) + timedelta(days=1)).replace(hour=16, minute=0))

@@ -27,9 +27,14 @@ a note says so once). Past the stored minutes, the NinjaTrader add-on (20+) is a
 bars from NinjaTrader…"), so a minute-or-longer, volume, range or Renko chart keeps going as far back as your data
 provider's history does, and each future's last year is filled in the background once NinjaTrader connects
 ([NINJATRADER.md](NINJATRADER.md#the-ninjatrader-feed), Older history). The indicators, VWAP, HTF EMA, Daily SMA and your fills run over the older bars too; the
-volume profiles, TPO, Gap Analysis and the AMT Toolkit keep their own history settings. "All the stored history is
-loaded" says when there is no more (or "that's as far back as NinjaTrader's history goes"). API: `GET /api/older?symbol=ES&spec=30m&before=<first bar's ms>&count=1000&rth=false`
-(`bars`, oldest first; `more`; `approx`: some built from 1-minute bars; `fetching`: NinjaTrader is asked, ask again;
+volume profiles, TPO, Gap Analysis and the AMT Toolkit keep their own history settings (Gap Analysis on a second chart
+runs over the chart's bars, so older gaps come with older bars). "All the stored history is
+loaded" says when there is no more (or "that's as far back as NinjaTrader's history goes"; while NinjaTrader isn't
+answering, that it didn't send older history: the chart asks again when it does). A reconnect, a history reload or
+another tab and back loads back to the older bars you were on. API: `GET /api/older?symbol=ES&spec=30m&before=<first bar's ms>&count=1000&rth=false`
+(`count` 1-5000; `have`: for tick, volume, range and Renko bars, how many of the chart's first bars open on `before`'s
+millisecond, so the ones before them on it come too. `bars`, oldest first; `more`; `next`: with no bars but `more`,
+the `before` to ask with next; `approx`: some built from 1-minute bars; `fetching`: NinjaTrader is asked, ask again;
 `why`, when there are no more: `stored`, `limit` or `wait`).
 
 
@@ -48,7 +53,8 @@ shows the real last price and every study still uses the real bars.
 **Treasury futures in 32nds** (ZT, ZF, ZN, TN, ZB, UB), as CME, NinjaTrader and TradingView quote them: ZB 115'16 =
 115 + 16/32, ZN 110'165 = 110 + 16.5/32, ZF 108'162 = 16.25/32, ZT 104'057 = 5.75/32 (the last digit is eighths of a
 32nd). The price axis, the labels, the watchlist and alert messages show them that way; a price box (an alert, a
-drawing's points, the If/Then block, Level Lines' levels, Paste levels) takes 110'165, 110'16.5 or 110.515625.
+drawing's points, the If/Then block, Level Lines' range and levels on the Plan tab, Paste levels) takes 110'165,
+110'16.5 or 110.515625.
 
 **Workspaces and layouts** (**▦** in the toolbar), as TradingView's saved layouts:
 
@@ -117,10 +123,14 @@ Tabs are remembered per chart and saved in the workspace.
   colored % line over the chart, as TradingView's Compare. The price scale switches to %, so
   every line starts at 0% at the left edge of the view; the legend shows each one's change to the bar under the
   crosshair, and **×** removes it (the last one gone, the scale goes back to what it was). Live futures update
-  live; free-data symbols every 30 s. Each line takes its symbol's close as of each of the chart's bars, so a stock
-  over a 24-hour future runs flat while its market is closed instead of adding gaps. Kept per chart tab. Time charts.
+  live; free-data symbols every 30 s (D, W and M charts every 2 minutes), also after their source didn't answer once.
+  A symbol that can't be had at this timeframe (a stock on 30 s) is said once. Each line takes its symbol's close as
+  of each of the chart's bars, so a stock over a 24-hour future runs flat while its market is closed instead of
+  adding gaps. Scrolled back (Older history), the lines load back with the chart. Kept per chart tab. Time charts.
 - **Data window** (⚙ Chart settings, or the chart's menu): under the legend, the bar under the crosshair (else the
-  latest): open, high, low, close, change from the bar before, range, volume and delta.
+  latest): open, high, low, close, change from the bar before, range, volume and delta, and each Tatanka volume
+  profile's POC, VAH and VAL there (INDICATORS.md). With the AMT Toolkit's table in the top right corner it wraps
+  before the table.
 - **Time zone**: click (tap) the clock. **Local** (this device's zone, the default), **Exchange** (the chart's own
   exchange: Chicago for the futures, New York for US stocks, UTC for crypto, the exchange's zone for other markets),
   UTC or a city. Saved in the workspace, so every device and chart follows it (**Local** is still each device's own). Every time shown follows it: the time axis (the date at that zone's midnight), crosshair, clock,
@@ -176,7 +186,7 @@ Tabs are remembered per chart and saved in the workspace.
   - **Session:** ETH (all Globex hours) or RTH (regular hours only), the same as the **ETH/RTH** chip in the header.
   - **Look:** themes (NinjaTrader, Black, Navy) set background, grid and text together; or pick each color
     (background, grid, axis text, crosshair); grid off, both, horizontal only or vertical only; axis text size;
-    a faint symbol and timeframe watermark.
+    a faint symbol and timeframe watermark; **Price bars in front of studies** (on by default, see Layer order).
   - **Price scale:** scale on price only (studies never stretch it); last price line, in the bar's color or one you
     pick, solid, dotted, dashed or long dash, 1-4 px, 10-100% opacity; bar close countdown.
   - **Price bars** (this tab only): off hides the candles or bars, for analysis; studies, drawings, volume and
@@ -198,7 +208,7 @@ Tabs are remembered per chart and saved in the workspace.
   edits it). The app never zooms as a page (a tap in a number box used to zoom an iPhone's page, which then took
   drags on the chart for itself).
 - **On a phone**, the AMT table starts folded to its title, a small tab in the chart's top-right corner beside the
-  legend (**Tatanka AMT v1.2.2 ▾**); tap it and the rows drop down from that corner (under the legend only when the
+  legend (**Tatanka AMT v1.2.4 ▾**); tap it and the rows drop down from that corner (under the legend only when the
   legend is too wide, e.g. the studies list open), tap again to fold. Settings and other
   dialogs fill the screen below the status bar, so their ✕ and buttons can always be reached.
 - **On a phone**, as TradingView's app: one page at a time, with a bar at the bottom: **Chart**, **Watchlist**,
@@ -225,6 +235,17 @@ Tabs are remembered per chart and saved in the workspace.
   draw in front of the shaded ones (profiles, AMT, TPO...); in front of the bars, a shaded study can't sit between
   two line studies. A move that breaks one snaps to where it actually draws, and says so. Drawings and alert lines
   always draw in front of everything. The price line, daily levels, volume and footprint go with the bars.
+  **Price bars in front of studies** (⚙ Chart, on by default): the candles draw over every study, whatever this order
+  (volume profiles, AMT and TPO shading, levels and lines behind them); your fills and big-trade bubbles stay on top.
+  Untick it to put a study in front of the bars. While it is on, moving a study changes only its place among the
+  studies, and the Price bars row stays where you put it, for when it is unticked.
+- **Several of one** (HTF EMA, Level Lines, Auto Anchored, Periodic and Session Volume Profile), as NinjaTrader adds
+  an indicator twice: open its row and press **+ Add another** (up to 4 of each). The new one starts from the first
+  one's settings on this chart and opens its Settings, so you can set it apart (a 60 and a 240 minute HTF EMA, a Weekly
+  and a Monthly PVP, a Year and a Quarter AAVP, Level Lines 2 with lines for this chart only). Each is its own row (**Periodic Volume Profile 2**), legend row, layer and entry in
+  the Tatanka settings dialog. Its settings are this chart's only (no Apply to all charts: other charts don't have it).
+  Unticking it, **Remove** in its row, or Remove from the chart in the legend takes it off with its settings; the first
+  one only switches off. Indicator templates keep how many are on, not their settings.
 - Remembered per chart and saved in the workspace.
 - **fx Indicator templates ▾** (bottom of the menu): **Save these indicators as…** keeps which studies and indicators
   are on and their layer order under a name; click a name to apply it to any chart (the symbol, timeframe, drawings
@@ -251,7 +272,10 @@ What each one is:
   typical price.
 - **Anchored VWAP**: Set anchor, then tap a bar. One anchor per symbol: on a longer timeframe it starts at the bar
   that holds it (on an RTH chart, the next day's for one after the RTH close). Computed from the chart's bars
-  (typical price).
+  (typical price). An anchor before the bars loaded loads the older bars back to it, up to the 60,000 bars a chart
+  holds. When those can't reach it (a daily chart's anchor 3 months back, on a 1-minute chart) or the stored history
+  ends first, it starts at the first bar and the info says so, and that timeframe doesn't load back for it again until
+  the page is reloaded. Minute and longer charts work this out before loading anything.
 - **Volume profile (right edge)**: against the price axis, facing left: the visible bars (on an RTH chart, their
   regular hours only), or a composite of the last 5 or 20 sessions. Ranges up to 3 days use every trade; longer ones,
   and minutes that only have backfilled 1-minute bars, spread each bar's volume across its high-low range
@@ -341,8 +365,8 @@ whole bar's room as on the chart (CL's 13:00 1h bar at a 13:30 halt); bars that 
   *regular scale*). Switch the alert off and on to keep it to the chart in view; the Alerts tab shows its level
   (now …).
 - **Paste levels** (drawings you can move; the Level Lines indicator is on the Plan tab): `7845.75|VAH, 7830|POC, 7810|VAL`, separated by commas, semicolons
-  or new lines, label optional; plus an optional range box (top/bottom) with a midline. Pasting again replaces the
-  last pasted set.
+  or new lines, label optional; plus an optional range box (top/bottom) with a midline. A range top or bottom that is
+  not a price is refused. Pasting again replaces the last pasted set.
 
 ## Bar replay
 
@@ -356,8 +380,8 @@ bar disappears; **▶** plays (½ to 10 bars a second), **⏭** or **Shift+→**
 - What replays: candles, volume, VWAP and bands, anchored VWAP, indicators, footprint, HTF EMA, Daily SMA x4, If/Then,
   Level Lines, drawings, and the Tatanka studies: AMT Toolkit, TPO, Gap Analysis, SVP, AAVP, PVP and the right-side
   volume profile. Each is built as it stood at the replay bar (nothing after it counts) and moves on as replay plays.
-  - **AMT Toolkit**: the replaying chart gets its own Toolkit, loaded from the 90 days before the replay start (a few
-    seconds on the first bar and after **Jump**). It never alerts.
+  - **AMT Toolkit**: the replaying chart gets its own Toolkit, loaded from the 90 days before the replay start (400
+    with Profile Period on Yearly; a few seconds on the first bar and after **Jump**). It never alerts.
   - **Daily levels** (and the Toolkit's levels): the app keeps each day's levels as they come (levels file, link or
     pasted line; a change during the day is kept too, with when it was first seen), so replay shows the levels that day
     had. Days from before the app kept them, or with none, show "no daily levels kept for that day". The kept levels
@@ -393,7 +417,7 @@ the tick rule). Zoom in until bars are about 40px wide to see the numbers; zoome
   from the hours it leaves out), area by size, in the chart's up color for buys at the ask and down color for sells
   at the bid. Fills at the same millisecond on the same side count as one trade (an order sweeping the book), as ATAS
   and Bookmap count them. The smallest size is per symbol (ES 25, NQ 10, CL 20, GC 10 to start). From stored trades
-  over the visible bars (up to 3 days), then live. During replay only those up to the replay time show.
+  over the visible bars (up to 3 days), then live. During replay only those in the bars shown so far show.
 - **Tape** tab (side panel): time and sales for the symbol on the chart (the active chart in a layout), newest on top,
   grouped the same way, with a smallest-size filter; trades of at least the Big trades size are gold. Scroll down to
   read and new trades come in above without moving the view.
@@ -409,15 +433,16 @@ was away arrive on the next connect (each is stored once), and with them the pos
 - **On the chart** (Studies ▾ → Your fills, on by default): an arrow just left of the bar it was filled in (on an RTH
   chart none from the hours it leaves out), pointing at the fill price (off the candle, so it shows), in the up color
   for a buy and the down color for a sell, with the quantity; each finished trade a dotted line from its average entry
-  to its average exit with its net P&L. Pick one account or all.
+  to its average exit with its net P&L. Pick one account or all. During replay only those in the bars shown so far
+  show.
 - **Journal** tab: Today, 7, 30, 90 days or a year; one account or all; this symbol only or every one. Net P&L, trades,
   win rate, average win and loss, profit factor; a bar per day; then each trade: side, size, contract, entry → exit,
   points, P&L after commissions, MAE and MFE (from the stored 1-minute bars: an open trade's so far, none for one held
   across the chart's contract roll, as those bars are not adjusted), account. Click one to see it on the chart.
 - A trade runs from flat to flat on one account and contract: adding to it and scaling out stay one trade, and a
   reversal closes one and opens the next. P&L uses NinjaTrader's point value for the contract. A trade still open
-  when the range starts counts its fills back to where NinjaTrader last had that account and contract flat, however
-  long ago.
+  is listed in every range (Today too), however long ago it began. A trade still open when the range starts counts
+  its fills back to where NinjaTrader last had that account and contract flat, however long ago.
 - **A fill the app never got** (a position opened before the add-on was installed, a fill made while NinjaTrader
   was off) is put right by NinjaTrader's own positions, which the add-on sends a second after each change and on
   each connect (add-on 13): where they say otherwise than the fills, the trade open there ends with **exit unseen**
@@ -429,4 +454,5 @@ was away arrive on the next connect (each is stored once), and with them the pos
   `open_since`, the oldest open trade's entry; `excursions=false` leaves out MAE and MFE, `flat=true` reads every
   position as flat at `start`). A trade's `from_position` is true when it began at one of NinjaTrader's positions,
   `unseen_exit` when a fill the app never got ended it. After a new fill for its symbol the chart asks only from where
-  every position was flat before it.
+  every position was flat before it. `start` and `end` are epoch milliseconds from 0 to 4102444800000 (the year
+  2100); others get a 422.

@@ -13,6 +13,7 @@ private and out of git.
                                                    # in the backups folder unless <file> is a whole path
 """
 import argparse
+import json
 import asyncio
 import logging
 import os
@@ -24,7 +25,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import setup
+from . import auth, setup, webpush
 from .gapfill import ASKED, OLDER_LIMIT, ROLLED
 from .store import Store, connect
 
@@ -35,10 +36,21 @@ EVERY_S = 24 * 3600
 NAME_RE = re.compile(r"^tatanka-\d{8}-\d{6}(-before-restore)?\.db$")
 MARKET = {"ticks", "bars_1m", "symbols", "fred_series", "eia_series", "cot_series", "vp_cache"}   # refilled by the server itself
 # settings about the market data in this database, which a restore leaves: the simulator left (its trades deleted), the
-# setup guide, the contracts it is on (and the old names noted to rename once: market.OLD_NAMES), their last rolls and
-# the holes asked for, where NinjaTrader's older history ends; and this PC's own tailscale serve names. Not the backup's
-# (but see restore()'s on_sim).
-KEPT = (setup.LEAVE_SIM, setup.SETTING, "contracts", "contracts_old_names", ROLLED, ASKED, OLDER_LIMIT, setup.TS_NAMES)
+# setup guide, the contracts it is on (and the old names noted to rename once: market.OLD_NAMES), the ones NinjaTrader
+# quotes a listed future on (market.QUOTE_CONTRACTS), their last rolls and the holes asked for, where NinjaTrader's
+# older history ends, the last values the stock, series and formula alerts checked (free_alerts.FREE_LAST: a backup's
+# are days old; none when the restore leaves the simulator, whose they were); and this PC's own tailscale serve names.
+# Not the backup's (but see restore()'s on_sim).
+KEPT = (setup.LEAVE_SIM, setup.SETTING, "contracts", "contracts_old_names", ROLLED, ASKED, OLDER_LIMIT, setup.TS_NAMES,
+        "alert_id_high",   # (ids made since a backup are never given again by restoring it)
+        "free_alert_last", "quote_contracts")
+# the login, which a restore leaves as it is here when this database has had one (_had_login): the password (none, if
+# the login was turned off since), the signed-in devices, and the app-notification devices with the server key they
+# were made for. The backup's would sign in again a phone signed out since (and send it alerts), and bring back a
+# password changed or turned off since (forgotten: `auth off`). With none ever here (a new PC's fresh install) the
+# backup's come.
+LOGIN_SETTINGS = (auth.SETTING, webpush.SETTING)
+LOGIN_TABLES = ("sessions", "push_subs")
 
 
 def backup_dir(settings) -> Path:
@@ -108,13 +120,47 @@ def _real_feed(db) -> bool:
     return any(t in has and db.execute(f'SELECT 1 FROM bk."{t}" LIMIT 1').fetchone() for t in ("fills", "positions"))
 
 
+def _int(v) -> int | None:
+    """A stored setting's JSON as a whole number, or None."""
+    try:
+        x = json.loads(v)
+    except (TypeError, ValueError):
+        return None
+    return x if isinstance(x, int) and not isinstance(x, bool) else None
+
+
+def _login_row(db, schema: str):
+    """The login setting's row of the database attached as `schema` (main, bk), or None: none was ever set there."""
+    if not db.execute(f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name='settings'").fetchone():
+        return None
+    return db.execute(f"SELECT value FROM {schema}.settings WHERE key=?", (auth.SETTING,)).fetchone()
+
+
+def _had_login(db, schema: str) -> bool:
+    """The database attached as `schema` has had a login: a password is set, or was and the login was turned off
+    (Login's Turn off, `python -m chartsrv.auth off`), which leaves an empty one. A fresh install has none."""
+    return _login_row(db, schema) is not None
+
+
+def _has_password(db, schema: str) -> bool:
+    """The database attached as `schema` (main, bk) has a login password set."""
+    row = _login_row(db, schema)
+    try:
+        cfg = json.loads(row[0]) if row else None
+    except (TypeError, ValueError):
+        return False
+    return isinstance(cfg, dict) and bool(cfg.get("hash"))
+
+
 def restore(db_path, backup: Path, on_sim: bool = False, say=log.info) -> dict:
-    """Replaces the user data in the database with the backup's; market data stays, and the KEPT settings about it.
+    """Replaces the user data in the database with the backup's; market data stays, and the KEPT settings about it,
+    and the LOGIN when this database has had one (a password set, or turned off since).
     A backup of what is replaced is written first, next to the backup. Returns {table: rows}. The server must be
     stopped. on_sim: this server runs the simulator (.env's CHART_FEED=sim, not left). A backup from an install off it
     (a new PC's fresh install, the old PC's backup: it had left the simulator, or ran NinjaTrader from .env) leaves it
     here too at the next start, as Leave the simulator does: its invented trades deleted, a copy kept. Kept on, it would
-    fire the restored alerts at its invented prices on the restored channels, and use up the one-shot ones."""
+    fire the restored alerts at its invented prices on the restored channels, and use up the one-shot ones. The values
+    the stock and formula alerts last checked here go at once (the simulator's: the first real quote would cross)."""
     backup = Path(backup)
     probe = connect(backup, readonly=True)
     try:
@@ -131,9 +177,13 @@ def restore(db_path, backup: Path, on_sim: bool = False, say=log.info) -> dict:
     try:
         db.execute("ATTACH DATABASE ? AS bk", (str(backup),))
         out, leaving, real = {}, False, _real_feed(db)
-        marks = ",".join("?" * len(KEPT))
-        kept = db.execute(f"SELECT key, value FROM main.settings WHERE key IN ({marks})", KEPT).fetchall() \
-            if db.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='settings'").fetchone() else []
+        has_settings = db.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='settings'").fetchone()
+        login, theirs = _had_login(db, "main"), _has_password(db, "bk")   # login: this database's stays
+        ours = _has_password(db, "main")   # and a password with it
+        keep = KEPT + (LOGIN_SETTINGS if login else ())
+        marks = ",".join("?" * len(keep))
+        kept = db.execute(f"SELECT key, value FROM main.settings WHERE key IN ({marks})", keep).fetchall() \
+            if has_settings else []
         with db:
             for table, sql in db.execute("SELECT name, sql FROM bk.sqlite_master WHERE type='table' AND name != 'backup_meta' "
                                          "AND name NOT LIKE 'sqlite_%'").fetchall():
@@ -141,6 +191,9 @@ def restore(db_path, backup: Path, on_sim: bool = False, say=log.info) -> dict:
                     continue
                 if not db.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
                     db.execute(sql)   # unqualified: made in main
+                if login and table in LOGIN_TABLES:
+                    out[table] = db.execute(f'SELECT COUNT(*) FROM main."{table}"').fetchone()[0]
+                    continue
                 mine = {r[1] for r in db.execute(f'PRAGMA main.table_info("{table}")')}
                 cols = [r[1] for r in db.execute(f'PRAGMA bk.table_info("{table}")') if r[1] in mine]
                 q = ", ".join(f'"{c}"' for c in cols)
@@ -148,17 +201,33 @@ def restore(db_path, backup: Path, on_sim: bool = False, say=log.info) -> dict:
                 db.execute(f'INSERT INTO main."{table}" ({q}) SELECT {q} FROM bk."{table}"')
                 if table == "settings":   # these stay as they were, set or not
                     left = db.execute("SELECT value FROM bk.settings WHERE key=?", (setup.LEAVE_SIM,)).fetchone()
-                    db.execute(f"DELETE FROM main.settings WHERE key IN ({marks})", KEPT)
+                    db.execute(f"DELETE FROM main.settings WHERE key IN ({marks})", keep)
                     db.executemany("INSERT INTO main.settings (key, value) VALUES (?,?)", kept)
+                    hi = [r[0] for r in db.execute("SELECT value FROM bk.settings WHERE key='alert_id_high' UNION ALL "
+                                                   "SELECT value FROM main.settings WHERE key='alert_id_high'")]
+                    hi = [v for v in (_int(x) for x in hi) if v is not None]
+                    if hi:   # the higher of the two: neither the ids given here since, nor the backup's, given again
+                        db.execute("INSERT OR REPLACE INTO main.settings (key, value) VALUES ('alert_id_high', ?)",
+                                   (json.dumps(max(hi)),))
                     here = dict(kept).get(setup.LEAVE_SIM)
                     leaving = on_sim and here not in ('"done"', '"pending"') and (left == ('"done"',) or real)
                     if leaving:
                         db.execute("INSERT OR REPLACE INTO main.settings (key, value) VALUES (?,?)",
                                    (setup.LEAVE_SIM, '"pending"'))
+                        db.execute("UPDATE main.settings SET value='{}' WHERE key='free_alert_last'")   # the simulator's
                 out[table] = db.execute(f'SELECT COUNT(*) FROM main."{table}"').fetchone()[0]
         db.execute("DETACH DATABASE bk")
     finally:
         db.close()
+    if login and ours:
+        say("The login stays as it was here: the password, the signed-in devices and the app-notification devices.")
+    elif login:
+        say("The login stays as it was here, off, with the app-notification devices here"
+            + (": the backup's password and signed-in devices don't come back. Set a new password in the app "
+               "(Connections > Login)." if theirs else "."))
+    elif theirs:
+        say("This install never had a password: the backup's comes with it, and its signed-in and app-notification "
+            "devices.")
     if leaving:
         say("The backup comes from an install off the simulator, and this one still runs it: the next start "
             "leaves the simulator (its invented trades are deleted, a copy of the database kept next to it) and runs on "
@@ -258,7 +327,8 @@ def main(argv=None):
             p = folder / a.file
         if not a.yes:
             print(f"This replaces the alerts, drawings, watchlists, workspaces, settings and keys in {s.db_path} with "
-                  f"{p.name}'s (market data stays). Stop the server first, then run again with --yes.")
+                  f"{p.name}'s (market data stays, and the login here unless it never had one). Stop the server "
+                  "first, then run again with --yes.")
             return 2
         counts = restore(s.db_path, p, on_sim=s.feed == "sim", say=print)
         print("restored: " + ", ".join(f"{t} {n}" for t, n in counts.items()))

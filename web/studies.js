@@ -45,6 +45,9 @@ const axisStack = {
   pos: new Map(),      // tag -> where it is drawn
   laid: false,
   height: 19,          // a tag's height in px, for the axis font (app.js sets it)
+  // The chart's own last-price label, and the countdown just under it: [its centre, the tags' heights it takes], or
+  // null. Not this app's to move: the tags go around it (they were painted over it, the live price unreadable).
+  anchor: null,
   views(owner, list) {
     const tags = list.map((v) => {
       const t = { ...v, raw: v.coordinate };
@@ -69,17 +72,31 @@ const axisStack = {
       for (const t of tags) {
         let y = null;
         try { y = (!t.visible || t.visible()) ? t.raw() : null; } catch { y = null; }
-        if (y != null && Number.isFinite(y) && y > -50) items.push({ t, y });
+        if (y != null && Number.isFinite(y) && y > -50) items.push({ t, y, n: 1 });
       }
     }
-    items.sort((a, b) => a.y - b.y);
     const h = this.height, groups = [];
-    const top = (g) => g.sum / g.items.length - (g.items.length - 1) * h / 2;
+    let fixed = null;
+    try { fixed = this.anchor ? this.anchor() : null; } catch { fixed = null; }
+    if (fixed && Number.isFinite(fixed[0]) && items.length) {   // one block of n slots, its first at the live price
+      // sorted at the live price, not the block's middle: a tag priced just under it goes below (the countdown's too)
+      items.push({ t: null, y: fixed[0], n: fixed[1], fixed: true });
+    }
+    items.sort((a, b) => a.y - b.y);
+    const slots = (g) => g.items.reduce((n, x) => n + x.n, 0);
+    const top = (g) => {   // a slot's centre: a group with the anchor stays where it is; others centre on their prices
+      let before = 0;
+      for (const x of g.items) {
+        if (x.fixed) return x.y - before * h;
+        before += x.n;
+      }
+      return g.sum / g.items.length - (slots(g) - 1) * h / 2;
+    };
     for (const it of items) {
       groups.push({ items: [it], sum: it.y });
       while (groups.length > 1) {   // overlapping the group above: one group, centred on all their prices
         const g = groups[groups.length - 1], above = groups[groups.length - 2];
-        if (top(above) + above.items.length * h <= top(g)) break;
+        if (top(above) + slots(above) * h <= top(g)) break;
         above.items.push(...g.items);
         above.sum += g.sum;
         groups.pop();
@@ -87,7 +104,7 @@ const axisStack = {
     }
     for (const g of groups) {
       let y = top(g);
-      for (const it of g.items) { this.pos.set(it.t, y); y += h; }
+      for (const it of g.items) { if (it.t) this.pos.set(it.t, y); y += it.n * h; }
     }
   },
 };
@@ -727,12 +744,31 @@ class GapPrimitive {
    and, for time charts, the chart EMA up to the first bar (d.smooth). A chart bar sees the HTF bars that
    closed before it did; on a tie NinjaTrader runs the chart bar first. cal: 2D, 3D, week or month bars.
    after: when the bar after the last one opens, where known (bar replay's next bar; d.next once a calendar bar
-   is over); without it the last bar is still forming. ------------------------------------------------------ */
-function htfEmaValues(bars, d, periodMs, cal, after) {
+   is over); without it the last bar is still forming. o (live charts, htfEmaLive): live, the values the bars that
+   ran live keep (bar time -> value); call, the last call of the bar still taking them ({t, c, v, seen}); stamped,
+   NinjaTrader's barsTimeStamped; drop: an HTF bar's close the last bar does not count yet (below). out.seen: the
+   close of the newest HTF bar the last bar counts. ----------------------------------------------------------- */
+function htfEmaValues(bars, d, periodMs, cal, after, o = {}) {
   const out = new Array(bars.length);
   const L = d.scaled, constant1 = 2.0 / (1 + L), constant2 = 1 - 2.0 / (1 + L), alpha = 2.0 / (d.len + 1.0);
   let n = d.smooth ? d.smooth.count : 0, v = d.smooth?.seed ?? 0;
   let h = 0, e = 0, htfSeen = false, htfEmaReady = false, lastClosedHtfEma = NaN;
+  const take = (until) => {   // BarsInProgress == 1: the HTF bars closing before `until`; the last one's close
+    let last = null;
+    while (h < d.htf.length && d.htf[h][0] < until) {
+      htfSeen = true;
+      if (d.htf[h][1] != null) { lastClosedHtfEma = d.htf[h][1]; htfEmaReady = true; }
+      last = d.htf[h++][0];
+    }
+    return last;
+  };
+  const plot = (c, currentBar) => {
+    if (!htfSeen) return NaN;                             // CurrentBars[1] >= 0
+    if (d.mode === 'ExactHTF') return htfEmaReady ? lastClosedHtfEma : NaN;
+    if (d.mode === 'SmoothScaled') return currentBar >= L - 1 ? v : NaN;
+    return htfEmaReady ? alpha * c + (1.0 - alpha) * lastClosedHtfEma : NaN;
+  };
+  out.seen = null;
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i], next = i + 1 < bars.length ? bars[i + 1].t : after > b.t ? after : null;
     // NinjaTrader's bar time is its close: time bars one period on, cut at the 16:00 close; tick, volume and
@@ -752,22 +788,51 @@ function htfEmaValues(bars, d, periodMs, cal, after) {
       while (e < d.ends.length && d.ends[e] <= b.t) e++;
       if (e < d.ends.length) close = Math.min(close, d.ends[e]);
     } else close = next ?? Infinity;
-    while (h < d.htf.length && d.htf[h][0] < close) {   // BarsInProgress == 1
-      htfSeen = true;
-      if (d.htf[h][1] != null) { lastClosedHtfEma = d.htf[h][1]; htfEmaReady = true; }
-      h++;
-    }
     v = n === 0 ? b.c : b.c * constant1 + constant2 * v;   // smoothEmaInd, EMA(Closes[0], scaledLen)
     const currentBar = n++;
-    let plotVal = NaN;
-    if (htfSeen) {                                        // CurrentBars[1] >= 0
-      if (d.mode === 'ExactHTF') { if (htfEmaReady) plotVal = lastClosedHtfEma; }
-      else if (d.mode === 'SmoothScaled') { if (currentBar >= L - 1) plotVal = v; }
-      else if (htfEmaReady) plotVal = alpha * b.c + (1.0 - alpha) * lastClosedHtfEma;
-    }
-    out[i] = plotVal;
+    take(o.drop != null && i === bars.length - 1 ? Math.min(close, o.drop) : close);
+    const seen = h ? d.htf[h - 1][0] : null;
+    let val = plot(b.c, currentBar);
+    // The bar's last call, at this price: an HTF bar it counts now that it did not then waits for its next call (it
+    // shows what that call showed), but for one closing by its open where both series are time-stamped (Second or
+    // Minute bars): NinjaTrader's first call of the bar counts that one (once the server's answer has it, here).
+    const call = o.call && o.call.t === b.t && o.call.c === b.c ? o.call : null;
+    if (call && seen !== call.seen && !(o.stamped && seen != null && seen <= b.t)) val = call.v;
+    if (o.live?.has(b.t)) val = o.live.get(b.t);
+    out[i] = val;
+    if (i === bars.length - 1) out.seen = seen;
   }
   return out;
+}
+/* NinjaTrader's realtime bars (Exact and Live on a live chart): a chart bar that ran live keeps what its last call
+   showed (Calculate.OnPriceChange: the update that opened it or brought a new price), as a Daily SMA x4 bar does, where
+   a reload shows each bar as of its close. NinjaTrader runs the chart series first on the trade that opens a source
+   bar, so a source bar closing inside a chart bar counts from the chart bar's next call: with no new price after that
+   trade, from the next chart bar on (a reload counts it in the bar it closed in). One that closed by the chart bar's
+   open counts at its first call where both series are Second or Minute bars (barsTimeStamped: stamped here), which
+   the server's answer can bring a moment after that call; else (a Day or longer source; a tick, range, 1D or longer
+   chart) from its next call too. k: one HTF EMA's (htfEmaKeep(the forming bar's time, stamped); a new one at each
+   reload): live (bar time -> value) of the bars that closed live; call, the forming bar's last {t, c (its price then),
+   v, seen (the newest source bar it counted)}; last, the forming bar at the last update. update: a bar update, a call
+   where the forming bar is new or its price moved; else a redraw (the server's answer, settings, older bars). ----- */
+const htfEmaKeep = (last = null, stamped = false) => ({ live: new Map(), call: null, last, stamped });
+function htfEmaLive(k, bars, d, periodMs, cal, after, update) {
+  const n = bars.length, b = bars[n - 1], call = update && n && (k.call?.t !== b.t || k.call.c !== b.c);
+  // No source bar forming in the answer (d.due none): no trade after the newest one's close yet, the market was shut.
+  // A call now is the trade that brings it, and the chart series runs first: not counted (but by NinjaTrader's catch-up).
+  const shut = call && d.due == null && d.htf.length ? d.htf[d.htf.length - 1][0] : null;
+  const drop = shut != null && !(k.stamped && shut <= b.t) ? shut : null;
+  const vals = htfEmaValues(bars, d, periodMs, cal, after, drop == null ? k : { ...k, drop });
+  if (!n) return vals;
+  if (update) {
+    // the bars that closed since the last update ran live: what they show now is theirs from here on
+    for (let i = n - 2; i >= 0 && k.last != null && bars[i].t >= k.last; i--) k.live.set(bars[i].t, vals[i]);
+    if (call) k.call = { t: b.t, c: b.c, v: vals[n - 1], seen: vals.seen };
+    k.last = b.t;
+    for (const t of k.live.keys()) { if (t >= bars[0].t) break; k.live.delete(t); }   // bars trimmed from the left
+  }
+  if (k.call?.t === b.t) k.call.v = vals[n - 1];
+  return vals;
 }
 
 /* ---- Tatanka Daily SMA x4: the NinjaTrader OnBarUpdate run over the chart's bars. The server sends the daily bars
@@ -1214,10 +1279,8 @@ const vpColor = (c) => (c && c !== 'transparent' ? c : null);
 const vpWhole = (v) => String(Math.sign(v) * Math.round(Math.abs(v)) || 0);
 const vpSigned = (v) => { const r = Math.round(Math.abs(v)); return r ? `${v > 0 ? '+' : '-'}${r}` : '0'; };
 const vpPct = (v) => String(Math.round(v * 10) / 10);   // "0.#"
-// DrawText into a box: word-wrapped to its width, the first line's top at y (up: the last line's, so a notice at the
-// bottom that wraps on a narrow chart grows upward instead of off the panel).
-function vpText(ctx, text, x, y, w, color, up = false) {
-  if (!color) return;
+// A text's lines in w px, word by word (vpText's; app.js stacks the notices by them)
+function vpWrap(ctx, text, w) {
   const words = text.split(' '), lines = [];
   let line = '';
   for (const word of words) {
@@ -1225,6 +1288,13 @@ function vpText(ctx, text, x, y, w, color, up = false) {
     if (line && ctx.measureText(t).width > w) { lines.push(line); line = word; } else line = t;
   }
   lines.push(line);
+  return lines;
+}
+// DrawText into a box: word-wrapped to its width, the first line's top at y (up: the last line's, so a notice at the
+// bottom that wraps on a narrow chart grows upward instead of off the panel).
+function vpText(ctx, text, x, y, w, color, up = false) {
+  if (!color) return;
+  const lines = vpWrap(ctx, text, w);
   ctx.fillStyle = color;
   ctx.textBaseline = 'alphabetic';
   const top = up ? y - (lines.length - 1) * 1.33 * VP_FONT_PX : y;
@@ -1244,21 +1314,27 @@ function vpFill(ctx, x, y, w, h, color) {
   ctx.fillRect(x, y, w, h);
 }
 // The chart as OnRender sees it: bar end times, the visible bars (FromIndex..ToIndex), the price range on screen, and
-// GetXByTime: the x of the first bar whose end is at or after t. Time bars run on by the bar period before the first
-// and after the last bar (this app can hold older profiles than bars); other bars stop at the ends.
-function vpView(chart, series, bars, periodMs, H) {
+// GetXByTime as NinjaTrader's chart places a time (measured on its charts): with i the first bar whose close is at or
+// after t, t inside bar i lies between the previous bar's center and bar i's by the time into it; in a gap before bar
+// i (a session's open, a weekend) it is the previous bar's center. So a period's start is one bar left of its first
+// bar, and a forming profile's last minute partway to the forming bar. barEnd(b): a time bar's close (a session's last
+// bar closes with it), else its open plus the bar period. Time bars run on by the bar period before the first and after
+// the last bar (this app can hold older profiles than bars); other bars: the bar holding t, the ends at the ends.
+function vpView(chart, series, bars, periodMs, H, barEnd) {
   const ts = chart.timeScale(), n = bars.length, r = ts.getVisibleLogicalRange();
   if (!n || !r) return null;
   const P = periodMs;
   const endT = (i) => (P ? bars[i].t + P : i + 1 < n ? bars[i + 1].t : Math.max(bars[i].t, Date.now()));
+  const closeT = (i) => (barEnd ? Math.min(barEnd(bars[i]), bars[i].t + P) : bars[i].t + P);
   const clamp = (i) => Math.min(n - 1, Math.max(0, i));
   const from = clamp(Math.round(r.from)), to = clamp(Math.round(r.to));
   const xOf = (t) => {
     if (P) {
-      const i = barIndexFrom(bars, t - P);
+      let i = barIndexFrom(bars, t - P);
+      if (i >= 0 && closeT(i) < t) i = i + 1 < n ? i + 1 : -1;   // a session's last bar, closed before its period ends
       if (i < 0) return logicalX(ts, n - 1 + (t - endT(n - 1)) / P);
-      if (i === 0 && t <= bars[0].t) return logicalX(ts, (t - endT(0)) / P);
-      return ts.logicalToCoordinate(i);
+      if (i === 0) return logicalX(ts, (t - closeT(0)) / P);
+      return logicalX(ts, i - Math.min(1, (closeT(i) - t) / P));
     }
     return ts.logicalToCoordinate(clamp(barIndexTo(bars, t)));
   };
@@ -1327,15 +1403,17 @@ function vpLevel(ctx, v, s, price, name, left, right, end, edge, color, label) {
   if (label != null) vpText(ctx, `${name} ${s.fmt(price)}`, label, y - 15, 110, vpColor(color));
 }
 
-// What an indicator writes at the top of the panel instead of drawing (an error, or no data yet), or null.
+// What an indicator writes at the top of the panel instead of drawing (an error, or no data yet), or null. NinjaTrader's
+// texts, naming this app's settings where they name its own (Days to load, Trading Hours): the history stored here
+// (Backfill, docs/DATA.md) and the chart's ETH/RTH.
 function vpMessage(s) {
   const d = s.d;
   if (s.kind === 'aavp') {
     const p = d?.profile;
-    return s.error || (!p || !p.rows.length || p.max <= 0 ? 'Tatanka AAVP: waiting for 1-minute history. Check the connection, Days to load, and Trading Hours.' : null);
+    return s.error || (!p || !p.rows.length || p.max <= 0 ? 'Tatanka AAVP: waiting for 1-minute history. Check the connection and the 1-minute history stored here (Backfill).' : null);
   }
-  if (s.kind === 'pvp') return s.error || (!d?.profiles?.length ? 'Tatanka PVP: waiting for 1-minute history. Check the connection, Days to load, and Trading Hours.' : null);
-  return s.error || (!d?.sessions?.length ? 'Tatanka SVP: no ticks in the custom session. Check historical tick data, Trading Hours, and session time zone.' : null);
+  if (s.kind === 'pvp') return s.error || (!d?.profiles?.length ? 'Tatanka PVP: waiting for 1-minute history. Check the connection and the 1-minute history stored here (Backfill).' : null);
+  return s.error || (!d?.sessions?.length ? 'Tatanka SVP: no ticks in the custom session. Check the trades and 1-minute history stored here, ETH/RTH, and session time zone.' : null);
 }
 // ... and at the bottom: the incomplete-history or row-cap notice, or null.
 function vpNotice(s) {
@@ -1368,10 +1446,11 @@ function drawAavp(ctx, W, H, v, s) {
       g = vpLayout(firstX - half, lastX + half, 0, W, o.WidthPercent, o.PinToVisibleEdge, o.EdgePaddingPixels);
     }
   } else if (!(p.start > v.endT(v.to) || p.last < v.endT(v.from))) {
-    // NinjaTrader's minute series loads the chart's days, so its profile starts no earlier than the chart's first bar.
-    // This one holds the anchor's whole stretch (a Year from Jan 1): from before the first bar it is drawn from that
-    // bar, as there, not at a time counted back by the bar length over nights and weekends, far off the chart's left.
-    const anchorX = p.start < s.bars[0].t ? v.ts.logicalToCoordinate(0) : v.xOf(p.start);
+    // NinjaTrader's minute series loads the chart's days, so its profile starts at the first loaded session's open: one
+    // bar left of the first bar (GetXByTime). This one holds the anchor's whole stretch (a Year from Jan 1): from before
+    // the first bar it starts where that bar opens, as there, not at a time counted back by the bar length over nights
+    // and weekends, far off the chart's left.
+    const anchorX = p.start < s.bars[0].t && !s.periodMs ? v.ts.logicalToCoordinate(0) : v.xOf(Math.max(p.start, s.bars[0].t));
     g = vpLayout(anchorX, v.xOf(p.last), 0, W, o.WidthPercent, o.PinToVisibleEdge, o.EdgePaddingPixels);
   }
   if (g) {
@@ -1382,6 +1461,38 @@ function drawAavp(ctx, W, H, v, s) {
     if (o.ShowVal) vpLevel(ctx, v, s, p.val, 'VAL', g.left, g.right, g.right, W, o.ValueAreaLineBrush, label);
     if (o.ShowPoc) vpLevel(ctx, v, s, p.poc, 'POC', g.left, g.right, g.right, W, o.PocLineBrush, label);
   }
+}
+
+// PVP's "until touched" ends: TatankaPeriodicVolumeProfile.ObserveTouches on the chart's own bars, as NinjaTrader
+// checks them (v1.0.1): the first bar after a closed profile's last minute (opening at or after its end) whose low and
+// high hold the level, a billionth of the level either way (Touches.Holds). bars: the chart's, stamped at their open;
+// hl(i): bar i's [low, high] as the chart has it (Renko bricks, Heikin Ashi bars). A period that ended before the first
+// bar keeps the server's touch from its 1-minute bars when that came before the first bar (the bars between are not
+// here). Returns start -> {poc, vah, val}: {i} the touching bar, or {t} that time. memo (a Map, kept by the caller for
+// the same bars, more appended at the end): each profile's touches found so far, by its levels; a touch found stays (as
+// NinjaTrader's), the levels not touched yet are checked again only from the last bar checked (it was forming) on.
+function pvpTouches(profiles, bars, hl, memo) {
+  const out = new Map(), n = bars.length, first = n ? bars[0].t : Infinity;
+  for (const p of profiles) {
+    if (!p.closed || !p.rows?.length) continue;
+    const sig = `${p.last}|${p.poc}|${p.vah}|${p.val}|${p.touch?.poc}|${p.touch?.vah}|${p.touch?.val}`;
+    let e = memo?.get(p.start);
+    if (!e || e.sig !== sig) e = { sig, t: {}, next: -1 };
+    if (e.next < 0) e.next = barIndexFrom(bars, p.last);   // none yet: the bars after it may come
+    for (const name of ['poc', 'vah', 'val']) {
+      if (e.t[name]) continue;
+      const lv = p[name], eps = 1e-9 * Math.max(1, Math.abs(lv)), srv = p.touch?.[name];
+      if (p.last < first && srv != null && srv <= first) { e.t[name] = { t: srv }; continue; }
+      for (let i = e.next < 0 ? n : e.next; i < n; i++) {
+        const [lo, hi] = hl(i);
+        if (lo <= lv + eps && hi >= lv - eps) { e.t[name] = { i }; break; }
+      }
+    }
+    if (e.next >= 0) e.next = Math.max(e.next, n - 1);
+    out.set(p.start, e.t);
+    memo?.set(p.start, e);
+  }
+  return out;
 }
 
 function drawPvp(ctx, W, H, v, s) {
@@ -1403,8 +1514,9 @@ function drawPvp(ctx, W, H, v, s) {
       if (o.ShowProfile) vpMinuteRows(ctx, p, s.tick, o, v, left, right, width, o.Placement === 'Left');
     }
     const label = latest && o.ShowLevelLabels ? Math.max(4, Math.min(right + 4, W - 110)) : null;
-    const end = (extend, touch) => (!extend ? right : o.ExtensionBehavior === 'UntilTouched' && touch != null ? Math.max(right, v.xOf(touch)) : W);
-    const t = p.touch || {};
+    const at = (touch) => (touch.i != null ? v.ts.logicalToCoordinate(touch.i) : v.xOf(touch.t));
+    const end = (extend, touch) => (!extend ? right : o.ExtensionBehavior === 'UntilTouched' && touch ? Math.max(right, at(touch) ?? W) : W);
+    const t = s.touches?.get(p.start) || {};
     if (o.ShowVah) vpLevel(ctx, v, s, p.vah, 'VAH', left, right, end(o.ExtendVah, t.vah), W, o.ValueAreaLineBrush, label);
     if (o.ShowVal) vpLevel(ctx, v, s, p.val, 'VAL', left, right, end(o.ExtendVal, t.val), W, o.ValueAreaLineBrush, label);
     if (o.ShowPoc) vpLevel(ctx, v, s, p.poc, 'POC', left, right, end(o.ExtendPoc, t.poc), W, o.PocLineBrush, label);
@@ -1470,7 +1582,7 @@ function drawVp(ctx, size, chart, series, s) {
   const x = s.textX ?? 12;
   if (m) vpText(ctx, m, x, s.msgY ?? 35, Math.max(100, W - x - 12), text);
   else {
-    const v = vpView(chart, series, s.bars, s.periodMs, H);
+    const v = vpView(chart, series, s.bars, s.periodMs, H, s.barEnd);
     if (v) {
       if (s.kind === 'aavp') drawAavp(ctx, W, H, v, s);
       else if (s.kind === 'pvp') drawPvp(ctx, W, H, v, s);
@@ -1481,20 +1593,39 @@ function drawVp(ctx, size, chart, series, s) {
   }
   ctx.restore();
 }
+// SVP's POC, VAH and VAL plots at a chart bar closing at T, as NinjaTrader's PublishLevels sets them on each bar (its
+// Data Box): the newest session started by then (its first minute), as of T to the minute (its dev: [minute end, POC,
+// VAH, VAL] where they changed); a session's last values from its end until the next one starts; a forming session's
+// latest past the minutes it has so far (dev_to). null before the first session kept, or while a session's are on
+// their way.
+function svpAt(sessions, T) {
+  for (let s = sessions.length - 1; s >= 0; s--) {
+    const p = sessions[s], dev = p.dev;
+    if (!dev) { if (p.start <= T) return null; continue; }   // its values on their way
+    if (!dev.length) { if (!p.done && T === Infinity) return [p.poc, p.vah, p.val]; continue; }   // in its first minute
+    if (dev[0][0] > T) continue;
+    if (!p.done && T > (p.dev_to ?? -Infinity)) return [p.poc, p.vah, p.val];
+    let lo = 0, hi = dev.length - 1;   // the last at or before T
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (dev[m][0] <= T) lo = m; else hi = m - 1; }
+    return dev[lo].slice(1);
+  }
+  return null;
+}
 // The latest profile's levels, as the indicators publish them to their POC / VAH / VAL plots.
 function vpLatest(s) {
   const d = s && !s.error ? s.d : null;
   const p = !d ? null : s.kind === 'aavp' ? d.profile : (s.kind === 'pvp' ? d.profiles : d.sessions)?.at(-1);
   return p && p.rows.length ? p : null;
 }
-// DisplayName: "Tatanka AAVP (Year, Total, VA 68%, 200 NumberOfRows)  POC ...  VAH ...  VAL ..."
+// DisplayName: "Tatanka AAVP (Year, Total, VA 68%, 200 NumberOfRows)  POC ...  VAH ...  VAL ..."; SVP's window is the one the
+// server ran (its hours: moved to the instrument's own with Use Instrument Hours), as NinjaTrader's label since SVP 1.1.0
 function vpTitle(s) {
   const o = s.set, pct = vpPct(o.ValueAreaPercent);
   let name = `Tatanka ${{ aavp: 'AAVP', pvp: 'PVP', prof: 'SVP' }[s.kind]}`;
   if (o.ShowInputsInLabel) {
     name += s.kind === 'aavp' ? ` (${o.AnchorPeriod}, ${o.VolumeMode}, VA ${pct}%, ${o.RowSize} ${o.RowsLayout})`
       : s.kind === 'pvp' ? ` (${o.PeriodMultiplier} ${o.Period}, ${o.VolumeMode}, VA ${pct}%, ${o.RowSize} ${o.RowsLayout})`
-        : ` (${o.SessionStart}-${o.SessionEnd}, ${o.SessionTimeZone}, VA ${pct}%, ${o.Alignment})`;
+        : ` (${(!s.error && s.d?.hours) || `${o.SessionStart}-${o.SessionEnd}`}, ${o.SessionTimeZone}, VA ${pct}%, ${o.Alignment})`;   // the window it ran (Use Instrument Hours)
   }
   const p = vpLatest(s);
   if (o.ShowValuesInLabel && p) name += `  POC ${s.fmt(p.poc)}  VAH ${s.fmt(p.vah)}  VAL ${s.fmt(p.val)}`;
@@ -1567,22 +1698,38 @@ class PaneLabelPrimitive {
   update() { if (this.p) this.p.requestUpdate(); }
 }
 
-/* ---- Tatanka Level Lines 1.1.0: a port of the NinjaTrader OnRender. A range (top, bottom, optional midpoint and
+/* ---- Tatanka Level Lines 1.1.1: a port of the NinjaTrader OnRender. A range (top, bottom, optional midpoint and
    shading) and any number of custom lines "price|label|color|style|width"; labels on the right edge above each line,
    price appended, pushed down instead of overlapping. ------------------------------------------------------------ */
 const NT_DASH = {   // NinjaTrader's DashStyleHelper, in line widths
   Solid: [], Dash: [3, 3], Dot: [1, 2], DashDot: [3, 3, 1, 3], DashDotDot: [3, 3, 1, 3, 1, 3],
 };
 function ntDash(dash, width) { return (NT_DASH[dash] || []).map((k) => k * Math.max(1, width)); }
-// WPF colors: a name, #RRGGBB or #AARRGGBB (alpha first); null when it is not one.
+// WPF's named colors (System.Windows.Media.Colors), as ColorConverter takes them in any case: all are CSS names too,
+// but not every CSS name is one of them (grey, rebeccapurple, system colors, inherit).
+const WPF_NAMES = new Set(('aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown '
+  + 'burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray '
+  + 'darkgreen darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue '
+  + 'darkslategray darkturquoise darkviolet deeppink deepskyblue dimgray dodgerblue firebrick floralwhite forestgreen fuchsia '
+  + 'gainsboro ghostwhite gold goldenrod gray green greenyellow honeydew hotpink indianred indigo ivory khaki lavender '
+  + 'lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightpink '
+  + 'lightsalmon lightseagreen lightskyblue lightslategray lightsteelblue lightyellow lime limegreen linen magenta maroon '
+  + 'mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise '
+  + 'mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid '
+  + 'palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple red rosybrown '
+  + 'royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray snow springgreen '
+  + 'steelblue tan teal thistle tomato transparent turquoise violet wheat white whitesmoke yellow yellowgreen').split(' '));
+// WPF colors as ColorConverter reads them: a name, or hex #RGB, #ARGB, #RRGGBB, #AARRGGBB (alpha first; a short form
+// doubles each digit: #F0F is #FF00FF, #8F0F is #88FF00FF); null when it is not one.
 function wpfColor(text) {
-  const t = (text || '').trim();
+  let t = (text || '').trim();
+  if (/^#[0-9a-f]{3,4}$/i.test(t)) t = `#${[...t.slice(1)].map((c) => c + c).join('')}`;
   if (/^#[0-9a-f]{8}$/i.test(t)) {
     const n = parseInt(t.slice(1), 16);
     return `rgba(${(n >>> 16) & 255}, ${(n >>> 8) & 255}, ${n & 255}, ${((n >>> 24) & 255) / 255})`;
   }
-  if (/^#[0-9a-f]{6}$/i.test(t)) return t;
-  return t && /^[a-z]+$/i.test(t) && CSS.supports('color', t) ? t.toLowerCase() : null;
+  if (/^#[0-9a-f]{6}$/i.test(t)) return t.toLowerCase();
+  return WPF_NAMES.has(t.toLowerCase()) ? t.toLowerCase() : null;
 }
 const LL_DASH_NAMES = { solid: 'Solid', dash: 'Dash', dashed: 'Dash', dot: 'Dot', dotted: 'Dot', dashdot: 'DashDot', dashdotdot: 'DashDotDot' };
 // BuildCustomLines: separators , ; and new lines; price required (> 0), the rest falls back to the default line. The
@@ -1607,6 +1754,8 @@ function levelLinesOf(s) {
   if (s.ShowRangeMid && s.RangeTop > 0 && s.RangeBottom > 0) lines.push({ price: (s.RangeTop + s.RangeBottom) / 2, label: s.RangeMidLabel, ...s.RangeMidStroke });
   return lines.concat(parseLevelLines(s.CustomLevels, s.DefaultStroke));
 }
+// NinjaTrader's label font (SimpleFont: family, size, Bold, Italic) as a canvas font.
+const llFont = (f) => `${f.italic ? 'italic ' : ''}${f.bold ? 'bold ' : ''}${f.size}px ${f.family}, sans-serif`;
 function drawLevelLines(ctx, size, series, s, fmt) {
   const x0 = 0, x1 = size.width, Y = (p) => series.priceToCoordinate(p);
   if (s.FillRange && s.RangeTop > 0 && s.RangeBottom > 0) {
@@ -1623,7 +1772,10 @@ function drawLevelLines(ctx, size, series, s, fmt) {
   for (const l of levelLinesOf(s)) {
     const y = Y(l.price);
     if (y == null || y < 0 || y > size.height) continue;   // NinjaTrader skips lines outside the price scale
+    // the stroke's opacity (Stroke.Opacity, on its BrushDX): its line and its label's text, over the color's own alpha
+    const alpha = Math.max(0, Math.min(100, l.opacity ?? 100)) / 100;
     ctx.save();
+    ctx.globalAlpha = alpha;
     ctx.strokeStyle = l.color;
     ctx.lineWidth = l.width;
     ctx.setLineDash(ntDash(l.dash, l.width));
@@ -1631,13 +1783,13 @@ function drawLevelLines(ctx, size, series, s, fmt) {
     ctx.beginPath(); ctx.moveTo(x0, yy); ctx.lineTo(x1, yy); ctx.stroke();
     ctx.restore();
     const label = (l.label || '').trim(), text = s.ShowPriceInLabel ? (label ? `${label}  ${fmt(l.price)}` : fmt(l.price)) : label;
-    if (text) labels.push({ y, text, color: l.color, width: l.width });
+    if (text) labels.push({ y, text, color: l.color, width: l.width, alpha });
   }
   if (!labels.length) return;
   labels.sort((a, b) => a.y - b.y);   // top to bottom: one that would overlap the label above moves down
   const pad = 4, font = s.LabelFont || { family: 'Arial', size: 11 }, h = Math.ceil(font.size * 1.25);
   ctx.save();
-  ctx.font = `${font.size}px ${font.family}, sans-serif`;
+  ctx.font = llFont(font);
   ctx.textBaseline = 'top';
   let lastBottom = -Infinity;
   for (const l of labels) {
@@ -1645,7 +1797,8 @@ function drawLevelLines(ctx, size, series, s, fmt) {
     let ty = s.LabelAboveLine ? l.y - h - l.width / 2 - 1 : l.y + l.width / 2 + 1;
     if (ty < lastBottom + 1) ty = lastBottom + 1;
     const tx = s.LabelsOnRight ? x1 - w - pad * 2 : x0 + pad;
-    if (s.LabelBackground) { ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'; ctx.fillRect(tx - pad, ty, w + pad * 2, h); }
+    if (s.LabelBackground) { ctx.globalAlpha = 1; ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'; ctx.fillRect(tx - pad, ty, w + pad * 2, h); }
+    ctx.globalAlpha = l.alpha;
     ctx.fillStyle = l.color;
     ctx.fillText(l.text, tx, ty + 1);
     lastBottom = ty + h;

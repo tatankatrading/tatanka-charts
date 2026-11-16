@@ -1,6 +1,9 @@
-// Tatanka Session Volume Profile 1.0.0 | NinjaTrader 8
+// Copyright (c) 2026 Tatanka Trading LLC.
+// This Source Code Form is subject to the Mozilla Public License, v. 2.0.
+// If a copy of the MPL was not distributed with this file, obtain one at https://mozilla.org/MPL/2.0/.
+// Tatanka Session Volume Profile v1.1.0 for NinjaTrader 8
 // Source-only, chart-only indicator. No orders, external services, or paid Order Flow APIs.
-// See README.md for data requirements, settings, and TradingView differences.
+// Guide (data, settings, TradingView differences): https://github.com/TatankaTrading/tatanka-indicators/blob/main/docs/Other-Indicators-Guide.md#session-volume-profile
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -34,6 +37,8 @@ namespace NinjaTrader.NinjaScript.Indicators
         private TimeZoneInfo sessionZone;
         private TimeSpan startTime;
         private TimeSpan endTime;
+        private string windowLabel;   // the window it runs on, when Use Instrument Hours moved it (another zone: the latest's)
+        private TatankaVpCore.ZoneWindows zoneWindows;   // Use Instrument Hours outside Central time: each date's window
         private readonly TatankaVpCore.TickCounter tickCounter = new TatankaVpCore.TickCounter();
         private string configurationError;
         private int lastPublishedBar = -1;
@@ -60,6 +65,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 SessionStart = "08:30";
                 SessionEnd = "15:00";
                 SessionTimeZone = TatankaVpTimeZone.ExchangeTemplate;
+                UseInstrumentHours = true;
                 ValueAreaPercent = 68;
                 ValueAreaMethod = TatankaVpValueAreaMethod.TradingViewStyle;
                 TicksPerRow = 1;
@@ -116,6 +122,8 @@ namespace NinjaTrader.NinjaScript.Indicators
                 lastPublishedBar = -1;
                 lastPublish = DateTime.MinValue;
                 latestPoc = latestVah = latestVal = double.NaN;
+                windowLabel = null;
+                zoneWindows = null;
                 try
                 {
                     if (!Bars.BarsType.IsIntraday)
@@ -132,6 +140,23 @@ namespace NinjaTrader.NinjaScript.Indicators
                         case TatankaVpTimeZone.Chart: sessionZone = chartZone; break;
                         case TatankaVpTimeZone.UTC: sessionZone = TimeZoneInfo.Utc; break;
                         default: sessionZone = Bars.TradingHours.TimeZoneInfo; break;
+                    }
+                    // Use Instrument Hours (v1.1.0): the window moves to the instrument's own regular hours. In Central time
+                    // as a whole; in another zone each date's window, at that date's offset from Central time (ZoneWindows).
+                    if (UseInstrumentHours && sessionZone != null)
+                    {
+                        if (sessionZone.Id == TatankaVpCore.InstrumentHours.CentralZone)
+                        {
+                            if (TatankaVpCore.InstrumentHours.MoveTimes(ref startTime, ref endTime, Instrument.MasterInstrument.Name))
+                                windowLabel = TatankaVpCore.InstrumentHours.Clock(startTime) + "-" + TatankaVpCore.InstrumentHours.Clock(endTime);
+                        }
+                        else
+                        {
+                            zoneWindows = TatankaVpCore.ZoneWindows.For(startTime, endTime, Instrument.MasterInstrument.Name, sessionZone,
+                                TimeZoneInfo.FindSystemTimeZoneById(TatankaVpCore.InstrumentHours.CentralZone));
+                            if (zoneWindows != null)   // today's window until the first session
+                                windowLabel = zoneWindows.LabelOn(TimeZoneInfo.ConvertTime(DateTime.UtcNow, sessionZone).Date);
+                        }
                     }
                     if (TickSize <= 0 || TicksPerRow < 1 || SessionsToKeep < 1)
                         throw new ArgumentException("Tick size, ticks per row, and session count must be positive.");
@@ -152,7 +177,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             {
                 string label = "Tatanka SVP";
                 if (ShowInputsInLabel)
-                    label += " (" + SessionStart + "-" + SessionEnd + ", " + SessionTimeZone
+                    label += " (" + (windowLabel ?? (SessionStart + "-" + SessionEnd)) + ", " + SessionTimeZone
                         + ", VA " + ValueAreaPercent.ToString("0.#", CultureInfo.InvariantCulture) + "%, " + Alignment + ")";
                 if (ShowValuesInLabel && !double.IsNaN(latestPoc) && Instrument != null)
                     label += "  POC " + FormatPriceMarker(latestPoc) + "  VAH " + FormatPriceMarker(latestVah)
@@ -179,7 +204,8 @@ namespace NinjaTrader.NinjaScript.Indicators
                 DateTime chartTime = DateTime.SpecifyKind(Times[1][0], DateTimeKind.Unspecified);
                 DateTime localTime = TimeZoneInfo.ConvertTime(chartTime, chartZone, sessionZone);
                 DateTime windowStart, windowEnd;
-                if (TatankaVpCore.SessionClock.TryWindow(localTime, startTime, endTime, out windowStart, out windowEnd))
+                if (zoneWindows != null ? zoneWindows.TryWindow(localTime, out windowStart, out windowEnd)
+                    : TatankaVpCore.SessionClock.TryWindow(localTime, startTime, endTime, out windowStart, out windowEnd))
                 {
                     lock (profileLock)
                     {
@@ -194,6 +220,8 @@ namespace NinjaTrader.NinjaScript.Indicators
                                 TimeZoneInfo.ConvertTime(windowEnd, sessionZone, chartZone), TickSize, TicksPerRow);
                             sessions.Add(currentSession);
                             while (sessions.Count > SessionsToKeep) sessions.RemoveAt(0);
+                            if (zoneWindows != null)   // the label shows the window this session runs (each date's)
+                                windowLabel = TatankaVpCore.ZoneWindows.Label(windowStart, windowEnd);
                         }
                         currentSession.Add(Closes[1][0], volume, chartTime);
                     }
@@ -368,13 +396,15 @@ namespace NinjaTrader.NinjaScript.Indicators
         public string SessionEnd { get; set; }
         [Display(Name = "Session time zone", Description = "ExchangeTemplate uses the chart's Trading Hours template time zone. For ES/NQ, Central explicitly selects Chicago time with DST.", GroupName = "01. Session", Order = 2)]
         public TatankaVpTimeZone SessionTimeZone { get; set; }
-        [Range(1, 100), Display(Name = "Value area volume (%)", GroupName = "01. Session", Order = 3)]
+        [Display(Name = "Use Instrument Hours", Description = "Session start and end are written for ES's regular hours (08:30-15:00 CT), in the session time zone (09:30-16:00 on Eastern). On another market they move to its own (GC 07:20-12:30 CT, CL 08:00-13:30 CT): a time nearer the open moves with the open, one nearer the close with the close. Off: as typed on every market.", GroupName = "01. Session", Order = 3)]
+        public bool UseInstrumentHours { get; set; }
+        [Range(1, 100), Display(Name = "Value area volume (%)", GroupName = "01. Session", Order = 4)]
         public double ValueAreaPercent { get; set; }
-        [Display(Name = "Value area method", Description = "TradingViewStyle stops before the next row exceeds the target. AtLeastTarget includes that row.", GroupName = "01. Session", Order = 4)]
+        [Display(Name = "Value area method", Description = "TradingViewStyle stops before the next row exceeds the target. AtLeastTarget includes that row.", GroupName = "01. Session", Order = 5)]
         public TatankaVpValueAreaMethod ValueAreaMethod { get; set; }
-        [Range(1, 1000), Display(Name = "Ticks per row", GroupName = "01. Session", Order = 5)]
+        [Range(1, 1000), Display(Name = "Ticks per row", GroupName = "01. Session", Order = 6)]
         public int TicksPerRow { get; set; }
-        [Range(1, 100), Display(Name = "Sessions to retain", GroupName = "01. Session", Order = 6)]
+        [Range(1, 100), Display(Name = "Sessions to retain", GroupName = "01. Session", Order = 7)]
         public int SessionsToKeep { get; set; }
 
         [Display(Name = "Placement", GroupName = "02. Profile", Order = 0)]
@@ -446,6 +476,174 @@ namespace NinjaTrader.NinjaScript.Indicators
 // BEGIN STANDALONE PROFILE CORE -- also compiled independently by the test harness.
 namespace TatankaVpCore
 {
+    // Each market's regular hours (CT) by NinjaTrader master instrument name (the root), micros with their parent's: the
+    // Tatanka AMT Toolkit's table (v1.2.4), kept here so this file installs on its own. A root not listed has ES's hours.
+    // The session window is written for ES's 08:30-15:00 CT; with Use Instrument Hours on, it moves to the chart
+    // instrument's own (v1.1.0): in Central time with MoveTimes, in another zone with ZoneWindows.
+    internal static class InstrumentHours
+    {
+        internal const int EsOpen = 8 * 60 + 30, EsClose = 15 * 60;
+        internal const string CentralZone = "Central Standard Time";
+        private static readonly Dictionary<string, int[]> hours = new Dictionary<string, int[]>(StringComparer.OrdinalIgnoreCase);
+
+        static InstrumentHours()
+        {
+            Add("08:30", "15:00", "ES", "MES", "NQ", "MNQ", "RTY", "M2K", "YM", "MYM", "EMD", "NKD");   // equity index
+            Add("08:00", "13:30", "CL", "MCL", "QM", "NG", "RB", "HO");                                    // energy
+            Add("07:20", "12:30", "GC", "MGC");                                                            // metals
+            Add("07:25", "12:25", "SI", "SIL");
+            Add("07:10", "12:00", "HG", "MHG");
+            Add("07:20", "12:05", "PL");
+            Add("07:30", "12:00", "PA");
+            Add("07:20", "14:00", "ZT", "ZF", "ZN", "TN", "ZB", "UB", "SR3");                              // interest rates
+            Add("07:20", "14:00", "6E", "M6E", "6B", "6J", "6A", "6C", "6S", "6N", "6M");                  // currencies
+        }
+
+        private static void Add(string open, string close, params string[] roots)
+        {
+            int[] oc = { Minutes(open), Minutes(close) };
+            foreach (string root in roots) hours[root] = oc;
+        }
+
+        private static int Minutes(string hm) { return int.Parse(hm.Substring(0, 2)) * 60 + int.Parse(hm.Substring(3, 2)); }
+
+        // The root's regular hours, open and close in minutes of the day (ES's for a root not listed).
+        internal static int[] Of(string root)
+        {
+            int[] oc;
+            return root != null && hours.TryGetValue(root, out oc) ? new[] { oc[0], oc[1] } : new[] { EsOpen, EsClose };
+        }
+
+        internal static int Mod(int m) { return (m % 1440 + 1440) % 1440; }
+
+        // A CT time (minutes of the day) written for ES's hours, at the same place in open-close: one nearer the open
+        // moves with the open, one nearer the close with the close; the overnight (before 07:00, from 16:00) stays.
+        internal static int Move(int m, int open, int close)
+        {
+            if (m < 7 * 60 || m >= 16 * 60) return m;
+            return m + (Math.Abs(m - EsOpen) <= Math.Abs(m - EsClose) ? open - EsOpen : close - EsClose);
+        }
+
+        // A window's start and end moved as a whole: each end on its own, unless that changes the window's order. Two
+        // ends either side of 11:45 that would land on the same minute or past each other (11:00-12:00: 10:30-10:30 on CL,
+        // 09:50-09:30 on GC) both move as the window's middle does, keeping its length (CL 10:30-11:30, GC 09:50-10:50).
+        internal static void MoveWindow(ref int a, ref int b, int open, int close)
+        {
+            int x = Move(a, open, close), y = Move(b, open, close);
+            if (a == b || ((a < b) == (x < y) && x != y)) { a = x; b = y; return; }
+            int mid = (a + Mod(b - a) / 2) % 1440, d = Move(mid, open, close) - mid;
+            a = Mod(a + d); b = Mod(b + d);
+        }
+
+        // The session window (times of day) at the root's own hours, moved as a whole (MoveWindow), seconds kept. False,
+        // and the window as it is, on a root with ES's hours.
+        internal static bool MoveTimes(ref TimeSpan start, ref TimeSpan end, string root)
+        {
+            int[] oc = Of(root);
+            if (oc[0] == EsOpen && oc[1] == EsClose) return false;
+            int a = start.Hours * 60 + start.Minutes, b = end.Hours * 60 + end.Minutes;
+            MoveWindow(ref a, ref b, oc[0], oc[1]);
+            start = new TimeSpan(a / 60, a % 60, start.Seconds);
+            end = new TimeSpan(b / 60, b % 60, end.Seconds);
+            return true;
+        }
+
+        // "HH:mm", or "HH:mm:ss" with seconds: the window in the chart label.
+        internal static string Clock(TimeSpan t)
+        {
+            string hm = t.Hours.ToString("00", CultureInfo.InvariantCulture) + ":" + t.Minutes.ToString("00", CultureInfo.InvariantCulture);
+            return t.Seconds == 0 ? hm : hm + ":" + t.Seconds.ToString("00", CultureInfo.InvariantCulture);
+        }
+    }
+
+    // Use Instrument Hours outside Central time (v1.1.0): Session time zone Eastern or UTC, ExchangeTemplate on a template
+    // in another zone, Chart with NinjaTrader set to another zone. The window is typed in that zone (ES's hours are
+    // 09:30-16:00 on Eastern). Each date's window is put in Central time at that date's offset from it (at noon), moved
+    // there as a whole (InstrumentHours.MoveWindow) and put back, the move kept per offset: on Eastern 09:30-16:00 runs
+    // 08:20-13:30 on GC. A zone whose daylight saving differs from Chicago's moves each date at its own offset: London's
+    // 14:30-21:00 runs 13:20-18:30 on GC, and 13:20-21:00 in the week London's has ended and Chicago's hasn't.
+    internal sealed class ZoneWindows
+    {
+        private readonly TimeSpan start, span;
+        private readonly int startMinute, endMinute, open, close;
+        private readonly TimeZoneInfo zone, central;
+        private readonly Dictionary<int, int[]> shifts = new Dictionary<int, int[]>();   // offset: start, end moved by (minutes)
+        private readonly Dictionary<DateTime, DateTime[]> windows = new Dictionary<DateTime, DateTime[]>();   // date: begin, finish
+
+        private ZoneWindows(TimeSpan start, TimeSpan end, int[] oc, TimeZoneInfo zone, TimeZoneInfo central)
+        {
+            this.start = start;
+            span = end > start ? end - start : end + TimeSpan.FromDays(1) - start;   // SessionClock.TryWindow's
+            startMinute = start.Hours * 60 + start.Minutes;
+            endMinute = end.Hours * 60 + end.Minutes;
+            open = oc[0];
+            close = oc[1];
+            this.zone = zone;
+            this.central = central;
+        }
+
+        // The windows of start-end typed in zone, at the root's own hours; null on a root with ES's hours (as typed).
+        // central: Central time.
+        internal static ZoneWindows For(TimeSpan start, TimeSpan end, string root, TimeZoneInfo zone, TimeZoneInfo central)
+        {
+            int[] oc = InstrumentHours.Of(root);
+            if (oc[0] == InstrumentHours.EsOpen && oc[1] == InstrumentHours.EsClose) return null;
+            return new ZoneWindows(start, end, oc, zone, central);
+        }
+
+        // The window typed for date d (midnight in zone), moved at d's offset from Central time: [begin, finish), seconds
+        // kept. A start moved back past midnight begins the day before.
+        internal void Window(DateTime d, out DateTime begin, out DateTime finish)
+        {
+            DateTime[] w;
+            if (!windows.TryGetValue(d, out w))
+            {
+                DateTime noon = DateTime.SpecifyKind(d.AddHours(12), DateTimeKind.Unspecified);
+                int offset = (int)Math.Round((noon - TimeZoneInfo.ConvertTime(noon, zone, central)).TotalMinutes);
+                int[] by;
+                if (!shifts.TryGetValue(offset, out by))
+                {
+                    int a = InstrumentHours.Mod(startMinute - offset), b = InstrumentHours.Mod(endMinute - offset), x = a, y = b;
+                    InstrumentHours.MoveWindow(ref x, ref y, open, close);
+                    by = new[] { InstrumentHours.Mod(x - a + 720) - 720, InstrumentHours.Mod(y - b + 720) - 720 };
+                    shifts[offset] = by;
+                }
+                w = new[] { d.Add(start).AddMinutes(by[0]), d.Add(start + span).AddMinutes(by[1]) };
+                windows[d] = w;
+            }
+            begin = w[0];
+            finish = w[1];
+        }
+
+        // SessionClock.TryWindow over the moved windows: the latest one holding local, of those typed for the day after
+        // (its start moved back past midnight), the same day and the day before (overnight). False if none does.
+        internal bool TryWindow(DateTime local, out DateTime begin, out DateTime finish)
+        {
+            DateTime day = local.Date;
+            for (int k = 1; k >= -1; k--)
+            {
+                Window(day.AddDays(k), out begin, out finish);
+                if (local >= begin && local < finish) return true;
+            }
+            begin = finish = DateTime.MinValue;
+            return false;
+        }
+
+        // A window as the chart label shows it: "HH:mm-HH:mm" (InstrumentHours.Clock).
+        internal static string Label(DateTime begin, DateTime finish)
+        {
+            return InstrumentHours.Clock(begin.TimeOfDay) + "-" + InstrumentHours.Clock(finish.TimeOfDay);
+        }
+
+        // The label of the window typed for date d.
+        internal string LabelOn(DateTime d)
+        {
+            DateTime begin, finish;
+            Window(d, out begin, out finish);
+            return Label(begin, finish);
+        }
+    }
+
     internal static class SessionClock
     {
         internal static TimeSpan ParseTime(string value)
@@ -629,60 +827,3 @@ namespace TatankaVpCore
     }
 }
 // END STANDALONE PROFILE CORE
-
-#region NinjaScript generated code. Neither change nor remove.
-
-namespace NinjaTrader.NinjaScript.Indicators
-{
-	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
-	{
-		private TatankaSessionVolumeProfile[] cacheTatankaSessionVolumeProfile;
-		public TatankaSessionVolumeProfile TatankaSessionVolumeProfile()
-		{
-			return TatankaSessionVolumeProfile(Input);
-		}
-
-		public TatankaSessionVolumeProfile TatankaSessionVolumeProfile(ISeries<double> input)
-		{
-			if (cacheTatankaSessionVolumeProfile != null)
-				for (int idx = 0; idx < cacheTatankaSessionVolumeProfile.Length; idx++)
-					if (cacheTatankaSessionVolumeProfile[idx] != null &&  cacheTatankaSessionVolumeProfile[idx].EqualsInput(input))
-						return cacheTatankaSessionVolumeProfile[idx];
-			return CacheIndicator<TatankaSessionVolumeProfile>(new TatankaSessionVolumeProfile(), input, ref cacheTatankaSessionVolumeProfile);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
-{
-	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
-	{
-		public Indicators.TatankaSessionVolumeProfile TatankaSessionVolumeProfile()
-		{
-			return indicator.TatankaSessionVolumeProfile(Input);
-		}
-
-		public Indicators.TatankaSessionVolumeProfile TatankaSessionVolumeProfile(ISeries<double> input )
-		{
-			return indicator.TatankaSessionVolumeProfile(input);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.Strategies
-{
-	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
-	{
-		public Indicators.TatankaSessionVolumeProfile TatankaSessionVolumeProfile()
-		{
-			return indicator.TatankaSessionVolumeProfile(Input);
-		}
-
-		public Indicators.TatankaSessionVolumeProfile TatankaSessionVolumeProfile(ISeries<double> input )
-		{
-			return indicator.TatankaSessionVolumeProfile(input);
-		}
-	}
-}
-
-#endregion

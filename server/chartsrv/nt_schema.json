@@ -1,7 +1,7 @@
 {
  "tpo": {
   "title": "TPO Profile",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "settings": [
    {
     "name": "FilterByTime",
@@ -17,13 +17,22 @@
     "order": 2,
     "label": "Session Time",
     "type": "str",
-    "description": "HHmm-HHmm in CT (Chicago time, as the chart's Trading Hours template here), e.g. 0830-1500 Written for ES/NQ's 08:30-15:00 CT: on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
+    "description": "HHmm-HHmm in CT (Chicago time, as the chart's Trading Hours template here), e.g. 0830-1500. Written for ES/NQ's 08:30-15:00 CT: with Use Instrument Hours on, on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
     "default": "0830-1500"
+   },
+   {
+    "name": "UseInstrumentHours",
+    "group": "Session",
+    "order": 3,
+    "label": "Use Instrument Hours",
+    "type": "bool",
+    "description": "Session Time is written for ES's regular hours (08:30-15:00 CT), in CT here. On another market it moves to its own (GC 07:20-12:30, CL 08:00-13:30): a time nearer the open moves with the open, one nearer the close with the close. Off: as typed on every market.",
+    "default": true
    },
    {
     "name": "BlockMinutes",
     "group": "Session",
-    "order": 3,
+    "order": 4,
     "label": "Block Size (Minutes)",
     "type": "int",
     "min": 5,
@@ -33,7 +42,7 @@
    {
     "name": "AutoRowHeight",
     "group": "Session",
-    "order": 4,
+    "order": 5,
     "label": "Auto Row Height",
     "type": "bool",
     "default": true
@@ -41,7 +50,7 @@
    {
     "name": "TargetRows",
     "group": "Session",
-    "order": 5,
+    "order": 6,
     "label": "Target Rows Per Day (Auto)",
     "type": "int",
     "min": 15,
@@ -51,7 +60,7 @@
    {
     "name": "RowHeightTicks",
     "group": "Session",
-    "order": 6,
+    "order": 7,
     "label": "Row Height (Ticks, Manual)",
     "type": "int",
     "min": 1,
@@ -180,7 +189,7 @@
  },
  "gap": {
   "title": "Tatanka Gap Analysis",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "settings": [
    {
     "name": "EnabledAnalysis",
@@ -196,7 +205,7 @@
     "order": 1,
     "label": "RTH start (Chicago HHmmss)",
     "type": "int",
-    "description": "Chicago time, including daylight saving time. Default 08:30:00. Written for ES/NQ's 08:30-15:00 CT: on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
+    "description": "Chicago time, including daylight saving time. Default 08:30:00. Written for ES/NQ's 08:30-15:00 CT: with Use Instrument Hours on, on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
     "min": 0,
     "max": 235959,
     "default": 83000
@@ -207,15 +216,24 @@
     "order": 2,
     "label": "RTH end (Chicago HHmmss)",
     "type": "int",
-    "description": "Default 15:00:00. Reference price is the last loaded RTH chart-bar close. Written for ES/NQ's 08:30-15:00 CT: on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
+    "description": "Default 15:00:00. Reference price is the last loaded RTH chart-bar close. Written for ES/NQ's 08:30-15:00 CT: with Use Instrument Hours on, on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
     "min": 0,
     "max": 235959,
     "default": 150000
    },
    {
-    "name": "MinimumGapPoints",
+    "name": "UseInstrumentHours",
     "group": "01. Gap Settings",
     "order": 3,
+    "label": "Use Instrument Hours",
+    "type": "bool",
+    "description": "RTH start and end are written for ES's regular hours (08:30-15:00 CT). On another market they move to its own (GC 07:20-12:30, CL 08:00-13:30): a time nearer the open moves with the open, one nearer the close with the close. Off: as typed on every market.",
+    "default": true
+   },
+   {
+    "name": "MinimumGapPoints",
+    "group": "01. Gap Settings",
+    "order": 4,
     "label": "Minimum gap size (points)",
     "type": "float",
     "min": 0.0,
@@ -225,7 +243,7 @@
    {
     "name": "MaximumGapsToShow",
     "group": "01. Gap Settings",
-    "order": 4,
+    "order": 5,
     "label": "Maximum visible gaps (0 = all)",
     "type": "int",
     "description": "Zero displays all eligible gaps intersecting the visible time range. All loaded gaps remain tracked regardless of this display setting.",
@@ -236,7 +254,7 @@
    {
     "name": "ExtendUnfilledRight",
     "group": "01. Gap Settings",
-    "order": 5,
+    "order": 6,
     "label": "Extend unfilled gaps right",
     "type": "bool",
     "default": true
@@ -423,7 +441,7 @@
  },
  "hema": {
   "title": "HTF EMA",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "settings": [
    {
     "name": "HtfPeriodType",
@@ -431,8 +449,12 @@
     "order": 1,
     "label": "Source timeframe type",
     "choices": [
+     "Second",
      "Minute",
-     "Day"
+     "Day",
+     "Week",
+     "Month",
+     "Year"
     ],
     "type": "choice",
     "description": "Pine input.timeframe type. Default Minute + 60 = 1 hour.",
@@ -471,7 +493,7 @@
      "SmoothScaled"
     ],
     "type": "choice",
-    "description": "LiveHTF = developing HTF EMA. ExactHTF = last closed HTF EMA. SmoothScaled = chart-TF EMA with scaled length.",
+    "description": "LiveHTF = the developing source EMA: one EMA step from the last closed source bar's EMA at the chart's price. ExactHTF = the EMA through the last closed source bar: it steps once per source bar, at the first chart bar after that bar closes. SmoothScaled = chart-TF EMA with scaled length.",
     "default": "SmoothScaled"
    },
    {
@@ -750,7 +772,8 @@
     "label": "Background color",
     "type": "color",
     "description": "Base table cell color and optional label plate color. Alpha is honored.",
-    "default": "#060606"
+    "default": "#060606",
+    "alpha": true
    },
    {
     "name": "ActiveRowOpacity",
@@ -770,7 +793,8 @@
     "label": "Border color",
     "type": "color",
     "description": "One-pixel table cell borders and frame.",
-    "default": "#060606"
+    "default": "#060606",
+    "alpha": true
    },
    {
     "name": "RowsBlock",
@@ -785,7 +809,7 @@
  },
  "lines": {
   "title": "Level Lines",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "settings": [
    {
     "name": "RangeTop",
@@ -844,8 +868,10 @@
     "default": {
      "color": "#ffa500",
      "dash": "Solid",
-     "width": 2.0
-    }
+     "width": 2.0,
+     "opacity": 100
+    },
+    "opacity": true
    },
    {
     "name": "RangeMidStroke",
@@ -856,8 +882,10 @@
     "default": {
      "color": "#ffa500",
      "dash": "Dash",
-     "width": 1.0
-    }
+     "width": 1.0,
+     "opacity": 100
+    },
+    "opacity": true
    },
    {
     "name": "FillRange",
@@ -915,7 +943,9 @@
     "type": "font",
     "default": {
      "family": "Arial",
-     "size": 11
+     "size": 11,
+     "bold": false,
+     "italic": false
     }
    },
    {
@@ -954,14 +984,14 @@
  },
  "prof": {
   "title": "Tatanka Session Volume Profile",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "settings": [
    {
     "name": "SessionStart",
     "group": "01. Session",
     "order": 0,
     "label": "Session start (HH:mm)",
-    "description": "In CT (ExchangeTemplate, Chart, Central), written for ES/NQ's 08:30-15:00: on another instrument it moves with that one's regular hours (CL's 08:30 is 08:00, its 15:00 13:30).",
+    "description": "In the session time zone (CT for ExchangeTemplate and Central; Chart: the chart's), written for ES/NQ's 08:30-15:00 CT (09:30-16:00 Eastern): with Use Instrument Hours on, on another instrument it moves with that one's regular hours, in any zone (CL's 08:30 CT is 08:00, its 15:00 13:30).",
     "type": "str",
     "default": "08:30"
    },
@@ -978,7 +1008,7 @@
     "group": "01. Session",
     "order": 2,
     "label": "Session time zone",
-    "description": "ExchangeTemplate and Chart are Chicago time here (CME's Trading Hours template, with DST); Central the same, Eastern New York, UTC.",
+    "description": "ExchangeTemplate is Chicago time here (CME's Trading Hours template, with DST); Central the same, Eastern New York, UTC. Chart is the chart's time zone (click the clock).",
     "type": "choice",
     "choices": [
      "ExchangeTemplate",
@@ -990,9 +1020,18 @@
     "default": "ExchangeTemplate"
    },
    {
-    "name": "ValueAreaPercent",
+    "name": "UseInstrumentHours",
     "group": "01. Session",
     "order": 3,
+    "label": "Use Instrument Hours",
+    "description": "Session start and end are written for ES's regular hours (08:30-15:00 CT), in the session time zone (09:30-16:00 on Eastern). On another market they move to its own (GC 07:20-12:30 CT, CL 08:00-13:30 CT): a time nearer the open moves with the open, one nearer the close with the close. Off: as typed on every market.",
+    "type": "bool",
+    "default": true
+   },
+   {
+    "name": "ValueAreaPercent",
+    "group": "01. Session",
+    "order": 4,
     "label": "Value area volume (%)",
     "type": "float",
     "default": 68.0,
@@ -1002,7 +1041,7 @@
    {
     "name": "ValueAreaMethod",
     "group": "01. Session",
-    "order": 4,
+    "order": 5,
     "label": "Value area method",
     "description": "TradingViewStyle stops before the next row exceeds the target. AtLeastTarget includes that row.",
     "type": "choice",
@@ -1015,7 +1054,7 @@
    {
     "name": "TicksPerRow",
     "group": "01. Session",
-    "order": 5,
+    "order": 6,
     "label": "Ticks per row",
     "type": "int",
     "default": 1,
@@ -1025,7 +1064,7 @@
    {
     "name": "SessionsToKeep",
     "group": "01. Session",
-    "order": 6,
+    "order": 7,
     "label": "Sessions to retain",
     "type": "int",
     "default": 20,
@@ -1534,7 +1573,7 @@
  },
  "pvp": {
   "title": "Tatanka Periodic Volume Profile",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "settings": [
    {
     "name": "Period",

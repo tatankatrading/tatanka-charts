@@ -40,6 +40,15 @@
                         var s = new TatankaBiasStyle { LineColorMode = p[1], AtrPercent = PD(p[2]), Above = Hex(p[5]), Below = Hex(p[6]), Within = Hex(p[7]) };
                         o.Append("c|").Append(string.Join(";", rows.Select(r => C(TatankaBiasLogic.LevelColor(r, PD(p[3]), PD(p[4]), s))))).Append('\n');
                         break;
+                    case "P":   // ReadPrice: source, open, high, low, close, the input series' value
+                        var pr = new PriceReader { PriceSource = U64(p[1]), Open = new Series(PD(p[2])), High = new Series(PD(p[3])),
+                            Low = new Series(PD(p[4])), Close = new Series(PD(p[5])), Inputs = new[] { new Series(PD(p[6])) } };
+                        o.Append("p|").Append(D(pr.Read())).Append('\n');
+                        break;
+                    case "K":   // a brush's color: alpha, red, green, blue (opacity 1: the alpha holds it here)
+                        var brush = new WpfSolidBrush(new WpfColor { A = byte.Parse(p[1]), R = byte.Parse(p[2]), G = byte.Parse(p[3]), B = byte.Parse(p[4]) });
+                        o.Append("k|").Append(C(BrushColor.Of(brush))).Append('\n');
+                        break;
                     case "N": atr = new TatankaBiasDailyAtr(int.Parse(p[1])); break;
                     case "U":
                         atr.Update(int.Parse(p[1]), PD(p[2]), PD(p[3]), PD(p[4]));

@@ -760,7 +760,7 @@ async def test(market, cid: str, body: dict) -> dict:
             if not url:
                 return res(False, "Enter the URL first")
             n, kind = market.notifier, type_of(cid)
-            ok = await (n._discord if kind == "discord" else n._ntfy)("Test", "Chart alerts are wired up.", url)
+            ok = await (n._discord if kind == "discord" else n._ntfy)("Test", "Chart alerts are wired up.", url, tries=2, queue=False)
             return res(ok, "Sent: check the channel" if ok else f"{kind.capitalize()} did not take it: check the URL")
         if type_of(cid) == "discord_charts":
             url = market.connections.url(cid, s, body)

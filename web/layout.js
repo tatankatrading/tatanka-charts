@@ -11,7 +11,10 @@
 
 const TK_CELL = (() => { const m = /[?&]cell=(\d)/.exec(location.search); return m ? Number(m[1]) : null; })();
 const TK_PER_CHART = ['sym', 'spec', 'studies', 'ntChartSet', 'inds', 'fpSet', 'chartTabs', 'chartTab', 'chartSet', 'scaleLog', 'scaleMode',
-  'gapDays', 'amtCollapsed', 'drawBar', 'rthOnly', 'seeded', 'layers', 'stHidden', 'barsOff', 'indSet'];
+  'gapDays', 'amtCollapsed', 'rthOnly', 'seeded', 'layers', 'stHidden', 'barsOff', 'indSet'];
+// per chart too, but this device's own, never in the workspace: the drawing tools open on a PC (a column beside the
+// chart) came up on the phone as a row over its oscillator pane, and closed there, closed the PC's
+const TK_CELL_LOCAL = ['drawBar'];
 const TK_SHARED = ['favs', 'favsLong', 'sideOpen', 'wlList', 'wlCols', 'wlSort', 'wlCollapsed', 'wlDetail', 'layout', 'sync',
   'bigMin', 'tapeMin', 'fillAcct', 'jrAcct', 'tfCustom', 'timeZone'];
 const TK_MAX_CELLS = 6;
@@ -26,7 +29,7 @@ const TK_LAYOUTS = {
   4: ['2 × 2', 4, '1fr 1fr', '1fr 1fr', ''],
   6: ['3 × 2', 6, '1fr 1fr 1fr', '1fr 1fr', ''],
 };
-const tkCellKey = (k) => (TK_CELL && TK_PER_CHART.includes(k) ? `c${TK_CELL}.${k}` : k);
+const tkCellKey = (k) => (TK_CELL && (TK_PER_CHART.includes(k) || TK_CELL_LOCAL.includes(k)) ? `c${TK_CELL}.${k}` : k);
 const tkInWorkspace = (k) => {
   const base = k.replace(/^c[1-5]\./, '');
   return TK_PER_CHART.includes(base) || (base === k && (TK_SHARED.includes(k) || /^(anchor:|drawTpl\.|drawStyle\.)/.test(k)));
@@ -42,6 +45,37 @@ function tkLayout() {
 }
 // Several charts only on a screen wide enough for them; a phone shows the first chart of the workspace.
 const TK_MULTI = TK_CELL === null && tkLayout() !== '1' && window.innerWidth >= 760;
+// Another of a study (HTF EMA 2) keeps only what differs from the study's starting settings. Apply to all charts on
+// the first changes those, so before it does, each other one in a chart's studies (st) or settings (set) is kept as
+// what it shows: f = { nt: NinjaTrader's settings, was: the starting ones before, now: after }. Each set takes it once
+// (again, it would be read against the old ones). The set back; the same object when nothing changed.
+function tkInstFreeze(set, st, key, f) {
+  if (!f || !f.nt || !f.was || !f.now) return set;
+  const re = new RegExp(`^${key}_\\d+$`), same = (x, y) => JSON.stringify(x ?? {}) === JSON.stringify(y ?? {});
+  const out = { ...(set || {}) };
+  let moved = false;
+  for (const k of new Set([...Object.keys(st || {}), ...Object.keys(set || {})])) {
+    if (!re.test(k)) continue;
+    const shows = { ...f.was, ...(out[k] || {}) };
+    const own = Object.fromEntries(Object.entries(shows).filter(([n, v]) => n in f.nt && !same(v, f.now[n])));
+    if (same(own, out[k])) continue;
+    if (Object.keys(own).length) out[k] = own; else delete out[k];
+    moved = true;
+  }
+  return moved ? out : set;
+}
+
+// A study's settings that stay each chart's own through Apply to all charts (which takes the rest off every chart):
+// If/Then's Input series, whose choices are the chart's own indicators (NinjaTrader's Data Series > Input series, set
+// on each chart). set without the study's other settings; the same object when nothing changed.
+const TK_CHART_ONLY = { ifthen: ['InputSeries'] };
+function tkStudyOmit(set, key) {
+  if (!set || !(key in set)) return set;
+  const { [key]: had, ...rest } = set;
+  const keep = Object.fromEntries((TK_CHART_ONLY[key] || []).filter((n) => had && n in had).map((n) => [n, had[n]]));
+  if (!Object.keys(keep).length) return rest;
+  return Object.keys(had).length === Object.keys(keep).length ? set : { ...rest, [key]: keep };
+}
 
 function createWorkspaces(env) {
   const { api, toast, fail, ask, local } = env;
@@ -51,7 +85,7 @@ function createWorkspaces(env) {
   };
   if (!raw.get('device')) raw.set('device', `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
   const W = {
-    list: [], id: raw.get('wsId'), device: raw.get('device'), auto: raw.get('wsAuto', '1') === '1',
+    list: [], id: raw.get('wsId'), opened: raw.get('wsOpened'), device: raw.get('device'), auto: raw.get('wsAuto', '1') === '1',
     timer: 0, saving: false, pending: false, active: Math.min(Number(raw.get('activeCell', '0')) || 0, TK_MAX_CELLS - 1),
     frames: [], states: {},
   };
@@ -109,16 +143,28 @@ function createWorkspaces(env) {
   }
   // A workspace setting changed here or in a chart frame: save the open workspace a moment later.
   function dirty(k) {
+    if (tkInWorkspace(k)) started = null;
+    if (W.auto && W.id && W.pending && tkInWorkspace(k) && !W.warned) {   // said once: this device's changes wait
+      W.warned = true;
+      toast(`Not saved: ${current()?.name || 'this workspace'} was changed on another device. ▦ → Save keeps this device's; `
+        + 'clicking it in the list loads the newer one', 8000);
+    }
     if (!W.auto || !W.id || W.pending || !tkInWorkspace(k)) return;   // pending: a newer save elsewhere is not overwritten
     clearTimeout(W.timer);
     W.timer = setTimeout(() => save().catch(() => { /* next change retries */ }), 2000);
   }
+  // The workspace settings as this page started with them, until it makes or hears a change. Chrome can deliver the
+  // storage events of the page before this one in the same tab here (its apply() wrote them, then reloaded into this
+  // one), even after this page started: they are what this page started with, not a change. Saving for them would
+  // tell every other device the workspace changed; and their wsOpened is not another window opening one (W.opened).
+  let started = snapshot().keys;
   window.addEventListener('storage', (e) => {
     // Another window of this browser opened a workspace (another one, or a newer save of this one): the settings every
     // window here shares are that one's now, so this window opens it too, once nothing is being typed here. Until then
     // it saves nothing and writes no workspace setting (staying on this one, its changes would be saved into that one).
+    // Every opening writes a new wsOpened: one still as this page started with it is the page before's.
     if (e.key === 'wsId' || e.key === 'wsOpened') {
-      if (W.id && (e.key === 'wsOpened' || (e.newValue && e.newValue !== W.id))) {
+      if (W.id && (e.key === 'wsOpened' ? raw.get('wsOpened') !== W.opened : e.newValue && e.newValue !== W.id)) {
         clearTimeout(W.timer);
         W.id = null;
         window.tkWsWaiting = true;
@@ -126,7 +172,8 @@ function createWorkspaces(env) {
       }
       return;
     }
-    if (e.key) dirty(e.key);   // from the chart frames
+    if (!e.key || !tkInWorkspace(e.key) || (started && raw.get(e.key) === (started[e.key] ?? null))) return;
+    dirty(e.key);   // from the chart frames
   });
 
   // ---- the server's list ---------------------------------------------------------------------------------------------
@@ -159,6 +206,7 @@ function createWorkspaces(env) {
     W.list = m.workspaces;
     if (W.id && m.saved === W.id && m.by !== W.device && !W.saving) {   // W.id: none open here, nothing to be newer than
       W.pending = true;
+      W.warned = false;
       toast(`${current()?.name || 'Workspace'} was changed on another device: ▦ → Load the newer one`);
     }
     if (W.id && !current() && W.list.length) W.pending = true;
@@ -241,7 +289,8 @@ function createWorkspaces(env) {
   async function remove() {
     const w = current();
     if (!w || (await ask({ title: `Delete ${w.name}?`, input: false, ok: 'Delete', danger: true,
-      message: 'Every device loses it. The charts stay as they are here.' })) === null) return;   // OK answers ''
+      message: 'Every device loses it.' + (W.list.length > 1 ? ` This device then opens ${W.list.find((x) => x.id !== w.id).name}.`
+        : ' The charts stay as they are here.') })) === null) return;   // OK answers ''
     try {
       await api('DELETE', `/api/workspaces/${w.id}`);
       W.list = W.list.filter((x) => x.id !== w.id);
@@ -283,31 +332,47 @@ function createWorkspaces(env) {
   }
   // One study's settings on every chart (the Indicators dialog's Apply to all charts, once the server's starting
   // settings are set): no tab and no chart's shared set keeps its own, in this layout's charts now, every chart
-  // position of this workspace, and every other saved workspace. Resolves to how many other workspaces took it.
-  async function studyAll(key, from = -1) {
-    const tabKeys = cellKeys('chartTabs'), setKeys = cellKeys('indSet');
-    const omit = (o) => { const { [key]: _, ...rest } = o; return rest; };
-    const fix = (k, json) => {
+  // position of this workspace, and every other saved workspace. freeze (tkInstFreeze): the other HTF EMAs and the
+  // like keep what they show; a chart open now does its own (the one that applied it already, the others on
+  // 'indall'), the rest here. Resolves to how many other workspaces took it.
+  async function studyAll(key, from = -1, freeze = null) {
+    const tabKeys = cellKeys('chartTabs'), setKeys = cellKeys('indSet'), stKeys = cellKeys('studies');
+    const parse = (v, d) => { try { return JSON.parse(v) ?? d; } catch { return d; } };
+    const open = Math.max(1, W.frames.length);   // chart positions with a page open now (one chart: this page)
+    // get(k): the key's value where it is (this browser, another workspace); all: none of its charts is open here.
+    // json null: not stored. A chart's shared set never saved (its linked tabs' studies at the starting settings) is
+    // {}, its HTF EMA 2 kept too: the set back if that moved it, else null.
+    const fix = (k, json, get, all) => {
       try {
-        const v = JSON.parse(json);
+        const v = JSON.parse(json ?? '{}'), pos = Math.max(tabKeys.indexOf(k), setKeys.indexOf(k)), f = all || pos >= open ? freeze : null;
         if (tabKeys.includes(k) && Array.isArray(v)) {
-          return JSON.stringify(v.map((t) => (t?.own?.set && key in t.own.set ? { ...t, own: { ...t.own, set: omit(t.own.set) } } : t)));
+          return JSON.stringify(v.map((t) => {
+            if (!t?.own) return t;
+            const old = t.own.set || {};
+            const set = tkStudyOmit(tkInstFreeze(old, t.own.st, key, f), key);
+            return set === old ? t : { ...t, own: { ...t.own, set } };
+          }));
         }
-        if (setKeys.includes(k) && v && typeof v === 'object' && key in v) return JSON.stringify(omit(v));
+        if (setKeys.includes(k) && v && typeof v === 'object') {
+          const set = tkStudyOmit(tkInstFreeze(v, parse(get(stKeys[pos]), {}), key, f), key);
+          if (set !== v) return JSON.stringify(set);
+        }
       } catch { /* not ours */ }
       return json;
     };
     try {
-      for (const k of [...tabKeys, ...setKeys]) { const v = localStorage.getItem(k); if (v) localStorage.setItem(k, fix(k, v)); }
+      const get = (k) => localStorage.getItem(k);
+      for (const k of [...tabKeys, ...setKeys]) { const v = fix(k, get(k), get, false); if (v) localStorage.setItem(k, v); }
     } catch { /* private mode */ }
-    W.frames.forEach((_, j) => { if (j !== from) post(j, { type: 'indall', key }); });
+    W.frames.forEach((_, j) => { if (j !== from) post(j, { type: 'indall', key, freeze }); });
     dirty('chartTabs');
     let n = 0;
     for (const w of W.list) {
       if (w.id === W.id) continue;
       try {
-        const full = await api('GET', `/api/workspaces/${w.id}`), data = full.data || {};
-        const keys = Object.fromEntries(Object.entries(data.keys || {}).map(([k, v]) => [k, typeof v === 'string' ? fix(k, v) : v]));
+        const full = await api('GET', `/api/workspaces/${w.id}`), data = full.data || {}, had = data.keys || {};
+        const keys = Object.fromEntries(Object.entries(had).map(([k, v]) => [k, typeof v === 'string' ? fix(k, v, (x) => had[x], true) : v]));
+        for (const k of setKeys) if (typeof had[k] !== 'string') { const v = fix(k, null, (x) => had[x], true); if (v) keys[k] = v; }
         await api('PUT', `/api/workspaces/${w.id}`, { data: { ...data, keys }, by: W.device });
         n += 1;
       } catch { /* that one keeps its own */ }
@@ -373,7 +438,7 @@ function createWorkspaces(env) {
     else if (m.type === 'all' && m.key === 'chartSet') {
       applyAll(m.key, m.value, i).then((n) => toast(`Chart settings applied to all ${W.frames.length} charts${n ? ` and ${n} other workspace${n > 1 ? 's' : ''}` : ''}`));
     } else if (m.type === 'all' && m.key === 'study' && typeof m.study === 'string') {
-      studyAll(m.study, i).then((n) => toast(`Applied to all ${W.frames.length} charts${n ? ` and ${n} other workspace${n > 1 ? 's' : ''}` : ''}`));
+      studyAll(m.study, i, m.freeze).then((n) => toast(`Applied to all ${W.frames.length} charts${n ? ` and ${n} other workspace${n > 1 ? 's' : ''}` : ''}`));
     }
   }
 

@@ -1,6 +1,7 @@
 """Login: one password for the app, set under Connections > Login (or `python -m chartsrv.auth set`). Until one is set
 the app is open to whoever reaches it, with Tailscale the only lock. Each device signs in once and stays signed in
-(SESSION_DAYS, renewed as it is used, the iPhone app too); a device can be signed out from any other, or all at once.
+(SESSION_DAYS, renewed as it is used, the iPhone app too); a device can be signed out from any other, or all at once,
+and its app notifications (webpush.Push.signed_out) go with it.
 
 The password is kept as a scrypt hash; a session is a random token in an HttpOnly cookie, kept here as its SHA-256.
 Forgot it: `python -m chartsrv.auth off` on the PC (Docker: `docker compose exec chart python -m chartsrv.auth off`)
@@ -22,7 +23,8 @@ SESSION_DAYS = 180
 RENEW_S = 86400                 # a session in use is renewed (and its cookie re-sent) once a day
 MIN_LEN, MAX_LEN = 8, 200
 FAIL_MAX, FAIL_WINDOW_S = 10, 600   # wrong passwords from one address before the login waits
-FAIL_ALL = 30                       # from all addresses together (someone trying from many), before every login waits
+FAIL_ALL = 30                       # from all addresses together (someone trying from many), before every other login
+                                    # waits too: not the PC itself's, nor a signed-in device's password change (Auth.locked)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, created INTEGER NOT NULL, seen INTEGER NOT NULL,
     label TEXT NOT NULL) WITHOUT ROWID;
@@ -35,6 +37,11 @@ def _hash(password: str, salt: bytes) -> bytes:
 
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def session_id(token: str) -> str:
+    """The id a session goes by (the start of its digest): the Login card's, and its app-notification devices'."""
+    return _digest(token)[:12]
 
 
 def make_hash(password: str) -> dict:
@@ -77,8 +84,10 @@ class Auth:
         self.store.set_setting(SETTING, {})
         self.end_all()
 
-    def locked(self, who: str) -> int:
-        """Seconds until `who` may try again after too many wrong passwords (0: now)."""
+    def locked(self, who: str, every: bool = True) -> int:
+        """Seconds until `who` may try again after too many wrong passwords (0: now). every=False: only its own
+        address's limit, not the one on all addresses together: the PC itself, and a device signed in already, which
+        someone guessing from many addresses must not lock out (the PC could then only restart the server)."""
         now = time.time()
         for k in list(self.fails):   # forget the old ones, and addresses with none left
             recent = [t for t in self.fails[k] if now - t < FAIL_WINDOW_S]
@@ -89,16 +98,18 @@ class Auth:
         mine = self.fails.get(who, [])
         if len(mine) >= FAIL_MAX:
             return int(FAIL_WINDOW_S - (now - mine[0])) + 1
-        every = sorted(t for v in self.fails.values() for t in v)
-        return int(FAIL_WINDOW_S - (now - every[0])) + 1 if len(every) >= FAIL_ALL else 0
+        if not every:
+            return 0
+        tries = sorted(t for v in self.fails.values() for t in v)
+        return int(FAIL_WINDOW_S - (now - tries[0])) + 1 if len(tries) >= FAIL_ALL else 0
 
     def failed(self, who: str):
         self.fails.setdefault(who, []).append(time.time())
 
-    def attempt(self, who: str) -> int:
-        """Before checking a password: the seconds to wait (0: go ahead). A try is counted as wrong before the
-        (slow) check, so many sent at once can't all slip in under the limit; ok() takes it back."""
-        wait = self.locked(who)
+    def attempt(self, who: str, every: bool = True) -> int:
+        """Before checking a password: the seconds to wait (0: go ahead; every: as locked()). A try is counted as
+        wrong before the (slow) check, so many sent at once can't all slip in under the limit; ok() takes it back."""
+        wait = self.locked(who, every)
         if not wait:
             self.failed(who)
         return wait
@@ -175,7 +186,9 @@ def main(argv=None):
             return 1
         a.set_password(pw)
         a.end_all()
-        print("password set; every device signs in again")
+        from .webpush import Push
+        Push(store, None).signed_out()   # and the app notifications they turned on
+        print("password set; every device signs in again (and turns its app notifications on again)")
     store.close()
     return 0
 

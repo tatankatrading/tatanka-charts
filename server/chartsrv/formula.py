@@ -20,7 +20,7 @@ from . import amt
 from . import watchlists as wl
 from .amt_runner import ct
 from .bars import parse_spec
-from .ext import CME, FRED_SPECS, YAHOO_SPECS, split_spec
+from .ext import CME, FRED_SPECS, YAHOO_SPECS, SourceDown, split_spec
 
 TOKENS = re.compile(r"(?:FRED:|EIA:|DATA:)?[A-Za-z0-9_.!&^=]+|[+\-*/()]")
 SYMBOL = re.compile(r"(?:FRED:|EIA:|DATA:)?[A-Za-z0-9_.!&^=]+")
@@ -198,8 +198,8 @@ async def formula_bars(market, expr: str, spec: str, rth: bool = True) -> dict:
                 return [b.to_dict() for b in entry.series.bars], {**CME, "rth": list(inst.rth) if inst.rth else None}
             got = await market.ext.bars(name, spec, rth)
             return got["bars"], got["exchange"]
-        except ValueError as e:
-            raise ValueError(f"{name}: {e}") from None
+        except ValueError as e:   # (a part's source not answering stays a passing failure)
+            raise (SourceDown if isinstance(e, SourceDown) else ValueError)(f"{name}: {e}") from None
 
     got = await asyncio.gather(*(one(n) for n in names))
     parts = {n: g[0] for n, g in zip(names, got)}

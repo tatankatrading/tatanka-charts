@@ -38,6 +38,7 @@ function Option(text, value) { this.text = text; this.value = value; }
 const document = { createElement: (t) => el(t), activeElement: null }, window = { innerWidth: 1400 };
 /*IND*/
 const TK_MULTI = false, ids = {}, $ = (q) => (ids[q] ||= el()), calls = [], local = { get: (k, d) => d, set() {} };
+const VWAPS = [], instKeys = () => [];   // no study lines for Input series here
 const START = { paste: { ES: 'ES 2026-10-26, 6850, 6870.25', NQ: 'NQ 2026-10-26, 25100, 25210.5' },
   ifthen: { ES: 'BULL|6850|6870|ES above', NQ: 'BEAR|25000|25100|NQ below' } };
 let server;
@@ -110,9 +111,10 @@ edit('amt', 'lvl_text', 'ES 2026-10-26, 6860');
 out.edited = await ok();
 console.log(JSON.stringify(out));
 """
-IND_PARTS = ["setStudy", "LVL_TEXT", "IND_NOTES", "same", "amtShared", "amtBySymbol", "pickSet", "amtOwn", "amtStart", "amtPatch",
-             "indReady", "indDefaults",
-             "indSymbolSaved", "indPutSymbol", "loadPlanLevels", "savePlanLevels", "ifFetched", "ifRequest", "indAdapter"]
+IND_PARTS = ["INST_RE", "baseOf", "instNo", "setStudy", "LVL_TEXT", "IND_NOTES", "same", "amtShared", "amtBySymbol", "pickSet", "amtOwn", "amtStart", "amtPatch",
+             "indReady", "indDefaults", "instFreeze", "indSym", "llShared", "IF_INPUT", "IF_BAR_INPUTS", "ifInputName", "ifNum",
+             "ifStudyLines", "ifInputChoices",
+             "indSymbolSaved", "indPutSymbol", "loadPlanLevels", "savePlanLevels", "ifFetched", "replayUntil", "ifRequest", "indAdapter"]
 
 
 def test_the_indicators_dialog_saves_a_symbols_own_settings_only_to_it_and_only_when_edited():
@@ -179,7 +181,7 @@ def test_the_plan_tabs_if_then_box_shows_the_new_symbols_block_after_a_switch():
     empties on the switch and takes NQ's block when it comes; another timeframe on the same symbol keeps the edit."""
     from test_hunt_web_chart import app_lines
     js = PLAN_IF_JS.replace("/*PLAN*/", app_lines("$('#pl-if').oninput = markDirty;", "};"))
-    out = run_app(["markDirty", "fillBox", "renderPlanIf", "ifFetched", "ifRequest", "subscribe"], js)
+    out = run_app(["markDirty", "fillBox", "renderPlanIf", "ifFetched", "replayUntil", "ifRequest", "subscribe"], js)
     assert out["asking"] == {"box": "", "dirty": False, "msg": ""}   # Save meanwhile: nothing of ES's to write
     assert out["after"] == {"box": "BEAR|25000|25100|NQ below", "dirty": False, "msg": "1 bands, saved then "}
     assert out["saved"] == {"puts": ["/api/ifthen/NQ BEAR|25000|25100|NQ below"], "nq": "BEAR|25000|25100|NQ below"}

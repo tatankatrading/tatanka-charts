@@ -10,8 +10,8 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 
-from .amt import (DMIN, Bar, DailyHistory, Engine, Frame, LevelAlertTracker, LineItem, Settings, levels_from_prices,
-                  trading_date, valid, week)
+from .amt import (DMIN, Bar, DailyHistory, Engine, Frame, LevelAlertTracker, LineItem, Settings, in_session,
+                  levels_from_prices, trading_date, valid, week)
 from .models import Bar as MinuteBar
 from . import sessions
 from .sessions import CT, SessionClock
@@ -19,8 +19,9 @@ from .sessions import CT, SessionClock
 MACRO_MINUTES = 30
 HISTORY_DAYS_KEPT = 20      # past days' IB / prior-day lines kept on the chart (as the C# Commit)
 SAMPLE_DAYS_KEPT = 20
-PD_TRADE_DAYS = 30          # prior-day value from trades for days this recent (older ones: past the lines kept)
 TRADE_DAYS_KEPT = 8         # the current Session or Weekly profile's trades, per minute, kept this long
+PD_TICK_SESSIONS = 5        # Value From Ticks (Sessions), NinjaTrader's default
+TICK_DAYS_BACK = 45         # RequestTickDays looks no further back for them
 
 
 def ct(ms: int) -> datetime:
@@ -29,6 +30,60 @@ def ct(ms: int) -> datetime:
 
 def epoch_ms(t: datetime) -> int:
     return int(t.replace(tzinfo=CT).timestamp() * 1000)
+
+
+def rth_window(date: datetime, session: str) -> tuple[datetime, datetime, bool]:
+    """NinjaTrader's RthWindow: the date's window of the RTH Session for VA (cc_sess_def), and whether its days have it."""
+    rng = session.split(":")[0].split("-")
+    a = int(rng[0][:2]) * 60 + int(rng[0][2:4])
+    b = int(rng[1][:2]) * 60 + int(rng[1][2:4])
+    d = datetime(date.year, date.month, date.day)
+    start = d + timedelta(minutes=a)
+    end = d + timedelta(minutes=b) if b > a else d + timedelta(days=1, minutes=b)
+    return start, end, in_session(start, session)
+
+
+class TickDays:
+    """The sessions whose prior-day value comes from their trades, as NinjaTrader's AMT Toolkit picks the ones it
+    downloads ticks for (Value From Ticks (Sessions)): at load (`now`, CT) the `sessions` most recent RTH windows
+    closed by then (RequestTickDays: weekdays of the RTH Session for VA, a holiday's included, at most 45 days back),
+    then each one that closes while it runs (RequestClosedSession, on the first bar of the two hours after it). None
+    with 0 sessions or the 80% Rule section off. Older sessions use 1-minute bars. kept: the sessions of the runner this
+    one replaces in a reload NinjaTrader has none of (AmtHub: a prior-day job, a gap fill), those the charts that stay
+    open on it have (seen), as their running NinjaTrader charts keep them."""
+
+    def __init__(self, sessions_: int, session: str, now: datetime, on: bool = True, kept=()):
+        self.session = session
+        self.on = on and sessions_ > 0
+        self.windows: list[tuple[datetime, datetime]] = []
+        d = datetime(now.year, now.month, now.day)
+        while self.on and len(self.windows) < sessions_ and d > datetime(now.year, now.month, now.day) - timedelta(days=TICK_DAYS_BACK):
+            start, end, ok = rth_window(d, session)
+            d -= timedelta(days=1)
+            if ok and end <= now:   # today's: asked for when it closes
+                self.windows.append((start, end))
+        for w in kept if self.on else ():
+            if all(x[0] != w[0] for x in self.windows):
+                self.windows.append(tuple(w))
+
+    @staticmethod
+    def seen(windows, params: tuple, loaded: datetime) -> list:
+        """Of a runner's sessions (`windows`, counted by `params`: AmtRunner.tick_params), the ones a chart that loaded
+        at `loaded` (CT) and ran on has: those it counted then and each one closed after."""
+        at = TickDays(params[0], params[1], loaded, params[2]).windows
+        return [tuple(w) for w in windows if w[1] > loaded or tuple(w) in at]
+
+    def closed(self, bar_start: datetime):
+        """A live bar began: the session it follows within two hours is asked for (RequestClosedSession)."""
+        if not self.on:
+            return
+        start, end, ok = rth_window(bar_start, self.session)
+        if ok and end <= bar_start < end + timedelta(hours=2) and all(x[0] != start for x in self.windows):
+            self.windows.append((start, end))
+
+    def has(self, first: datetime, end: datetime) -> bool:
+        """Whether the trades from first to end (a session's RTH minutes) are among them (TickValue)."""
+        return any(s <= first and end <= e for s, e in self.windows)
 
 
 class _Buckets:
@@ -85,13 +140,15 @@ def _sub(m: MinuteBar) -> Bar:
 
 class AmtRunner:
     def __init__(self, symbol: str, tick: float, minutes: int, settings: Settings, record: list | None = None,
-                 calendar: str | None = None, rth_session: str = "0830-1500"):
+                 calendar: str | None = None, rth_session: str = "0830-1500", tpo_shift: int = 0):
         """calendar, rth_session: the instrument's CME holiday group (a holiday halt's short session folds into the
-        next trade date) and regular hours; None and ES's as the NinjaTrader original."""
+        next trade date; the NinjaTrader original has none) and regular hours (ES's by default). tpo_shift: the minutes
+        its TPO Session moved to those hours (AmtHub.tpo_shift), which its TPO periods move by; 0 on ES's. The hours and
+        the shift are the NinjaTrader original's Settings.RthSession and TpoShift (v1.2.4, Use Instrument Hours)."""
         if not 1 <= minutes <= 30:
             raise ValueError("the AMT Toolkit runs on 1-30 minute bars")
         self.symbol, self.tick, self.minutes, self.S = symbol, tick, minutes, settings
-        self.calendar, self.rth_session = calendar, rth_session
+        self.calendar, self.rth_session, self.tpo_shift = calendar, rth_session, tpo_shift
         self.engine: Engine | None = None
         self.daily = DailyHistory(settings.daily_atr_length)
         self.days: dict[datetime, list[float]] = {}      # trading date -> [high, low, close]
@@ -126,6 +183,14 @@ class AmtRunner:
         # the current Session or Weekly profile from its trades (v1.2.2): minute start (ms) -> price -> volume, stored
         # ones from the period's start (load_trades) then live (add_trade)
         self.minute_trades: dict[int, dict[float, float]] = {}
+        # NinjaTrader's Value From Ticks (Sessions) and Profile From Ticks (AmtHub sets them from the settings): which
+        # recent sessions' prior-day value comes from their trades (TickDays, counted back from loaded_at, the load's
+        # time in ms: the wall clock's, or a replay's clock), and whether the current profile does
+        self.pd_sessions = PD_TICK_SESSIONS
+        self.profile_ticks = True
+        self.loaded_at: int | None = None
+        self.tick_days: TickDays | None = None
+        self.tick_kept: list = []     # the sessions of the runner this one replaces (TickDays' kept)
         self.commit_visuals = False   # tests: draw every committed frame too
 
     # --- inputs ----------------------------------------------------------------------------------------
@@ -187,23 +252,37 @@ class AmtRunner:
     # --- trades: the current Session or Weekly profile -------------------------------------------------------
     def period_start(self, now_ms: int) -> int | None:
         """The first minute (ms) of the profile current at now_ms when it is drawn from trades (Session, Weekly), else
-        None: the week's Sunday 17:00 open, or the Session Time window that began last."""
+        None (Profile From Ticks off too): the week's Sunday 17:00 open, or the Session Time window that began last."""
         S = self.S
-        if not S.mvp_master or S.mvp_tf_mode not in ("Session", "Weekly"):
+        if not self.wants_trades():
             return None
         now = ct(now_ms)
         if S.mvp_tf_mode == "Weekly":
             w = week(self.trade_date(now))
-            return epoch_ms(w - timedelta(hours=7))
+            start = w - timedelta(hours=7)   # its Sunday 17:00 open, or before it, the 17:00 open of a Friday holiday
+            for back in (1, 2, 3):           # halt's session (Thursday's), which counts toward the next week
+                c = start - timedelta(days=back)
+                if sessions.is_open(epoch_ms(c), self.calendar) and week(self.trade_date(c)) == w:
+                    start = c
+            return epoch_ms(start)
         rng = S.mvp_sess_time.split(":")[0].split("-")
         a = int(rng[0][:2]) * 60 + int(rng[0][2:4])
+        z = int(rng[1][:2]) * 60 + int(rng[1][2:4])
+        span = timedelta(minutes=z - a if z > a else z + 1440 - a)
         start = datetime(now.year, now.month, now.day) + timedelta(minutes=a)
         if start > now:
             start -= timedelta(days=1)
+        # the window that began last with trading in it: over a weekend or a holiday, the profile is still the one
+        # before (Friday's on Monday morning)
+        for back in range(7):
+            s = start - timedelta(days=back)
+            t, end = epoch_ms(s), epoch_ms(min(s + span, now))
+            if any(sessions.is_open(m, self.calendar) for m in range(t, max(end, t + 60_000), 5 * 60_000)):
+                return t
         return epoch_ms(start)
 
     def wants_trades(self) -> bool:
-        return self.S.mvp_master and self.S.mvp_tf_mode in ("Session", "Weekly")
+        return self.profile_ticks and self.S.mvp_master and self.S.mvp_tf_mode in ("Session", "Weekly")
 
     def add_trade(self, ts: int, price: float, size: float):
         """A trade (live, or stored: one minute's volume at a price)."""
@@ -259,9 +338,11 @@ class AmtRunner:
         mins = self.chart.bars[key]
         b = _engine_bar(mins, key, self.minutes, index)
         subs = [_sub(m) for m in mins]
+        if self.loaded_at is not None and b.Start >= ct(self.loaded_at):   # a live bar: the session it follows is asked for
+            self._tick_days().closed(b.Start)
         self._feed_daily(self.trade_date(b.Start))
-        if self.record is not None:
-            self.record.append(("B", b, subs, visuals))
+        if self.record is not None:   # the last field: run on a clone (a preview), not whether it was drawn
+            self.record.append(("B", b, subs, engine is not self.engine))
         f = engine.Process(b, subs, self.daily.Before(self.trade_date(b.Start)), visuals)
         if not subs:
             f.Warning += " One-minute data unavailable; using chart-bar profile fallback."
@@ -271,9 +352,9 @@ class AmtRunner:
         if self.engine is None and self.chart.keys:
             first = self.chart.bars[self.chart.keys[0]]
             self.engine = Engine(self.S, self.symbol, self.tick, first[-1].c, self.minutes)
-            self.engine.Calendar, self.engine.RthSession = self.calendar, self.rth_session
+            self.engine.Calendar, self.engine.RthSession, self.engine.TpoShift = self.calendar, self.rth_session, self.tpo_shift
             self.engine.TradeValue = self.trade_value
-            self.engine.MinuteTrades = self._minute_rows
+            self.engine.MinuteTrades = self._minute_rows if self.profile_ticks else None
             if self.record is not None:
                 self.record.append(("E", self.symbol, self.tick, first[-1].c, self.minutes))
             if self.levels:
@@ -281,11 +362,28 @@ class AmtRunner:
                 if self.record is not None:
                     self.record.append(("L", [(x.Name, x.Price, x.Kind) for x in self.levels]))
 
+    def _tick_days(self) -> TickDays:
+        if self.tick_days is None:
+            now = ct(self.loaded_at) if self.loaded_at is not None else ct(int(time.time() * 1000))
+            self.tick_days = TickDays(self.pd_sessions, self.S.cc_sess_def, now, self.S.cc_enable, self.tick_kept)
+        return self.tick_days
+
+    def tick_params(self) -> tuple:
+        """What TickDays counts by: another of these and a runner's sessions are counted again."""
+        return self.pd_sessions, self.S.cc_sess_def, self.S.cc_enable
+
+    def tick_windows(self) -> list:
+        """The sessions whose prior-day value comes from trades: TickDays', or before it is made the ones kept."""
+        return list(self.tick_days.windows) if self.tick_days is not None else list(self.tick_kept)
+
     def trade_value(self, start: datetime, end: datetime):
-        """Engine.TradeValue: the window's trades if worked out; a recent one not yet is noted for the hub."""
+        """Engine.TradeValue: the window's trades if worked out, for the sessions TickDays has (Value From Ticks
+        (Sessions)); one of them not worked out yet is noted for the hub. Other sessions: None (their minutes)."""
+        if not self._tick_days().has(start, end):
+            return None
         key = (epoch_ms(start), epoch_ms(end))
         rows = self.pd_values.get(key)
-        if rows is None and key[1] > (time.time() - PD_TRADE_DAYS * 86_400) * 1000:
+        if rows is None:
             self.pd_missing.add(key)
         return rows or None
 

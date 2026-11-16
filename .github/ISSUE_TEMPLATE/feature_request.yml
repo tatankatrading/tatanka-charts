@@ -1,0 +1,23 @@
+name: Feature request
+description: Something the app should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you'd like
+      description: What it should do, and where in the app.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What it's for
+      description: How you trade with it, or what it saves you. Other platforms that have it (TradingView, NinjaTrader) are useful references.
+    validations:
+      required: true
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else
+      description: Screenshots, a NinjaTrader indicator's settings, a data source it would need.

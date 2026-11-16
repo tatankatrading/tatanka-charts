@@ -90,11 +90,13 @@ def run(scenario: str):
 
 # ---- r15-drawings-1: a roll's jump between contracts --------------------------------------------------------------------
 
-def test_a_contract_roll_is_no_cross_for_line_price_or_level_alerts(tmp_path, monkeypatch):
+def test_a_contract_roll_is_no_cross_for_line_price_or_level_alerts(tmp_path, monkeypatch, in_session):
     """ES rolls in the break: the old contract's last trade 7840, the new one's first 7888 (the spread, stored bars are
     not adjusted). A drawn line at 7860, a price alert at 7870 and the daily levels R1 to R3 between were never
     traded through: nothing fires, and an Only-once line alert is still on. Trades of the new contract then cross as
-    ever. Before: the first trade was measured from the old contract's last, and every alert in the spread fired."""
+    ever. Before: the first trade was measured from the old contract's last, and every alert in the spread fired.
+    (r21m-06: its trades on a clock in a session, in_session: run 16:00-16:29 CT, or Friday 16:00-17:00, the new
+    contract's trades snapped back before the roll, which the server leaves out, and nothing fired.)"""
     m, _ = build_market(tmp_path, monkeypatch)
     m.daily.set_paste("ES", LINE)   # the daily levels: R1 7850, R2 7862.50, R3 7875
     m.levels_changed()

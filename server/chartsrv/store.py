@@ -335,11 +335,21 @@ class Store:
         return [dict(r, params=json.loads(r["params"]), enabled=bool(r["enabled"]), repeat=bool(r["repeat"]))
                 for r in rows]
 
-    def add_alert(self, symbol, kind, params: dict, repeat: bool, note: str) -> int:
+    def add_alert(self, symbol, kind, params: dict, repeat: bool, note: str, replaces: int | None = None) -> int:
+        """A new alert, in place of `replaces` if given (an edit that changes what it watches: one step, so neither both
+        nor none is left). Its id is never one an alert had before: a list on another page, or an edit dialog open on
+        one deleted meanwhile, can't reach another alert by it."""
         with self.db:
+            if replaces is not None:
+                self.db.execute("DELETE FROM alerts WHERE id=?", (int(replaces),))
+            row = self.db.execute("SELECT value FROM settings WHERE key='alert_id_high'").fetchone()
+            high = max(int(json.loads(row[0])) if row else 0,   # (an upgraded database: past the ids its fired alerts name too)
+                       self.db.execute("SELECT COALESCE(MAX(id), 0) FROM alerts").fetchone()[0],
+                       self.db.execute("SELECT COALESCE(MAX(alert_id), 0) FROM alert_events").fetchone()[0])
             cur = self.db.execute(
-                "INSERT INTO alerts (symbol, kind, params, enabled, repeat, note, created) VALUES (?,?,?,1,?,?,?)",
-                (symbol, kind, json.dumps(params), int(repeat), note, int(time.time() * 1000)))
+                "INSERT INTO alerts (id, symbol, kind, params, enabled, repeat, note, created) VALUES (?,?,?,?,1,?,?,?)",
+                (high + 1, symbol, kind, json.dumps(params), int(repeat), note, int(time.time() * 1000)))
+            self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_id_high', ?)", (json.dumps(high + 1),))
             return cur.lastrowid
 
     def update_alert(self, alert_id: int, **fields) -> bool:
@@ -406,6 +416,20 @@ def iter_ticks_range(path: Path, symbol: str, start_ms: int, end_ms: int, max_ro
     try:
         cur = db.execute("SELECT symbol, ts, price, size, side FROM ticks WHERE symbol=? AND ts>=? AND ts<? AND rowid<=? "
                          "ORDER BY ts, rowid", (symbol, start_ms, end_ms, max_rowid))
+        while rows := cur.fetchmany(chunk):
+            for r in rows:
+                yield Tick(*r)
+    finally:
+        db.close()
+
+
+def iter_ticks_back(path: Path, symbol: str, before_ms: int, max_rowid: int, chunk=256):
+    """Stored trades before before_ms written up to max_rowid, newest first (the reverse of iter_ticks_range's order),
+    read a little at a time: for the few just before a time."""
+    db = connect(path, readonly=True)
+    try:
+        cur = db.execute("SELECT symbol, ts, price, size, side FROM ticks WHERE symbol=? AND ts<? AND rowid<=? "
+                         "ORDER BY ts DESC, rowid DESC", (symbol, before_ms, max_rowid))
         while rows := cur.fetchmany(chunk):
             for r in rows:
                 yield Tick(*r)

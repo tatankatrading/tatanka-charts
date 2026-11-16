@@ -293,7 +293,7 @@ def test_saving_an_indicator_alert_with_its_condition_as_it_was_patches_it_and_k
         same, other, saved_before = json.loads(r.stdout)
         edit = {"enabled": True, "repeat": False, "note": "a new note", "expires": future}
         assert same == [{"method": "PATCH", "path": f"/api/alerts/{reg['id']}", "body": edit}, "toast Alert saved"], same
-        assert [x["method"] for x in other[:2]] == ["POST", "DELETE"] and other[0]["body"]["spec"] == "5m", other
+        assert other[0]["method"] == "POST" and other[0]["body"]["spec"] == "5m" and other[0]["body"]["replaces"] == reg["id"], other
         assert saved_before[0] == {"method": "PATCH", "path": f"/api/alerts/{old['id']}", "body": edit}, saved_before
 
         m = c.app.state.market   # the alert fired in this bar, and has its state: both kept by the PATCH

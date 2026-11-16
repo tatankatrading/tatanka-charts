@@ -4,16 +4,17 @@ description, type, choices, range), from the original source:
     python tools/gen_amt_schema.py <tatanka-indicators checkout>/ninjatrader/TatankaAmtToolkit.cs
 
 Defaults are not copied: they come from chartsrv.amt.DEFAULTS, and the schema test checks they match the source's
-InitializeSettings. Settings that only make sense inside NinjaTrader (levels file, sounds, its Discord hook, the
-session-template guard) are left out; this app has its own levels sources (the levels file or link, the levels
-line) and alert channels."""
+InitializeSettings. Settings that only make sense inside NinjaTrader (sounds, its Discord hook) are left out; this app
+has its own alert channels. The levels file, the session guard and the tick settings (Value From Ticks (Sessions),
+Profile From Ticks) are written out in chartsrv.amt_hub (_EXTRA), as this app reads them: its own levels sources, and
+the trades it stores where NinjaTrader downloads ticks."""
 import json
 import re
 import sys
 from pathlib import Path
 
 NT_ONLY = {"AboutVersion", "AboutWebsite", "LevelsFile", "EnableSound", "AlertSound", "EnableDiscord", "DiscordWebhook",
-           "tzguard_enable", "PdTickSessions", "ProfileTicks"}   # (the tick downloads: here the trades are stored)
+           "tzguard_enable", "PdTickSessions", "ProfileTicks"}   # (the last four: chartsrv.amt_hub's _EXTRA)
 PROP = re.compile(r"^\s*public\s+([\w<>\[\],. ]+?)\s+(\w+)\s*\{")
 
 

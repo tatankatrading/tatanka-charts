@@ -68,15 +68,15 @@
             <p id="av-info" class="hint"></p>
           </div>
           <div class="stp" data-p="prof">
-            <div class="row"><span class="grow"></span><button type="button" data-ind="prof">Settings…</button></div>
+            <div class="row"><button type="button" class="inst-more" title="Another one on this chart, with settings of its own">+ Add another</button><button type="button" class="inst-del" hidden>Remove</button><span class="grow"></span><button type="button" data-ind="prof">Settings…</button></div>
             <p class="hint" id="prof-info"></p>
           </div>
           <div class="stp" data-p="aavp">
-            <div class="row"><span class="grow"></span><button type="button" data-ind="aavp">Settings…</button></div>
+            <div class="row"><button type="button" class="inst-more" title="Another one on this chart, with settings of its own">+ Add another</button><button type="button" class="inst-del" hidden>Remove</button><span class="grow"></span><button type="button" data-ind="aavp">Settings…</button></div>
             <p class="hint" id="aavp-info"></p>
           </div>
           <div class="stp" data-p="pvp">
-            <div class="row"><span class="grow"></span><button type="button" data-ind="pvp">Settings…</button></div>
+            <div class="row"><button type="button" class="inst-more" title="Another one on this chart, with settings of its own">+ Add another</button><button type="button" class="inst-del" hidden>Remove</button><span class="grow"></span><button type="button" data-ind="pvp">Settings…</button></div>
             <p class="hint" id="pvp-info"></p>
           </div>
           <div class="stp" data-p="right">
@@ -111,8 +111,8 @@
             <p class="hint" id="if-info"></p>
           </div>
           <div class="stp" data-p="lines">
-            <div class="row"><span class="grow"></span><button type="button" data-plan="pl-ll">Levels…</button><button type="button" data-ind="lines">Settings…</button></div>
-            <p class="hint" id="ll-info"></p>
+            <div class="row"><button type="button" class="inst-more" title="Another one on this chart, with its own range and levels (this chart's only)">+ Add another</button><button type="button" class="inst-del" hidden>Remove</button><span class="grow"></span><button type="button" data-plan="pl-ll">Levels…</button><button type="button" data-ind="lines">Settings…</button></div>
+            <p class="hint" id="lines-info"></p>
           </div>
           <div class="stp" data-p="tpo">
             <div class="row"><span class="grow"></span><button type="button" data-ind="tpo">Settings…</button></div>
@@ -124,7 +124,7 @@
             <p class="hint" id="gap-info"></p>
           </div>
           <div class="stp" data-p="hema">
-            <div class="row"><span class="grow"></span><button type="button" data-ind="hema">Settings…</button></div>
+            <div class="row"><button type="button" class="inst-more" title="Another one on this chart, with settings of its own">+ Add another</button><button type="button" class="inst-del" hidden>Remove</button><span class="grow"></span><button type="button" data-ind="hema">Settings…</button></div>
             <p class="hint" id="hema-info"></p>
           </div>
           <div class="stp" data-p="dsma">
@@ -161,6 +161,7 @@
         <div class="row seg" data-cs="gridLines"><span class="dim">Grid</span><button type="button" data-v="off">Off</button><button type="button" data-v="both">Both</button><button type="button" data-v="horz">Horizontal</button><button type="button" data-v="vert">Vertical</button></div>
         <div class="row"><label class="inline">Text size <input type="number" data-cs="fontSize" min="9" max="18" step="1"> px</label></div>
         <label class="chk"><input type="checkbox" data-cs="watermark"> Symbol watermark <small>(big, faint, behind the bars)</small></label>
+        <label class="chk" title="Volume profiles, AMT and TPO shading, levels and lines draw behind the candles, whatever the layer order in Studies. Your fills and big-trade bubbles stay on top."><input type="checkbox" data-cs="barsFront"> Price bars in front of studies</label>
         <h5>Price scale</h5>
         <label class="chk"><input type="checkbox" data-cs="priceOnly"> Scale on price only <small>(studies never stretch it)</small></label>
         <label class="chk"><input type="checkbox" data-cs="priceLine"> Last price line</label>
@@ -206,7 +207,7 @@
       <div id="chart-msg" role="status" hidden></div>
       <div id="splash"><img src="icons/icon-192.png" alt="" width="96" height="96"><span role="status">Loading the chart…</span><button type="button" id="splash-fresh" hidden title="Drops this device's saved copy of the app and loads it again from the server">Start fresh</button></div>
       <div id="overlay"><div id="legend-line"><span id="legend"></span><span class="lg-bs" id="bars-bs"><button type="button" class="lg-b lg-eye" id="bars-eye" title="Hide the price bars (studies and drawings stay)"></button></span></div><div id="dwin" hidden></div><div id="cmp-lg" hidden></div><div id="legend-st"></div><div id="lv-meta"></div></div>
-      <div id="amt-dash" hidden title="Tap to fold or unfold (this app only)"><div class="hd"><span class="t">Tatanka AMT v1.2.2</span>
+      <div id="amt-dash" hidden title="Tap to fold or unfold (this app only)"><div class="hd"><span class="t">Tatanka AMT v1.2.4</span>
       </div><div class="rows"></div></div>
       <div id="amt-warn" hidden></div>
       <div id="draw-bar" hidden role="toolbar" aria-label="Drawing tools">
@@ -299,7 +300,7 @@
       <div id="draw-paste" hidden>
         <b>Paste levels</b>
         <textarea rows="5" spellcheck="false" placeholder="7845.75|VAH, 7830|POC, 7810|VAL&#10;Commas, semicolons or new lines. Label optional."></textarea>
-        <div class="row"><label>Range top <input type="number" data-k="top" step="any" size="8"></label><label>bottom <input type="number" data-k="bottom" step="any" size="8"></label></div>
+        <div class="row"><label>Range top <input data-k="top" inputmode="decimal" autocomplete="off" size="8"></label><label>bottom <input data-k="bottom" inputmode="decimal" autocomplete="off" size="8"></label></div>
         <div class="row"><label>Color <input type="color" data-k="pcolor" value="#ff9800"></label>
           <label class="chk"><input type="checkbox" data-k="replace" checked> replace the last pasted set</label></div>
         <div class="row"><button type="button" data-act="add">Add</button><button type="button" data-act="cancel">Cancel</button></div>
@@ -360,11 +361,14 @@
         <section class="plan-card">
           <header><b>Level Lines</b><span class="grow"></span><label class="chk"><input type="checkbox" data-st="lines"> Show</label>
             <button type="button" class="ib" data-ind="lines" title="Level Lines settings" aria-label="Level Lines settings">⚙</button></header>
-          <div class="row"><label class="inline">Range top <input type="number" id="pl-ll-top" step="any" min="0"></label>
-            <label class="inline">bottom <input type="number" id="pl-ll-bot" step="any" min="0"></label></div>
+          <div class="row"><label class="inline">Range top <input id="pl-ll-top" inputmode="decimal" autocomplete="off"></label>
+            <label class="inline">bottom <input id="pl-ll-bot" inputmode="decimal" autocomplete="off"></label></div>
           <textarea id="pl-ll" rows="5" spellcheck="false" autocomplete="off" aria-label="Level Lines for this symbol"
             placeholder="7845.75|VAH, 7830|POC, 7810|VAL&#10;price|label|color|style|width, e.g. 7845.75|VAH|Magenta|Dash|2"></textarea>
           <div class="row"><button type="button" class="primary" id="pl-ll-save">Save</button><span class="dim" id="pl-ll-msg"></span></div>
+          <div class="pl-left" id="pl-ll-left" hidden><span class="dim" id="pl-ll-left-what"></span>
+            <textarea id="pl-ll-left-text" rows="2" readonly spellcheck="false" aria-label="Levels set aside"></textarea>
+            <div class="row"><button type="button" id="pl-ll-left-x">Dismiss</button></div></div>
         </section>
         <button type="button" id="pl-all" class="wide">All indicators and settings…</button>
       </div>

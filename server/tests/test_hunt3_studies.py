@@ -198,7 +198,7 @@ def test_bar_replay_shows_a_bar_over_a_weekend_once_the_next_one_opens(spec):
 def test_htf_ema_is_asked_for_when_the_first_bars_come(replay):
     """A replay started before the chart's first bar (or a chart whose history came empty) has no bars to ask the HTF
     EMA for: it is asked for when the first one comes, not never (replay asks nothing more) or once it closes."""
-    out = run_app(["hemaBusy", "hemaRequest", "hemaTick"], """
+    out = run_app(["hemaEach", "hemaRequest", "hemaTick"], """
 const asked = [];
 const S = { st: { hema: true }, symbol: 'ES', spec: '5m', bars: [], instruments: { ES: {} }, replay: REPLAY,
   hemaSet: { HtfPeriodType: 'Minute', HtfPeriod: 60, EmaLength: 21, Mode: 'SmoothScaled' }, hema: null };

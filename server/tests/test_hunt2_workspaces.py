@@ -117,7 +117,7 @@ def test_every_hello_after_the_first_rechecks_the_workspace():
 const calls = [], noop = () => {};
 for (const f of ['versionCheck', 'updateNote', 'tabSync', 'buildHeader', 'renderAlerts', 'renderEvents', 'onSymbolChanged',
   'loadAmtServer', 'loadGapAlerts', 'moveSharedOut', 'loadInd', 'calLoad', 'tplLoad', 'shareLoad', 'setupCheck', 'cellPost', 'notifyStatus',
-  'subscribe']) ctx[f] = noop;
+  'pushHello', 'subscribe']) ctx[f] = noop;
 Object.assign(ctx, { S: { st: {}, quotes: {}, spec: '5m' }, watch: { setDoc: noop }, chartSym: (s) => s, SPEC_RE: /^\\d+[mh]$/,
   drawings: { state: {} }, calOpen: () => false, journalOpen: () => false, TK_MULTI: false, tapeWant: '',
   workspaces: { start: () => calls.push('start'), recheck: () => calls.push('recheck') } });
@@ -139,7 +139,7 @@ for (const f of ['send', 'renderTf', 'renderStudiesMenu', 'barsLayout', 'waterma
 let answer = new Promise(noop);   // subscribe()'s bars request: not answered in that part
 Object.assign(ctx, {
   S: { symbol: 'AAPL', spec: '2000t', subId: 0, catalog: {}, cs: {}, vp: {}, st: {}, bars: [], layers: [], stHidden: {}, indCfg: [] },
-  TK_MULTI: false, TK_CELL: 1, WL_FUT: /^([A-Z0-9]+)1!$/, VP_KINDS: [], extTimer: 0, specForced: '', linkedChange: false,
+  TK_MULTI: false, TK_CELL: 1, WL_FUT: /^([A-Z0-9]+)1!$/, VP_KINDS: [], vpKeys: () => [], extTimer: 0, specForced: '', linkedChange: false,
   isExtSym: () => true, extSource: () => 'yahoo', extSpecFor: (spec) => (/t$/.test(spec) ? '5m' : spec), futureAdd: noop,
   $: () => el, vol: { applyOptions: noop }, specLabel: (s) => s, drawings: { state: { loadedFor: 'AAPL' }, load: noop },
   local: { set: noop }, api: () => answer, indFmt: () => '', extSeries: () => false, extEvery: () => 1e9,

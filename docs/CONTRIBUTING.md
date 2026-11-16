@@ -20,7 +20,7 @@ server/chartsrv/   app.py (HTTP + websocket), market.py (hub), bars.py, sessions
                    branding.py, setup.py (first run, leaving the simulator)
 feeds/             your own feed plugins (git ignores them): docs/FEEDS.md
 ninjatrader/       TatankaChartFeed.cs, the NinjaTrader 8 add-on
-web/               the app: index.html, app.js, ta.js (standard indicator formulas; server/chartsrv/ta.py is its twin), studies.js (indicator drawing), drawings.js, watchlist.js, style.css, sw.js,
+web/               the app: index.html, app.js, ta.js (standard indicator formulas; server/chartsrv/ta.py is its twin), studies.js (indicator drawing), drawings.js, indicators.js (the Indicators dialog), layout.js (multi-chart layouts), symsearch.js (symbol search), press.js (long-press), watchlist.js, style.css, sw.js,
                    vendored Lightweight Charts 5.1.0
 ```
 

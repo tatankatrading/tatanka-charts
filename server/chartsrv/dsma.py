@@ -81,13 +81,11 @@ def forget(symbol: str):
             del _cache[k]
 
 
-def compute(db_path, symbol: str, calendar: str, rth: tuple[str, str] | None, start: int, length: int,
-            split: int, live: list, now: int, read) -> dict:
-    """The daily bars a chart starting at `start` needs for SMAs of up to `length` days: from `length` bars before
-    the first day closing after `start` (the first chart bar shows the day before's SMA), or the 1000-bar limit, to
-    the last, forming one. read(db, symbol, since, before) gives the stored (open ms, close) minutes; `live` the
-    minutes from `split` on, not all stored yet."""
-    since = max(start - lookback_ms(length), now - lookback_ms(MAX_DAYS))
+def daily_bars(db_path, symbol: str, calendar: str, rth: tuple[str, str] | None, since: int, split: int, live: list,
+               read) -> tuple[list[int], list[int], list[float]]:
+    """The daily bars (opens, close times, closes: copies) from `since` to the last, forming one, kept per symbol and
+    extended with the minutes stored since (also HTF EMA's Day, Week, Month and Year sources). read(db, symbol, since,
+    before) gives the stored (open ms, close) minutes; `live` the minutes from `split` on, not all stored yet."""
     key = (str(db_path), symbol, calendar, rth)
     with _cache_lock:
         d = _cache.get(key)
@@ -102,6 +100,17 @@ def compute(db_path, symbol: str, calendar: str, rth: tuple[str, str] | None, st
             d.through = split
         opens, ends, closes = d.opens[:], d.ends[:], d.closes[:]
     d.add(live, opens, ends, closes)
+    return opens, ends, closes
+
+
+def compute(db_path, symbol: str, calendar: str, rth: tuple[str, str] | None, start: int, length: int,
+            split: int, live: list, now: int, read) -> dict:
+    """The daily bars a chart starting at `start` needs for SMAs of up to `length` days: from `length` bars before
+    the first day closing after `start` (the first chart bar shows the day before's SMA), or the 1000-bar limit, to
+    the last, forming one. read(db, symbol, since, before) gives the stored (open ms, close) minutes; `live` the
+    minutes from `split` on, not all stored yet."""
+    since = max(start - lookback_ms(length), now - lookback_ms(MAX_DAYS))
+    opens, ends, closes = daily_bars(db_path, symbol, calendar, rth, since, split, live, read)
     n = len(opens)
     first = max(0, n - MAX_DAYS)
     lo = max(first, bisect_right(ends, start, first) - length)

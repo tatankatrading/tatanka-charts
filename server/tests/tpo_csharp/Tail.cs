@@ -29,6 +29,10 @@
         x.sessionIterator = new SessionIterator();
         var atr = new NtAtr(10);
         var o = new StringBuilder();
+#if HOURS
+        TimeZoneInfo zone = null;
+        string window = null;
+#endif
         foreach (string line in File.ReadAllLines(args[0]))
         {
             string[] p = line.Split('|');
@@ -37,7 +41,23 @@
                 case "S":
                     x.TickSize = PD(p[1]); x.FilterByTime = p[2] == "1"; x.SessionTime = p[3]; x.BlockMinutes = int.Parse(p[4]);
                     x.AutoRowHeight = p[5] == "1"; x.TargetRows = int.Parse(p[6]); x.RowHeightTicks = int.Parse(p[7]);
+#if HOURS
+                    // v1.1.0, Use Instrument Hours: the root, the setting and the chart's time zone (an IANA name; none:
+                    // NinjaTrader on Central time), as DataLoaded runs them; a record without them: off. On in Central
+                    // time, the Session Time it runs is printed too (off prints what v1.0.0 does); in another zone, each
+                    // Session Time it runs, as it changes (W, after the bar it changed on).
+                    x.UseInstrumentHours = p.Length > 9 && p[9] == "1";
+                    zone = p.Length > 10 && p[10].Length > 0 ? TimeZoneInfo.FindSystemTimeZoneById(p[10]) : null;
+                    x.SetSessionTime(p.Length > 8 ? p[8] : null, zone, TimeZoneInfo.FindSystemTimeZoneById("America/Chicago"));
+                    if (x.UseInstrumentHours && zone == null) o.Append("H|").Append(x.sessionTime).Append('\n');
+                    window = x.sessionTime;
+#endif
                     break;
+#if HOURS
+                case "Q":   // RunSessionTime(typed, on, root, offset in minutes)
+                    o.Append("Q|").Append(RunSessionTime(p[1], p[2] == "1", p[3], int.Parse(p[4]))).Append('\n');
+                    break;
+#endif
                 case "D":
                     x.dailyAtr.Value = atr.Add(PD(p[1]), PD(p[2]), PD(p[3]));
                     x.CurrentBars[1]++;
@@ -52,6 +72,9 @@
                      .Append('|').Append(x.liveRows.Count).Append('|').Append(T(x.sessionStartTime)).Append('|').Append(T(x.drawStartTime))
                      .Append('|').Append(T(x.lastSessBarTime)).Append('\n');
                     for (int i = before; i < x.saved.Count; i++) x.DumpProfile(o, "P", x.saved[i]);
+#if HOURS
+                    if (zone != null && x.sessionTime != window) { window = x.sessionTime; o.Append("W|").Append(window).Append('\n'); }
+#endif
                     break;
                 case "E":
                     if (x.liveRows.Count > 0) x.DumpProfile(o, "LIVE", x.BuildProfileFromMap(x.liveRows, x.drawStartTime, x.Time[0]));
