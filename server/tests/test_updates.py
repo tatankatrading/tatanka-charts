@@ -42,10 +42,11 @@ def test_check(tmp_path, monkeypatch):
 
     async def go():
         m, _ = build_market(tmp_path, monkeypatch, http=_http(handler), CHART_COMMIT=SHA)
-        assert m.updates.commit == SHA and m.updates.public() == {"behind": None, "latest": ""}
+        assert m.updates.commit == SHA and m.updates.public() == {"behind": None, "latest": "", "changes": []}
         st = await m.updates.check()
         assert st["behind"] == 2 and st["changes"] == ["Newest change", "Older change"] and st["latest"] == NEW
-        assert st["message"].startswith("2 updates to take") and m.updates.public() == {"behind": 2, "latest": NEW[:12]}
+        assert st["message"].startswith("2 updates to take") and m.updates.public() == {"behind": 2, "latest": NEW[:12],
+                                                                                     "changes": ["Newest change", "Older change"]}
         assert str(seen[-1].url) == f"https://api.github.com/repos/tatankatrading/tatanka-charts/compare/{SHA}...main"
         assert "authorization" not in seen[-1].headers
         card = next(x for x in m.connections.public(m) if x["id"] == "updates")

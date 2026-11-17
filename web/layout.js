@@ -405,10 +405,17 @@ function createWorkspaces(env) {
     window.addEventListener('message', onCell);
   }
   // A chart's dialogs, menus, notes and drawing bar are in its frame, under whatever the page shows over the charts:
-  // while one is open, the page's fired-alert panel steps aside (body.cell-over), as it is under the page's own.
+  // while one is open, the page's fired-alert panel steps aside (body.cell-over; a note: body.cell-note), as it is
+  // under the page's own. The update card over the charts steps aside for a dialog or menu, not for a note: every
+  // chart has notes as it loads, and it would blink away (style.css).
   const CELL_OVER = '.modal:not([hidden]), .menu:not([hidden]), #ctx:not([hidden]), #tf-menu:not([hidden]), #quick:not([hidden]), '
-    + '#draw-tree:not([hidden]), #draw-paste:not([hidden]), #draw-edit:not([hidden]), #toast.show';
-  const cellOver = () => document.body.classList.toggle('cell-over', W.frames.some((f) => f.contentDocument?.querySelector(CELL_OVER)));
+    + '#draw-tree:not([hidden]), #draw-paste:not([hidden]), #draw-edit:not([hidden])';
+  const CELL_NOTE = '#toast.show';
+  const cellOver = () => {
+    const open = (sel) => W.frames.some((f) => f.contentDocument?.querySelector(sel));
+    document.body.classList.toggle('cell-over', open(CELL_OVER));
+    document.body.classList.toggle('cell-note', open(CELL_NOTE));
+  };
   function cellWatch(f) {   // each time a chart loads: a reload is a new page
     try { new MutationObserver(cellOver).observe(f.contentDocument.body, { subtree: true, attributes: true, attributeFilter: ['hidden', 'class'] }); } catch { /* not loaded */ }
     cellOver();

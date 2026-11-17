@@ -5766,6 +5766,237 @@ function toast(msg, ms = 4000) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
+// ---- a newer version on GitHub: a small card with the newest changes and how to take it, until Later or Got it. Not
+// modal: the chart works beside it, and it never takes the focus (a screen reader hears it said, and Alt+U goes to it).
+// Where: in the side panel's column while the panel shows beside the chart (it covers none of the chart); else over
+// the chart at the bottom right (a phone: from its left gutter), short of the chart's price axis (updPlace), and
+// shorter there: 3 titles (a phone 2). Under 520 px tall, a phone under 360 px wide, or a layout's chart too narrow,
+// the count alone (All changes lists them). Got it: not again for this version, on this device ('updateSeen', the key
+// the 9-second note before it kept: a device that saw that note for this version sees nothing). Later: back in 24
+// hours, or at once for a newer version ('updateLater': the version and when). Either holds for the page even where
+// the browser keeps no site data (updMem). In a layout the page around the charts shows it, once; the charts in its
+// frames never do. The server's texts (commit titles from GitHub) are set as text.
+const UPD_LATER_MS = 24 * 3600e3, UPD_SHOWN = 5;
+let updNow = null, updTimer = 0, updFrom = null, updSaid = '';
+const updMem = {};   // this page's own Later and Got it, ahead of storage: storage that won't save can't bring it back
+const updGet = (k, d) => updMem[k] ?? local.get(k, d);
+const updSet = (k, v) => { updMem[k] = v; local.set(k, v); };
+// The window's size as the style sheet and the card's fixed place take it (its media queries; the page's width): not
+// innerWidth, which a phone's browser still gives as the width before it was turned while it zooms to the new one.
+const updShort = window.matchMedia?.('(max-height: 520px)'), updPhone = window.matchMedia?.('(max-width: 600px)'), updOver = window.matchMedia?.('(max-width: 760px)');
+function updRoom() {   // where it goes (the side panel's column, or over the chart) and how many titles it has room for
+  const side = !updOver?.matches && !$('main').classList.contains('side-off');
+  const titles = side ? UPD_SHOWN : updSlim ? 0 : updPhone?.matches ? (document.documentElement.clientWidth < 360 ? 0 : 2) : 3;
+  return { side, titles: updShort?.matches ? 0 : titles };
+}
+// Over the chart it stops short of the chart's price axis, so the prices, the live price's label and its bar
+// countdown are never under it: its right edge 8 px left of the axis. Its left edge: a phone's (600 px wide or less)
+// 16 px in from the screen's (style.css); else 360 px wide at most, and not past the left edge of the chart's plot
+// (the drawing tools' column), unless that leaves under 240 px. In a layout never past the left edge of the chart it
+// is over either (8 px in): the next chart's axis ends there; a card narrower than 240 px for that (a layout's narrow
+// charts) gives the count alone (updSlim). The axis as the chart draws it (wider for NQ's 25000.00 than ES's
+// 6896.25, in log or %), measured again whenever it can change (updAxisMoved): no chart drawn, or none on the screen
+// (a phone's panel page), a usual axis' width is kept clear. In a layout each chart tells the page around the charts
+// where its axis is (updAxisSay), and the card stops short of those of the charts it is over.
+const UPD_GAP = 8, UPD_W = 360, UPD_MIN = 240, UPD_AXIS = 72;
+let updSlim = false, updAgain = false;   // placed narrower than UPD_MIN: the count alone; shown again for that, once
+// m: { plot, axis, edge, left }, page x's of the chart's plot's left edge, its price axis' left edge (null: not
+// measured), its right edge (null: the window's) and, in a layout, its own left edge (the card's never past it). Back:
+// { right, width } in px, the card's right from the window's right edge, and its width (null on a phone: from its
+// left gutter).
+function updPlaceAt(m, vw, phone) {
+  const axis = Number.isFinite(m?.axis) ? m.axis : (Number.isFinite(m?.edge) ? m.edge : vw) - UPD_AXIS;
+  const r = Math.floor(Math.min(vw, axis) - UPD_GAP);   // the card's right edge
+  const lim = Number.isFinite(m?.left) ? m.left + UPD_GAP : 16;   // its left edge never past this
+  if (phone) return { right: vw - r, width: null };
+  const room = r - ((Number.isFinite(m?.plot) ? m.plot : 0) + UPD_GAP);
+  return { right: vw - r, width: Math.max(0, Math.min(Math.floor(r - lim), Math.max(UPD_MIN, Math.min(UPD_W, Math.floor(room))))) };
+}
+function updAxisHere() {   // this page's chart, as updPlaceAt takes it
+  const c = $('#chart').getBoundingClientRect();
+  if (!(c.width > 0)) { const r = $('main').getBoundingClientRect(); return { plot: r.left, axis: null, edge: r.width > 0 ? r.right : null }; }   // not on the screen
+  const el = chart.chartElement().getBoundingClientRect(), w = chart.priceScale('right').width();
+  // the chart's own size (it can be a pixel under its box's) until it takes its box's new one (subscribeSizeChange):
+  // the smaller, so a card placed meanwhile is not put over the axis (a window widened moves the card, anchored to its
+  // right, with it at once: the chart redraws its axis there a frame later)
+  return { plot: c.left + chart.priceScale('left').width(), axis: w > 0 && el.width > 0 ? Math.min(el.right, c.right) - w : null, edge: c.right };
+}
+// a layout: each chart's frame window → { axis, plot } it said (px in from its right, its left edge); a frame gone, its
+// entry with it
+const updFrames = new WeakMap();
+function updAxisGrid(top, bottom) {   // a layout's: the charts of the right-hand column the card is over (top to bottom)
+  const fs = [...document.querySelectorAll('#grid iframe')].map((f) => ({ f, r: f.getBoundingClientRect() })).filter((x) => x.r.width > 0);
+  if (!fs.length) return null;
+  const right = Math.max(...fs.map((x) => x.r.right)), col = fs.filter((x) => x.r.right >= right - 2);
+  const under = col.filter((x) => x.r.bottom > top && x.r.top < bottom);
+  let axis = Infinity, plot = -Infinity, left = -Infinity;
+  for (const { f, r } of under.length ? under : col.slice(-1)) {
+    const d = updFrames.get(f.contentWindow);
+    axis = Math.min(axis, r.right - (Number.isFinite(d?.axis) ? d.axis : UPD_AXIS));
+    plot = Math.max(plot, r.left + (Number.isFinite(d?.plot) ? d.plot : 0));
+    left = Math.max(left, r.left);
+  }
+  return { plot, axis, edge: right, left };
+}
+function updPlace() {   // where it is over the chart, as the chart is now; nothing said, nothing redrawn
+  const box = $('#upd');
+  if (box.hidden || box.classList.contains('side')) return;
+  // a layout keeps its charts side by side on a narrow window too: its card stops at the chart it is over, not a phone's
+  const vw = document.documentElement.clientWidth, phone = !TK_MULTI && !!updPhone?.matches;
+  const over = () => { const b = box.getBoundingClientRect(); return TK_MULTI ? updAxisGrid(b.top, b.bottom) : updAxisHere(); };
+  let m = over(), p;
+  for (let i = 0; ; i++) {
+    p = updPlaceAt(m, vw, phone);
+    box.style.setProperty('--upd-r', `${p.right}px`);
+    if (p.width === null) box.style.removeProperty('--upd-w'); else box.style.setProperty('--upd-w', `${p.width}px`);
+    if (!TK_MULTI || i) break;
+    // narrower is taller: over another chart of the layout now? Placed again for that one, once (never back and forth)
+    const now = over();
+    if (JSON.stringify(now) === JSON.stringify(m)) break;
+    m = now;
+  }
+  const slim = p.width !== null && p.width < UPD_MIN;
+  if (slim === updSlim) return;
+  updSlim = slim;   // the titles, or the count alone: shown again for that (not said again), once
+  if (updAgain || !updNow) return;
+  updAgain = true;
+  try { updShow(updNow); } finally { updAgain = false; }
+}
+let updAxisWas = '';
+function updAxisSay() {   // a chart of a layout: where its axis is, to the page around the charts, when that changed
+  const m = updAxisHere(), w = window.innerWidth;
+  const v = { axis: m.axis === null ? null : w - m.axis, plot: m.plot, w, h: window.innerHeight };
+  const k = JSON.stringify(v);
+  if (k === updAxisWas || !(w > 0)) return;
+  updAxisWas = k;
+  window.parent.postMessage({ tk: true, type: 'axis', ...v }, location.origin);
+}
+const updAxisMoved = () => { if (TK_CELL !== null) updAxisSay(); else updPlace(); };
+function updAxisHeard(e) {   // the page around a layout's charts: a chart's word on its axis (updAxisSay), from one in #grid only
+  const d = e.data;
+  if (e.origin !== location.origin || !d?.tk || d.type !== 'axis' || ![...document.querySelectorAll('#grid iframe')].some((f) => f.contentWindow === e.source)) return;
+  updFrames.set(e.source, { axis: Number.isFinite(d.axis) ? d.axis : null, plot: Number.isFinite(d.plot) ? d.plot : null });
+  updPlace();
+}
+function updateNote(u) {   // the hello's update, or an 'update' broadcast: { behind, latest, changes }
+  updNow = u?.behind > 0 && u.latest ? { behind: Number(u.behind), latest: String(u.latest), changes: Array.isArray(u.changes) ? u.changes : [] } : null;
+  updCheck();
+}
+function updLater() {   // the version Later put off, and when: { v, at }, or null
+  try { const l = JSON.parse(updGet('updateLater', 'null')); return l && typeof l.v === 'string' && Number.isFinite(l.at) ? l : null; } catch { return null; }
+}
+function updWait(u, now = Date.now()) {   // ms until the card shows: 0 at once, Infinity never (none, or Got it on this one)
+  if (!u || updGet('updateSeen') === u.latest) return Infinity;
+  const l = updLater();
+  return l?.v === u.latest ? Math.min(UPD_LATER_MS, Math.max(0, l.at + UPD_LATER_MS - now)) : 0;
+}
+function updCheck() {   // shown or not, as it stands now (also on a timer: Later's 24 hours with the page left open)
+  if (TK_CELL !== null) return;   // a chart of a layout: the page around the charts shows it
+  clearTimeout(updTimer);
+  const wait = updWait(updNow);
+  if (wait <= 0) { updShow(updNow); return; }
+  updHide();
+  if (Number.isFinite(wait)) updTimer = setTimeout(updCheck, wait + 1000);
+}
+function updShow(u) {   // also again as the room changes (updFit): said once
+  const box = $('#upd'), n = u.behind, room = updRoom();
+  // no more titles than the count (the server's numbers disagreeing), each cut by characters, not halves of an emoji
+  const shown = u.changes.slice(0, Math.min(n, room.titles)).map((c) => Array.from(String(c)).slice(0, 120).join(''));
+  box.classList.toggle('side', room.side);
+  box.style.setProperty('--upd-top', `${Math.round($('main').getBoundingClientRect().top) + 8}px`);   // its top stays under the header
+  $('#upd-count').textContent = `${n} change${n === 1 ? '' : 's'}${shown.length ? ':' : '.'}`;
+  $('#upd-list').replaceChildren(...shown.map((t) => {
+    const li = document.createElement('li'), span = document.createElement('span');
+    span.textContent = t;
+    li.title = t;   // all of a title cut to its line
+    li.append(span);
+    return li;
+  }));
+  $('#upd-list').hidden = !shown.length;
+  $('#upd-more').textContent = `and ${n - shown.length} more`;
+  $('#upd-more').hidden = !shown.length || n <= shown.length;
+  $('#upd-app').textContent = `${brand.name} Charts`;
+  box.hidden = false;
+  updPlace();   // up first: its height tells which charts of a layout it is over
+  document.body.classList.add('upd-on');
+  if (updSaid === u.latest) return;   // said already (a reconnect's hello, the room changed)
+  updSaid = u.latest;
+  // said once it is up (a live region heard a moment after it changes): the focus stays where it is
+  setTimeout(() => { if (!box.hidden) $('#upd-say').textContent = `Update available: ${n} change${n === 1 ? '' : 's'}, in a card at the bottom of the page. Alt+U goes to it.`; }, 400);
+}
+function updHide(byKey = false) {
+  const box = $('#upd');
+  if (box.hidden) return;
+  const had = box.contains(document.activeElement);
+  box.hidden = true;
+  document.body.classList.remove('upd-on');
+  $('#upd-say').textContent = '';
+  updSaid = '';
+  if (!had) return;
+  // closed from the keyboard: the focus back where it came from; by a click or tap, let go (a box focused again would
+  // bring a phone's keyboard up)
+  if (byKey && updFrom?.isConnected && updFrom.focus && !updFrom.closest?.('[hidden]')) updFrom.focus({ preventScroll: true }); else document.activeElement?.blur();
+}
+function updClose(later, byKey = false) {
+  if (updNow && later) updSet('updateLater', JSON.stringify({ v: updNow.latest, at: Date.now() }));
+  else if (updNow) updSet('updateSeen', updNow.latest);
+  updHide(byKey);
+  updCheck();   // Later: its timer
+}
+function updReach() {   // Alt+U: the focus to the card's Got it (Esc takes it back as Later); not from under a dialog
+  const box = $('#upd');
+  if (box.hidden || document.querySelector('.modal:not([hidden])') || getComputedStyle(box).visibility === 'hidden') return;
+  const from = document.activeElement;
+  $('#upd-ok').focus();
+  updFrom = from;   // a chart of a layout: its frame
+}
+$('#upd-later').onclick = (e) => updClose(true, e.detail === 0);   // detail 0: Enter or Space
+$('#upd-ok').onclick = (e) => updClose(false, e.detail === 0);
+$('#upd-all').onclick = async () => {   // Connections, at its Updates card (App opened for it, not kept open), the focus there
+  await cnOpen();
+  const card = $('#cn-list .cn-card[data-id="updates"]');
+  if (!card || $('#cn-dlg').hidden) return;
+  card.closest('details').open = true;
+  card.scrollIntoView({ block: 'nearest' });
+  card.tabIndex = -1;
+  card.focus({ preventScroll: true });
+};
+$('#upd').addEventListener('focusin', (e) => { if (!$('#upd').contains(e.relatedTarget)) updFrom = e.relatedTarget; });
+$('#upd').addEventListener('keydown', (e) => {   // keys here are not chart shortcuts; Esc is Later
+  if (document.querySelector('.modal:not([hidden])')) return;   // a dialog over it (All changes' Connections): its Esc
+  if (e.key === 'Escape' && document.querySelector('.menu:not([hidden]), #tf-menu:not([hidden]), #ctx:not([hidden]), #quick:not([hidden])')) return;   // a menu's first
+  e.stopPropagation();
+  if (e.key === 'Escape') { e.preventDefault(); updClose(true, true); }
+});
+document.addEventListener('keydown', (e) => {   // Alt+U (a Mac: Option+U), also from a chart of a layout: to the page's card
+  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.code !== 'KeyU' || e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+  e.preventDefault();
+  if (TK_CELL !== null) window.parent.postMessage({ tk: true, type: 'updReach' }, location.origin); else updReach();
+});
+if (TK_MULTI) window.addEventListener('message', (e) => { if (e.origin === location.origin && e.data?.tk && e.data.type === 'updReach') updReach(); });
+// the room it has: the window resized or turned, the side panel shown or hidden
+const updFit = () => { if (updNow && !$('#upd').hidden) updShow(updNow); };
+window.addEventListener('resize', updFit);
+new MutationObserver(updFit).observe($('main'), { attributes: true, attributeFilter: ['class'] });
+// the price axis moved (updPlace): the chart's size or its axis' width (a symbol's digits, a timeframe, log or %; the
+// library tells the time axis' new width, the rest of the chart's), or the fonts its prices are drawn in loaded. A
+// chart of a layout tells the page around the charts, also as its frame is resized (a frame only made shorter or
+// taller, its time axis' width the same, is told by its resize alone: which charts are under the card changes); that
+// page places the card again as each chart says so, and as charts come and go.
+chart.timeScale().subscribeSizeChange(updAxisMoved);
+document.fonts?.addEventListener?.('loadingdone', updAxisMoved);
+if (TK_CELL !== null) window.addEventListener('resize', updAxisMoved);
+if (TK_MULTI) {
+  window.addEventListener('message', updAxisHeard);
+  new MutationObserver(updPlace).observe($('#grid'), { childList: true });
+}
+// the fired-alert panel shows above it (style.css, body.upd-on): its height
+new ResizeObserver(() => document.body.style.setProperty('--upd-h', `${$('#upd').offsetHeight}px`)).observe($('#upd'));
+window.addEventListener('storage', (e) => {   // put off or seen in another window: that choice, not this page's
+  if (e.key !== 'updateSeen' && e.key !== 'updateLater') return;
+  delete updMem[e.key];
+  updCheck();
+});
 
 // ---- bar replay: the chart leaves the live feed and steps through bars the server builds around a past moment --
 const REPLAY_OFF = {};   // a study drawn from later data, switched off while replaying (none now)
@@ -7283,11 +7514,6 @@ function versionCheck(m) {
   const changed = appConfig !== null && m.config && m.config !== appConfig;
   if (appConfig === null) appConfig = m.config || '';
   if (newer || changed) reloadWhenIdle(newer ? 'Updated' : 'Instruments changed', newer ? m.version : '');
-}
-function updateNote(u) {   // a newer version on GitHub: said once per version, on each device
-  if (!u?.behind || !u.latest || local.get('updateSeen') === u.latest) return;
-  local.set('updateSeen', u.latest);
-  toast(`Update available (${u.behind} change${u.behind > 1 ? 's' : ''}): run update.cmd on the PC. Connections > Updates lists them.`, 9000);
 }
 async function swOn(version) {   // the service worker serves `version` now (or there is none): up to 10 s
   if (!version || !navigator.serviceWorker?.controller || !window.caches) return;

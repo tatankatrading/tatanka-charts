@@ -126,7 +126,8 @@ What happens by itself after that, or whenever something changes:
 - **Daily, weekly and monthly charts of a future just added** start with years of history (Yahoo's older days; not on the simulator).
 - **The database is tidied** each day in the 16:00 CT break; trades are kept 5 years (Backups card), bars always.
 - **An older NinjaTrader add-on** is flagged on its card, with the steps and a download.
-- **A newer version on GitHub** shows as a note on open pages and on Connections > Updates, with what changed.
+- **A newer version on GitHub** shows as a small card on open pages, at the bottom of the side panel or the screen
+  (the newest changes, how to take it; Later or Got it), and on Connections > Updates, with what changed.
 
 ## Documentation
 

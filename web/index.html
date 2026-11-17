@@ -553,6 +553,7 @@
           <div class="k"><kbd>Alt+S</kbd><span>save a picture</span></div>
           <div class="k"><kbd>Alt+A</kbd><span>create an alert</span></div>
           <div class="k"><kbd>Alt+G</kbd><span>go to a date</span></div>
+          <div class="k"><kbd>Alt+U</kbd><span>to the Update available card, while it shows</span></div>
           <div class="k"><kbd>Shift+drag</kbd><span>measure</span></div>
           <div class="k"><kbd>Wheel on the price axis</kbd><span>scale the prices</span></div>
           <div class="k"><kbd>Double-click an axis</kbd><span>auto scale again</span></div>
@@ -582,6 +583,15 @@
     <div class="fired-head"><b id="fired-title">Alert</b><button id="fired-ok" type="button">OK</button></div>
     <ul id="fired-list"></ul>
   </div>
+  <!-- a newer version on GitHub (app.js, updateNote): not modal, nothing behind it waits; its texts set as text -->
+  <div id="upd" role="dialog" aria-labelledby="upd-title" aria-describedby="upd-how" aria-keyshortcuts="Alt+U" hidden>
+    <div class="upd-hd"><b id="upd-title">Update available</b> <span id="upd-count"></span></div>
+    <ul id="upd-list"></ul>
+    <p id="upd-more" hidden></p>
+    <p id="upd-how">Run <code>update.cmd</code> on the PC that runs <span id="upd-app">Tatanka Charts</span> (Mac or Linux: <code>./update.sh</code>). It says at the end if NinjaTrader needs anything.</p>
+    <div class="upd-ft"><button type="button" class="link" id="upd-all">All changes</button><span class="upd-bt"><button type="button" id="upd-later">Later</button><button type="button" id="upd-ok" class="primary">Got it</button></span></div>
+  </div>
+  <div id="upd-say" class="sr-only" role="status" aria-live="polite"></div>
   <script src="vendor/lightweight-charts.standalone.production.js"></script>
   <script src="press.js"></script>
   <script src="ta.js"></script>

@@ -1,7 +1,8 @@
 """Is there a newer version? Every 6 hours the server asks GitHub what the repository's main branch has that the
 commit it was built from doesn't (update.cmd passes that commit to the build; run from a git checkout, .git says).
-Connections > App > Updates shows the count and what changed; open pages get a note once per new version. Taking it
-is still update.cmd on the PC: the server can't rebuild itself. A private repository needs a read-only token."""
+Connections > App > Updates shows the count and what changed; open pages show a small card with the newest few changes
+until it is put off or seen (web/app.js, updateNote). Taking it is still update.cmd on the PC: the server can't rebuild
+itself. A private repository needs a read-only token."""
 import asyncio
 import logging
 import re
@@ -20,6 +21,8 @@ REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 EVERY_S = 6 * 3600
 FIRST_S = 60
+PAGE_CHANGES = 5    # the newest changes' titles open pages get with the count (Connections lists up to 10)
+CHANGE_CHARS = 120  # each a commit's first line, cut there
 
 
 def git_head(root: Path) -> str:
@@ -54,8 +57,10 @@ class Updates:
         self.state = {"behind": None, "latest": "", "changes": [], "error": "", "at": None}
 
     def public(self) -> dict:
-        """What open pages hear: how many changes behind, and the newest one's id (a note once per new version)."""
-        return {"behind": self.state["behind"], "latest": self.state["latest"][:12]}
+        """What open pages hear: how many changes behind, the newest one's id (the page's card: once per version), and
+        the newest few changes' titles for the card (Connections > Updates lists up to ten): five of 120 characters."""
+        return {"behind": self.state["behind"], "latest": self.state["latest"][:12],
+                "changes": [str(c)[:CHANGE_CHARS] for c in self.state["changes"][:PAGE_CHANGES]]}
 
     async def run(self):
         await asyncio.sleep(FIRST_S)
@@ -96,7 +101,7 @@ class Updates:
                     commits = j.get("commits") or []
                     st["behind"] = int(j.get("ahead_by") or 0)
                     st["latest"] = commits[-1]["sha"] if commits and st["behind"] else self.commit
-                    st["changes"] = [str((c.get("commit") or {}).get("message") or "").split("\n")[0][:120]
+                    st["changes"] = [str((c.get("commit") or {}).get("message") or "").split("\n")[0][:CHANGE_CHARS]
                                      for c in reversed(commits)][:10] if st["behind"] else []
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
                 st["error"] = f"GitHub did not answer ({type(e).__name__})"

@@ -691,7 +691,10 @@ async def test(market, cid: str, body: dict) -> dict:
     http = market.http
     try:
         if cid == "updates":
+            before = market.updates.public()
             st = await market.updates.check(s.update_repo, s.github_token)
+            if market.updates.public() != before:   # open pages hear it now, as from the 6-hourly check (which then
+                market.broadcast({"type": "update", **market.updates.public()})   # finds nothing new to send)
             return res(not st["error"], st["message"])
         if cid == "ninjatrader":
             f = next((f for f in market.feed_objs if f.name == "ninjatrader"), None)

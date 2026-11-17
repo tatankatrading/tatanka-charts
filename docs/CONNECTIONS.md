@@ -179,13 +179,36 @@ into the backups folder (a name alone goes there; it can be large).
 ## Updates
 
 **Connections > App > Updates** checks every 6 hours whether the repository's `main` branch has commits this
-server wasn't built from, and lists what changed (each commit's first line). Open pages get a note once per new
-version. Taking it is still `update.cmd` on the PC: the server can't rebuild itself.
+server wasn't built from, and lists what changed (each commit's first line). Taking it is still `update.cmd` on the
+PC: the server can't rebuild itself.
 
 - It knows its own version because `update.cmd` (and `update.sh`) pass the commit to the build. A server built with a
   plain `docker compose up -d --build` says its version is unknown until the next `update.cmd`.
 - **Repository**: `owner/name` on GitHub (`CHART_UPDATE_REPO` in `.env` sets the default).
 - **GitHub token**: only for a private repository. github.com > Settings > Developer settings > Fine-grained tokens >
   Generate new token: Repository access "Only select repositories" (this one), Permissions > Contents: Read-only.
-  Paste it here; it stays on the server. **Test** checks now.
+  Paste it here; it stays on the server. **Test** checks now, and a newer version it finds shows on open pages at once.
 
+Open pages show a small card, **Update available**: how many changes, the newest ones, and what to do: run
+`update.cmd` on the PC that runs Tatanka Charts (Mac or Linux: `./update.sh`); it says at the end if NinjaTrader needs
+anything. It isn't a dialog you must answer: the chart keeps working around it.
+
+- **Where**: at the bottom of the side panel, beside the chart, with the newest five changes. With the panel hidden, or
+  on a window 760 px wide or less, it sits over the chart at the bottom right (on a phone, from 16 px in on the left to
+  the price axis) and lists three (on a phone two), each cut to a line; the rest are counted. On a window under 520 px
+  tall, or a phone under 360 px wide, it gives the count alone.
+- Over the chart it stops short of the chart's price axis, so the prices, the live price and its bar countdown are
+  never under it. It moves as the axis does: wider prices (NQ's 25000.00 against ES's 6896.25), another symbol or
+  timeframe, log or %, the window resized or the phone turned, the panel shown or hidden. In a layout with the panel
+  hidden it stays inside the chart it sits over (normally the bottom right one), short of that chart's axis, so the
+  charts beside it are clear too; where that chart is too narrow for the titles (three charts across on a window under
+  about 1000 px), it gives the count alone.
+- **Later** hides it on this device for 24 hours; a newer version brings it back at once. **Esc** does the same while
+  the card has the keyboard focus.
+- **Got it** hides it on this device until there is a newer version.
+- **Alt+U** (Option+U on a Mac) takes the keyboard focus to the card, from the chart or a chart of a layout; a screen
+  reader hears that when the card shows.
+- **All changes** opens Connections at App > Updates, which lists up to ten.
+- With several charts open in a layout, the page shows one card, not one per chart.
+- A browser that keeps no site data (private mode, storage full) still closes it with Later or Got it, until the page
+  is opened again.

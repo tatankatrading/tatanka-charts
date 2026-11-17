@@ -266,10 +266,51 @@ h4 { margin: 14px 0 4px; color: var(--fg-dim); font-weight: 600; font-size: 12px
 /* a layout: above the charts' bars (a chart under 760 px wide has its replay bar at its bottom, as a phone), and out
    of the way while a chart's dialog, menu, note or drawing bar is open in its frame */
 body.multi #fired { bottom: calc(118px + env(safe-area-inset-bottom)); }
-body.cell-over #fired { visibility: hidden; }
+body.cell-over #fired, body.cell-note #fired { visibility: hidden; }
 #fired .fired-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
 #fired-list { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow-y: auto; font-weight: 600; }
 #fired-list li + li { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); font-weight: 400; color: var(--fg-dim); }
+/* a newer version on GitHub (app.js, updateNote): stays until Later or Got it, so kept small and out of the way. While
+   the side panel shows beside the chart, it sits at the bottom of the panel's column (.side), covering none of the
+   chart. Otherwise it is over the chart in the fired-alert panel's place and stacking (above the toast's place, under
+   every menu, dialog and chart bar, aside in a layout while a chart's own dialog or menu is open), with fewer titles
+   (app.js, updRoom), and never more than 45% of the screen's height; that panel shows above it while both are up
+   (--upd-h: this one's height). Its top stays under the header (--upd-top); what doesn't fit scrolls. Over the chart
+   it stops 8 px short of the chart's price axis (app.js, updPlace: --upd-r, its right, and --upd-w, its width, as the
+   axis is drawn; before that, a usual axis' 72 px and the 8 kept clear), and in a layout inside the chart it is over. */
+#upd { --upd-b: calc(66px + env(safe-area-inset-bottom)); position: fixed; right: var(--upd-r, calc(80px + env(safe-area-inset-right))); bottom: var(--upd-b); z-index: 4;
+  width: var(--upd-w, min(360px, calc(100% - 96px)));
+  max-height: min(45dvh, calc(100dvh - var(--upd-b) - var(--upd-top, 120px))); overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5); font-size: 13px; line-height: 1.3; animation: upd-in .18s ease-out; }
+#upd[hidden] { display: none; }
+#upd > * { flex: none; }   /* nothing squeezed to nothing: the card scrolls instead */
+#upd p { margin: 0; }
+#upd .upd-hd { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; }   /* the title and the count: a line */
+#upd-title { font-size: 14px; color: var(--accent-hi); }
+#upd-count, #upd-more, #upd-how { color: var(--fg-dim); }
+#upd-list { margin: 0; padding-left: 18px; }
+#upd-list li::marker { color: var(--accent); }
+#upd-list li span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }   /* a title a line (all of it on hover, and in Connections) */
+#upd-how { font-size: 12px; overflow-wrap: anywhere; }
+#upd-how code { font: 11.5px var(--code); color: var(--fg); }
+#upd .upd-ft { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 2px; }   /* narrow: All changes a line of its own, the two buttons under it */
+#upd .upd-bt { display: flex; gap: 8px; margin-left: auto; }
+#upd .upd-ft .link { margin-right: auto; border: 0; background: none; padding: 5px 2px; color: var(--accent-hi); text-decoration: underline; text-underline-offset: 2px; }
+#upd .upd-ft .primary:focus-visible { outline-color: var(--fg); outline-offset: 2px; }   /* the gold button's ring: seen apart from its edge */
+#upd.side { --upd-b: calc(8px + env(safe-area-inset-bottom)); right: 8px; width: min(360px, calc(var(--side-w, 330px) - 16px)); max-height: calc(100dvh - var(--upd-b) - var(--upd-top, 120px)); }
+body.upd-on #fired { transform: translateY(calc(-1 * var(--upd-h, 0px) - 8px)); }
+body.multi #upd:not(.side) { --upd-b: calc(118px + env(safe-area-inset-bottom)); }
+body.cell-over #upd:not(.side) { visibility: hidden; }
+@keyframes upd-in { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { #upd { animation: none; } }
+/* a phone: a card across the bottom, 16 px in from the left, to the price axis (a layout's window made as narrow keeps
+   it inside the chart it is over, as a wider one does: app.js, updPlace) */
+@media (max-width: 600px) {
+  body:not(.multi) #upd { left: calc(16px + env(safe-area-inset-left)); width: auto; }
+}
+@media (max-width: 600px), (hover: none) { #upd .upd-ft button { min-height: 40px; } #upd .upd-ft button:not(.link) { min-width: 64px; } }   /* a finger's size */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 @media (max-width: 760px) {
   #replay-bar { left: 4px; right: 4px; transform: none; max-width: none; bottom: 32px; gap: 4px; padding: 4px 6px; font-size: 12px; }
@@ -306,6 +347,7 @@ body.cell-over #fired { visibility: hidden; }
   body.side-page #top, body.side-page #ctabs { display: none; }
   #toast { bottom: calc(52px + env(safe-area-inset-bottom)); }   /* above the page bar */
   #fired { right: 8px; left: 8px; width: auto; bottom: calc(118px + env(safe-area-inset-bottom)); }   /* above a toast of two lines */
+  #upd { --upd-b: calc(118px + env(safe-area-inset-bottom)); }   /* in the fired-alert panel's place */
   #top { gap: 5px; row-gap: 6px; }
   /* two rows: symbol, timeframe, session, price and the connection dot; then the tools as icons */
   #brand { order: 1; } #sym { order: 2; } #tf { order: 3; position: static; } #rth-btn { order: 4; }

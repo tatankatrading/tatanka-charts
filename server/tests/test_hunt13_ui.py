@@ -229,7 +229,8 @@ function el(tag = 'div') {
   if (tag === 'iframe') {   // a chart: what is open in it, as its page's querySelector finds it
     e.open = null;
     e.contentWindow = { postMessage() {} };
-    e.contentDocument = { body: {}, querySelector: (s) => { e.asked = s; return e.open; } };
+    e.contentDocument = { body: {}, querySelector: (s) => { e.asked.push(s); return e.open; } };
+    e.asked = [];
   }
   return e;
 }
@@ -243,7 +244,7 @@ const ctx = { console, localStorage: { getItem: (k) => store[k] ?? null, setItem
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(WEB + '/layout.js', 'utf8') + ';this.cw = createWorkspaces;', ctx);
 ctx.cw({ api: async () => ({ workspaces: [] }), toast() {}, fail() {}, ask: async () => null, local: { get: (k, d) => d, set() {} }, onActive() {}, reload() {} });
-const frames = els.grid.children, body = ctx.document.body, over = () => body.classList.contains('cell-over');
+const frames = els.grid.children, body = ctx.document.body, over = () => body.classList.contains('cell-over') && body.classList.contains('cell-note');
 frames.forEach((f) => (f.listeners.load || []).forEach((g) => g()));   // the charts load
 const out = { frames: frames.length, start: over(),
   watched: observed.map((o) => [frames.findIndex((f) => f.contentDocument.body === o.node), o.opts.subtree, o.opts.attributeFilter]) };
@@ -254,7 +255,7 @@ out.open = over();
 frames[3].open = null;
 changed(3);
 out.closed = over();
-out.asked = frames[3].asked;
+out.asked = frames[3].asked.join(', ');
 console.log(JSON.stringify(out));
 """
 
@@ -272,5 +273,7 @@ def test_in_a_layout_the_panel_steps_aside_for_a_charts_dialog_menu_or_note():
     asked = {s.strip() for s in out["asked"].split(",")}
     assert {".modal:not([hidden])", "#ctx:not([hidden])", ".menu:not([hidden])", "#tf-menu:not([hidden])",
             "#draw-edit:not([hidden])", "#toast.show"} <= asked
-    assert decl("body.cell-over #fired", "visibility") == "hidden"
+    # a dialog or menu (cell-over) and a note (cell-note): the panel steps aside for both; the update card over the
+    # charts for a dialog or menu only, and not at all in the side panel's column (test_update_popup.py)
+    assert decl("body.cell-over #fired", "visibility") == "hidden" and decl("body.cell-note #fired", "visibility") == "hidden"
     assert bottom_px("body.multi #fired") >= bottom_px("#fired", PHONE)

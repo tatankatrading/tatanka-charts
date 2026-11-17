@@ -155,7 +155,7 @@ def test_a_future_opened_is_added_live(tmp_path, monkeypatch):
         assert [x["symbol"] for x in c.get("/api/instruments/config").json()["instruments"]][-1] == "RTY"   # kept
         assert not c.get("/api/instruments/config").json()["pending"]
 
-        assert hello.get("update") == {"behind": None, "latest": ""}   # the update note's state, for pages opened later
+        assert hello.get("update") == {"behind": None, "latest": "", "changes": []}   # the update card's state, for pages opened later
         # Connections: one more added there applies at once too; a removal still asks for the restart
         st0 = c.get("/api/instruments/config").json()
         rows = st0["instruments"]
