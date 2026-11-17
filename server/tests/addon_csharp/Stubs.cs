@@ -1,5 +1,6 @@
 // Stand-ins for the parts of NinjaTrader's API the add-on (ninjatrader/TatankaChartFeed.cs) uses, enough to compile it
-// with mono and drive it (Harness.cs, tests/test_hunt5_journal.py).
+// with mono and drive it (Harness.cs, tests/test_hunt5_journal.py). BarsRequest answers as a harness says
+// (HistoryHarness.cs): NinjaTrader's error (Panic), nothing, trades, bars, or no answer at all.
 using System;
 using System.Collections.Generic;
 
@@ -13,7 +14,8 @@ namespace NinjaTrader.NinjaScript
 		public string Description { get; set; }
 		public State State { get; set; }
 		protected virtual void OnStateChange() { }
-		public void Print(string s) { Console.Error.WriteLine("[NT] " + s); }
+		public static readonly List<string> Printed = new List<string>();   // NinjaScript Output, for a harness to read
+		public void Print(string s) { Console.Error.WriteLine("[NT] " + s); lock (Printed) Printed.Add(s); }
 	}
 }
 
@@ -55,7 +57,7 @@ namespace NinjaTrader.Cbi
 
 	public enum MarketPosition { Long, Short, Flat }
 	public enum ConnectionStatus { Connected, Disconnected }
-	public enum ErrorCode { NoError, Other }
+	public enum ErrorCode { NoError, Other, Panic }
 
 	public class Execution
 	{
@@ -148,22 +150,43 @@ namespace NinjaTrader.Data
 
 	public class Bars
 	{
-		public int Count = 0;
-		public DateTime GetTime(int i) { return DateTime.MinValue; }
-		public long GetVolume(int i) { return 0; }
-		public double GetOpen(int i) { return 0; }
-		public double GetHigh(int i) { return 0; }
-		public double GetLow(int i) { return 0; }
-		public double GetClose(int i) { return 0; }
+		private readonly List<DateTime> times = new List<DateTime>();
+		private readonly List<double[]> prices = new List<double[]>();
+		private readonly List<long> volumes = new List<long>();
+		public int Count { get { return times.Count; } }
+		public DateTime GetTime(int i) { return times[i]; }
+		public long GetVolume(int i) { return volumes[i]; }
+		public double GetOpen(int i) { return prices[i][0]; }
+		public double GetHigh(int i) { return prices[i][1]; }
+		public double GetLow(int i) { return prices[i][2]; }
+		public double GetClose(int i) { return prices[i][3]; }
+		public void Add(DateTime time, double o, double h, double l, double c, long volume)
+		{
+			times.Add(time);
+			prices.Add(new[] { o, h, l, c });
+			volumes.Add(volume);
+		}
 	}
 
 	public class BarsRequest : IDisposable
 	{
+		// How NinjaTrader answers (a harness's): the code to answer with, its Bars filled for NoError; null, no answer at
+		// all. Unset: NoError and no bars.
+		public static Func<BarsRequest, ErrorCode?> Answer;
+		public static int Asked;   // requests made so far
+		public readonly Instrument Instrument;
+		public readonly DateTime From, To;
 		public BarsPeriod BarsPeriod;
 		public object TradingHours;
 		public Bars Bars = new Bars();
-		public BarsRequest(Instrument i, DateTime from, DateTime to) { }
-		public void Request(Action<BarsRequest, ErrorCode, string> done) { done(this, ErrorCode.NoError, ""); }
+		public BarsRequest(Instrument i, DateTime from, DateTime to) { Instrument = i; From = from; To = to; }
+		public void Request(Action<BarsRequest, ErrorCode, string> done)
+		{
+			System.Threading.Interlocked.Increment(ref Asked);
+			Func<BarsRequest, ErrorCode?> answer = Answer;
+			ErrorCode? code = answer == null ? ErrorCode.NoError : answer(this);
+			if (code.HasValue) done(this, code.Value, code.Value == ErrorCode.NoError ? "" : "(harness)");
+		}
 		public void Dispose() { }
 	}
 }

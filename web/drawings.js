@@ -1108,6 +1108,7 @@ function createDrawings(env) {
       if (k === 'alertOn') el.checked = !!d.alert?.on;
       else if (k === 'tabOnly') { el.checked = !!d.style.tab; el.disabled = !env.tab?.(); }
       else if (k === 'alertDir') el.value = d.alert?.direction || 'cross';
+      else if (k === 'alertFreq') freqPick(el, d.alert);
       else if (k === 'levels') el.value = (d.style.levels || (d.type === 'fibext' ? FIB_EXT_LEVELS : FIB_LEVELS)).join(', ');
       else if (k === 'tpl' || /^pt\d$/.test(k)) return;   // the points' prices: renderPts
       else if (el.type === 'checkbox') el.checked = !!d.style[k];
@@ -1119,6 +1120,30 @@ function createDrawings(env) {
     lk.title = d.style.locked ? 'Locked: click to unlock' : 'Lock: it can no longer be moved';
     const a = env.alerts().find((x) => x.kind === 'line' && x.params?.drawing === d.id);
     ed.querySelector('.alert-state').textContent = !d.alert?.on ? '' : !a ? '' : a.enabled ? 'armed' : 'fired';
+  }
+  // How often a line's alert fires (its alert's repeat and every_min, as the Alerts dialog's Trigger): once, every time
+  // (at most once a minute, so no "once a minute" beside it), or at most once every N minutes, N one of these or typed
+  // (every … min: 1 to 1440). Changed on a line that fired, it restarts the alert (the server's _sync_drawing_alert).
+  const FREQ = [['once', 'once'], ['repeat', 'every time'], ['5', 'every 5 min'], ['15', 'every 15 min'],
+    ['30', 'every 30 min'], ['60', 'once an hour']];
+  function freqPick(el, al) {
+    const n = al?.repeat ? al.every_min || 0 : 0, v = !al?.repeat ? 'once' : n ? String(n) : 'repeat';
+    const opts = FREQ.map(([val, text]) => new Option(text, val));
+    if (!FREQ.some(([val]) => val === v)) opts.push(new Option(`every ${n} min`, v));
+    el.replaceChildren(...opts, new Option('every … min', 'custom'));
+    el.value = v;
+  }
+  async function askEvery(d) {   // every … min: the minutes typed
+    flushEdit();
+    const was = d.alert?.repeat && d.alert.every_min, bad = (n) => !(Number.isInteger(n) && n >= 1 && n <= 1440);
+    const v = env.ask ? await env.ask({ title: 'Alert at most once every … minutes', value: String(was || 10), ok: 'Set', placeholder: '1 to 1440', type: 'number' })
+      : prompt('Minutes between alerts (1 to 1440)', String(was || 10));
+    const n = Number(v), cur = D.list.get(d.id);
+    if (v != null && bad(n)) env.toast('Minutes between alerts: a whole number from 1 to 1440');
+    if (v == null || bad(n) || !cur) { renderEdit(); return; }   // cancelled, or deleted meanwhile (here or elsewhere)
+    const before = clone(cur);
+    cur.alert = { ...(cur.alert || {}), repeat: true, every_min: n };
+    save(cur, before, env.symbol());
   }
   // Typing (a price, a label, a color) saves once it pauses, as one undo step from before the first keystroke, on the
   // symbol it was typed on (another may be open by the time it saves).
@@ -1155,6 +1180,13 @@ function createDrawings(env) {
       d.alert = el.checked ? { ...a, ...lineLayout(d) } : a;
     }
     else if (k === 'alertDir') d.alert = { ...(d.alert || {}), direction: el.value };
+    else if (k === 'alertFreq') {   // once, every time, or once every N minutes
+      if (el.value === 'custom') { askEvery(d); return; }
+      const a = { ...(d.alert || {}), repeat: el.value !== 'once' };
+      delete a.every_min;
+      if (/^\d+$/.test(el.value)) a.every_min = Number(el.value);
+      d.alert = a;
+    }
     else if (k === 'tabOnly') { const s = { ...d.style }; delete s.tab; if (el.checked && env.tab?.()) s.tab = env.tab(); d.style = s; }
     else if (k === 'levels') {
       const lv = el.value.split(/[,\s]+/).filter(Boolean).map(Number);

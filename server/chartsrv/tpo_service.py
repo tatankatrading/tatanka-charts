@@ -2,7 +2,8 @@
 
 The chart's N-minute bars are rebuilt from stored 1-minute bars the way the chart builds them (aligned to the
 17:00 CT open, the last one cut at the 16:00 close; on an RTH chart only the regular hours, aligned to the RTH open
-and cut at the RTH close, as NinjaTrader on an RTH trading-hours template) and stamped with their close time, as on
+and cut at the RTH close, as NinjaTrader on an RTH trading-hours template; a bar a holiday's halt or early close cuts
+short ends there, as NinjaTrader ends a partial holiday's session) and stamped with their close time, as on
 NinjaTrader. Each bar sees the daily ATR(10) of the completed sessions before its own, as the indicator's daily
 series does (on an RTH chart, daily bars of the regular hours). Only closed bars are processed
 (Calculate.OnBarClose). Results are recomputed per request: the chart asks again when one of its bars closes."""
@@ -48,10 +49,20 @@ def rth_day(session_open: int, rth: tuple[str, str]) -> tuple[int, int]:
     return RthClock(rth).window(sessions.to_ct(session_open + 16 * sessions.HOUR_MS))
 
 
-def chart_bars(minute_bars, minutes: int, rth: tuple[str, str] | None = None) -> list[list]:
+def bar_end(k: int, period: int, end: int, calendar: str | None = None) -> int:
+    """Where a chart bar opening at k ends: a period later, cut at its session's end (end: 16:00 CT, or an RTH chart's
+    RTH close), and given calendar (the instrument's holiday group) at a holiday's halt or early close inside it, as
+    NinjaTrader ends a partial holiday's last bar there (CL's 13:00 1h bar at Thanksgiving's 13:30 halt)."""
+    e = min(k + period, end)
+    return sessions.first_closure(k + 1, e, calendar) if calendar else e
+
+
+def chart_bars(minute_bars, minutes: int, rth: tuple[str, str] | None = None,
+               calendar: str | None = None) -> list[list]:
     """[open ms, close ms, high, low, session open ms, open, close] per N-minute chart bar, bucketed like
     TimeSeries. rth: the instrument's regular hours, for an RTH chart's bars (TimeSeries with rth_only): only the
-    minutes inside them, counted from each day's RTH open (the session open) and the last bar cut at its close."""
+    minutes inside them, counted from each day's RTH open (the session open) and the last bar cut at its close.
+    calendar: the instrument's holiday group, a bar cut short by a halt or early close ending there (bar_end)."""
     period = minutes * 60_000
     clock = SessionClock()
     hours = RthClock(rth) if rth else None
@@ -81,7 +92,7 @@ def chart_bars(minute_bars, minutes: int, rth: tuple[str, str] | None = None) ->
             continue
         if s_end[0] != s:
             s_end = (s, window[1] if hours else session_end(s))
-        cur = [k, min(k + period, s_end[1]), m.h, m.l, s, m.o, m.c]
+        cur = [k, bar_end(k, period, s_end[1], calendar), m.h, m.l, s, m.o, m.c]
         out.append(cur)
     return out
 
@@ -90,8 +101,9 @@ class BarBuilder:
     """chart_bars as the minutes come, a minute again as it forms: each minute's chart bar (its index, open, close time,
     open, high, low, close so far) as chart_bars has it, or None (outside an RTH chart's hours, or a minute already passed)."""
 
-    def __init__(self, minutes: int, rth: tuple[str, str] | None = None):
+    def __init__(self, minutes: int, rth: tuple[str, str] | None = None, calendar: str | None = None):
         self.period = minutes * 60_000
+        self.calendar = calendar
         self.clock = SessionClock()
         self.hours = RthClock(rth) if rth else None
         self.day, self.window, self.s_end = None, (0, 0), (0, 0)
@@ -119,7 +131,7 @@ class BarBuilder:
             if self.s_end[0] != s:
                 self.s_end = (s, self.window[1] if self.hours else session_end(s))
             self.index += 1
-            self.key, self.close, self.mins = k, min(k + self.period, self.s_end[1]), {}
+            self.key, self.close, self.mins = k, bar_end(k, self.period, self.s_end[1], self.calendar), {}
         self.mins[m.t] = (m.o, m.h, m.l, m.c)
         first = self.mins[min(self.mins)]
         last = self.mins[max(self.mins)]
@@ -180,11 +192,12 @@ class Daily:
 
 
 def run(s: dict, tick: float, minutes: int, minute_bars, daily: Daily, now_ms: int, record: list | None = None,
-        rth: tuple[str, str] | None = None):
-    """Feeds closed chart bars to a TpoProfile (rth: an RTH chart's, its sessions the regular ones). Returns the
-    profile and each processed bar's open by close time."""
+        rth: tuple[str, str] | None = None, calendar: str | None = None):
+    """Feeds closed chart bars to a TpoProfile (rth: an RTH chart's, its sessions the regular ones; calendar: the
+    instrument's holiday group, a bar ending at a halt or early close). Returns the profile and each processed bar's
+    open by close time."""
     eng = tpo.TpoProfile(s, tick)
-    bars = chart_bars(minute_bars, minutes, rth)
+    bars = chart_bars(minute_bars, minutes, rth, calendar)
     open_of: dict = {}
     prev_sess = None
     shown = 0
@@ -261,8 +274,10 @@ class TpoService:
             start = previous_session_start(start)
         db = self.m.store.path
         daily = self.daily_for(sym, cur, bool(rth), replay)
-        eng, open_of = run(s, tick, minutes, chain(iter_bars_1m(db, sym, start, split), live), daily, now, rth=rth)
-        return payload(eng, open_of, minutes)
+        eng, open_of = run(s, tick, minutes, chain(iter_bars_1m(db, sym, start, split), live), daily, now, rth=rth,
+                           calendar=self.m.instruments[sym].calendar)
+        # the Session Time it ran (own_hours: moved to the instrument's hours, or as typed), as the Studies panel says
+        return {**payload(eng, open_of, minutes), "session": s["SessionTime"]}
 
     def forget(self, sym: str):
         """The symbol's history changed (a gap fill): its daily bars are read again, bar replay's too."""

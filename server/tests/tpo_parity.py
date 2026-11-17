@@ -1,12 +1,15 @@
 """Parity check: chartsrv/tpo.py against the original C# TPO Profile code (compiled with mono).
 
     tests/tpo_csharp/build.sh <tatanka-indicators checkout> <workdir>
-    python tests/tpo_parity.py <workdir> [days] [minutes] [seed] [root] [settings json] [rth] [zone=<IANA name>]
+    python tests/tpo_parity.py <workdir> [days] [minutes] [seed] [root] [settings json] [rth] [zone=<IANA name>] [holidays]
 
 Generates synthetic 1-minute Globex data, runs it through tpo_service.run (recording every input the
 indicator sees: daily bars, then each closed chart bar with its close stamp), replays the record through
 both engines and compares every value they produce. rth: an RTH chart's bars, sessions and daily bars (the
-instrument's regular hours), as on an RTH trading-hours template. Use Instrument Hours (UseInstrumentHours, on by default):
+instrument's regular hours), as on an RTH trading-hours template. holidays: the days generated end on Dec 1 2026, with
+config/holidays.json's halts and early closes for the root (no minutes in them), so they hold Thanksgiving and the day
+after: a bar a halt or early close cuts short ends there, as NinjaTrader ends a partial holiday's session.
+Use Instrument Hours (UseInstrumentHours, on by default):
 the port runs Session Time at the root's own hours (tpo_service.own_hours, config/futures.json's), the C# (v1.1.0) moves it
 itself from the typed one and the root (RunSessionTime, its own table) and both print the session it runs; a v1.0.0 C#
 runs it as typed, so it matches with UseInstrumentHours false only.
@@ -30,12 +33,14 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from amt_parity import synth                  # noqa: E402
-from chartsrv import tpo                      # noqa: E402
+from chartsrv import sessions, tpo            # noqa: E402
+from chartsrv.config import load_holidays     # noqa: E402
 from chartsrv.tpo_service import Daily, own_hours, run   # noqa: E402
 
 ROOTS = {"ES": (0.25, 6800.0), "NQ": (0.25, 25000.0), "CL": (0.01, 65.0), "GC": (0.10, 3500.0), "SI": (0.005, 40.0)}
 RTHS = {"ES": ("08:30", "15:00"), "NQ": ("08:30", "15:00"), "CL": ("08:00", "13:30"), "GC": ("07:20", "12:30"),
         "SI": ("07:25", "12:25")}
+CALENDARS = {"ES": "equity", "NQ": "equity", "CL": "energy", "GC": "metals", "SI": "metals"}
 D = lambda x: repr(float(x))
 T = lambda t: "MIN" if t == tpo.DMIN else t.strftime("%Y-%m-%dT%H:%M:%S")
 PT = lambda s: datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
@@ -146,7 +151,7 @@ def replay_python(rec_path, s, rth):
 
 def main():
     zone = next((a[5:] for a in sys.argv if a.startswith("zone=")), None)
-    argv = [a for a in sys.argv if a != "rth" and not a.startswith("zone=")]
+    argv = [a for a in sys.argv if a not in ("rth", "holidays") and not a.startswith("zone=")]
     work = Path(argv[1])
     days = int(argv[2]) if len(argv) > 2 else 40
     minutes = int(argv[3]) if len(argv) > 3 else 5
@@ -155,11 +160,15 @@ def main():
     s = tpo.settings(json.loads(argv[6]) if len(argv) > 6 else {})
     rth = RTHS[root] if "rth" in sys.argv else None
     tick, price = ROOTS[root]
-    bars = synth(days, seed, datetime(2026, 10, 16, 12, 7), tick, price)
-    daily = Daily("equity", rth)
+    calendar = CALENDARS[root] if "holidays" in sys.argv else None
+    bars = synth(days, seed, datetime(2026, 12, 1, 12, 7) if calendar else datetime(2026, 10, 16, 12, 7), tick, price)
+    if calendar:
+        sessions.set_calendar(load_holidays(Path(__file__).resolve().parents[2] / "config"))
+        bars = [b for b in bars if sessions.is_open(b.t, calendar) and not sessions._no_session(b.t)]
+    daily = Daily(calendar or "equity", rth)
     daily.add_minutes(bars, 2**62)
     rec = []
-    run(own_hours(s, RTHS[root]), tick, minutes, bars, daily, 2**62, rec, rth)
+    run(own_hours(s, RTHS[root]), tick, minutes, bars, daily, 2**62, rec, rth, calendar)
     rec_path, cs_out = work / "tpo_record.txt", work / "tpo_cs.txt"
     write_record(rec, s, tick, rec_path, root)
     cs_rec = rec_path
@@ -204,7 +213,7 @@ def main():
     steps = sorted({l.split("|")[1] for l in py if l.startswith("T|")}, key=float)
     hours = own_hours(s, RTHS[root])["SessionTime"] if s["FilterByTime"] else "all"
     where = f", NinjaTrader on {zone}: {z_s['SessionTime']} typed, {(ran or [z_s['SessionTime']])[-1]} run there" if zone else ""
-    print(f"PARITY OK: {root} {minutes}m{' RTH' if rth else ''} {hours} (Use Instrument Hours {'on' if s['UseInstrumentHours'] else 'off'}{where}), {days} days, {sum(1 for r in rec if r[0] == 'B')} bars, {saved} profiles, "
+    print(f"PARITY OK: {root} {minutes}m{' RTH' if rth else ''}{' holidays' if calendar else ''} {hours} (Use Instrument Hours {'on' if s['UseInstrumentHours'] else 'off'}{where}), {days} days, {sum(1 for r in rec if r[0] == 'B')} bars, {saved} profiles, "
           f"row heights {steps}, {len(py)} lines; every value equal")
 
 

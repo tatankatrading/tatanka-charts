@@ -7,7 +7,8 @@ One add-on connection at a time, so two NinjaTrader instances can never double t
 and talking, another is turned away (BYE; add-on 12 drops what it queued meanwhile, the first sent it, and tries again
 in 30 s); one gone quiet for QUIET_S is replaced. One with the wrong token is turned away too (BYE|wrong token), and
 its card says so. Timestamps are the add-on's receive time (UTC ms). Ticks older than LIVE_WINDOW_MS (buffered while
-this server was down) are stored and charted but do not trigger alerts."""
+this server was down) are stored and charted but do not trigger alerts. A T line's 7th field (add-on 23, once our V
+line says we take it): NinjaTrader's own time for a trade its gap fill's history holds too (gapfill.copies)."""
 import asyncio
 import hmac
 import logging
@@ -25,7 +26,7 @@ log = logging.getLogger(__name__)
 LIVE_WINDOW_MS = 10_000
 IDLE_TIMEOUT_S = 30        # the add-on sends a heartbeat every 5 s
 QUIET_S = 10               # a connection quiet this long is replaced by a new one; one talking keeps the feed
-ADDON_VERSION = 22         # ninjatrader/TatankaChartFeed.cs's Version: an older one is told to update
+ADDON_VERSION = 23         # ninjatrader/TatankaChartFeed.cs's Version: an older one is told to update; sent in the V line
 CONTRACT_RE = re.compile(r"^[A-Z0-9]{1,8} (\d\d-\d\d|[A-Z]{3}\d\d)$")   # NinjaTrader's names: "ES DEC26" or "ES 12-26"
 
 
@@ -112,6 +113,8 @@ class NinjaTraderFeed:
                 log.info("asked NinjaTrader for history: %s", ", ".join(g.split("|", 2)[1] for g in gaps))
             if gf is not None and hasattr(gf, "next_older") and (older := gf.next_older()):   # a symbol with no gap to fill
                 writer.write((older + "\n").encode())
+            # V: this server's wire version (23+: a T line may carry the trade's own time; an add-on before 23 skips it)
+            writer.write(f"V|{ADDON_VERSION}\n".encode())
             self._send_watch(market, writer)
             await writer.drain()
             while line := await asyncio.wait_for(reader.readline(), IDLE_TIMEOUT_S):
@@ -226,12 +229,13 @@ class NinjaTraderFeed:
         now = int(time.time() * 1000)
         self.stats["last_msg_ms"] = now
         try:
-            if p[0] == "T" and len(p) == 6:
+            if p[0] == "T" and len(p) in (6, 7):   # 7: with NinjaTrader's own time for it (add-on 23, after our V line)
                 sym = p[1]
                 inst = market.instruments.get(sym)
                 if inst is None or sym in getattr(market, "trade_owner", {}):   # another feed supplies it
                     return
                 ts, price, size, side = int(p[2]), float(p[3]), int(p[4]), int(p[5])
+                at = int(p[6]) if len(p) == 7 else None
                 if not (math.isfinite(price) and price > 0) or size <= 0 or side not in (-1, 0, 1):
                     raise ValueError("out of range")
                 if sessions.weekend(ts):   # NinjaTrader replaying its last trade on (re)connecting: no trade then
@@ -239,7 +243,12 @@ class NinjaTraderFeed:
                     return
                 if hasattr(market, "gapfill"):
                     market.gapfill.live(sym, ts)
-                market.on_tick(Tick(sym, ts, inst.round(price), size, side), live=now - ts < LIVE_WINDOW_MS)
+                tk = Tick(sym, ts, inst.round(price), size, side)
+                market.on_tick(tk, live=now - ts < LIVE_WINDOW_MS)
+                # one the add-on marked (older than the second its history stops at: that history brings it too), as
+                # stored (on_tick may have moved it into its session, or left it out), with the stamp it was sent at
+                if at is not None and getattr(market, "last_tick", {}).get(sym) is tk and hasattr(market, "gapfill"):
+                    market.gapfill.early(sym, tk, at, ts)
                 self.stats["ticks"] += 1
             elif p[0] == "E":   # one of your fills (read-only)
                 if hasattr(market, "on_fill"):

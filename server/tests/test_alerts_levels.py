@@ -89,6 +89,75 @@ def test_a_pasted_line_feeds_the_study_and_a_new_one_starts_level_alerts_afresh(
     assert m.fired == []
 
 
+def test_a_new_paste_keeps_the_state_of_each_level_still_at_its_price(tmp_path, monkeypatch):
+    """P fires, and price stays within 2 ticks of it. The levels pasted again with R2 corrected leave P where it was:
+    it stays quiet until price has moved 8 ticks beyond it, as with no paste. R2, moved, takes a first look. A level
+    put in below R1 renames R1 (now R2, at the same price): it keeps R1's state."""
+    m = pasted(tmp_path, monkeypatch)
+    m.store.add_alert("ES", "level", {"levels": "all", "tolerance_ticks": 0, "rearm_ticks": 8}, True, "")
+    m.alerts.reload()
+    msgs = lambda: [e["message"].split(" (")[0] for e in m.fired]   # noqa: E731
+    feed(m, [7822.0, 7821.0, 7820.0, 7820.25, 7820.5])
+    assert msgs() == ["ES touched P 7820.00"]
+    m.daily.set_paste("ES", LINE.replace("7862.50", "7863.00"))   # R2 corrected, P unchanged
+    m.levels_changed()
+    assert m.alerts.armed[(1, "P")] is False and m.alerts.armed[(1, "R1")] is True and (1, "R2") not in m.alerts.armed
+    feed(m, [7820.5, 7820.25, 7820.0])                             # never 8 ticks beyond P: no second alert
+    assert msgs() == ["ES touched P 7820.00"]
+    feed(m, [7822.0, 7820.0])                                      # 8 ticks beyond the band re-arms, as ever
+    assert msgs() == ["ES touched P 7820.00"] * 2
+    feed(m, [7845.0, 7850.0, 7850.5])                              # R1 fires, price stays by it
+    assert msgs()[-1] == "ES touched R1 7850.00"
+    m.daily.set_paste("ES", LINE.replace("7820.00, 7850.00", "7820.00, 7835.00, 7850.00"))   # 7835 put in: R1
+    m.levels_changed()
+    assert m.levels.get("ES").resistance[:2] == (7835.0, 7850.0) and m.alerts.armed[(1, "R2")] is False
+    feed(m, [7850.25, 7850.0])                                     # 7850 (now R2) stays quiet
+    assert len(m.fired) == 3
+
+
+def test_a_level_alert_picks_a_level_by_name_through_a_new_paste(tmp_path, monkeypatch):
+    """An alert on R1 alone: R1 moved onto a price where another level was is a new level to it, with a first look."""
+    m = pasted(tmp_path, monkeypatch)
+    m.store.add_alert("ES", "level", {"levels": ["R1"], "tolerance_ticks": 0, "rearm_ticks": 8}, True, "")
+    m.alerts.reload()
+    feed(m, [7840.0, 7850.0, 7850.5])
+    assert len(m.fired) == 1 and m.alerts.armed[(1, "R1")] is False
+    m.daily.set_paste("ES", LINE.replace("7850.00, 7862.50", "7862.50, 7870.00"))   # R1 now 7862.50
+    m.levels_changed()
+    assert (1, "R1") not in m.alerts.armed and (1, "R2") not in m.alerts.armed
+    feed(m, [7850.5, 7862.5])                                      # a first look, then R1's touch
+    assert [e["message"].split(" (")[0] for e in m.fired][-1] == "ES touched R1 7862.50"
+
+
+def test_a_file_or_link_refresh_and_a_roll_with_level_alerts(tmp_path, monkeypatch):
+    """The levels file rewritten with one level changed keeps the state of the others, as a paste does (a link's new
+    answer goes the same way: DailyLevels.poll, Market.levels_changed). A roll still starts every level afresh: the
+    new contract's first trade is where they look from, and a new file after it brings back nothing from before."""
+    m, folder, _ = generic_market(tmp_path, monkeypatch)
+    (folder / "ES.txt").write_text(LINE)
+    asyncio.run(m.daily.poll())
+    m.store.add_alert("MES", "level", {"levels": "all", "tolerance_ticks": 0, "rearm_ticks": 8}, True, "")
+    m.alerts.reload()
+    feed(m, [7822.0, 7820.0, 7820.5], sym="MES")
+    assert len(m.fired) == 1
+    (folder / "ES.txt").write_text(LINE.replace("7905.00", "7906.00"))   # R5 changed
+    asyncio.run(m.daily.poll())
+    assert m.levels.get("MES").resistance[-1] == 7906.0 and m.alerts.armed[(1, "P")] is False
+    feed(m, [7820.25, 7820.0], sym="MES")
+    assert len(m.fired) == 1
+
+    async def roll():
+        m.on_contract("MES", "MES 12-26")
+        m.on_contract("MES", "MES 03-27")
+    asyncio.run(roll())
+    assert not [k for k in m.alerts.armed if k[0] == 1]
+    (folder / "ES.txt").write_text(LINE)                           # R5 back, before the new contract's first trade
+    asyncio.run(m.daily.poll())
+    assert not [k for k in m.alerts.armed if k[0] == 1]
+    feed(m, [7820.5, 7820.0], sym="MES")                           # the first trade looks; the next touches P
+    assert [e["message"].split(" (")[0] for e in m.fired] == ["MES touched P 7820.00"] * 2
+
+
 def test_a_levels_link_feeds_the_study_and_the_alerts(tmp_path, monkeypatch):
     class Link(FakeHttp):
         async def get(self, url, **kw):
@@ -203,6 +272,9 @@ def test_api_levels_and_level_alerts_from_a_pasted_line(client):
     m.alerts.on_fire, fired = (lambda e: fired.append(e["message"])), []
     feed(m, [7830.0, 7849.5])
     assert [x.split(" (")[0] for x in fired] == ["ES touched R1 7850.00"]
+    client.put("/api/amt/levels/ES", json={"text": LINE.replace("7787.50", "7787.75")})   # S2 corrected: R1 stays
+    feed(m, [7849.0, 7849.5])                    # not 8 ticks beyond R1's band since: no second alert
+    assert len(fired) == 1
     client.put("/api/amt/levels/ES", json={"text": ""})
     assert client.get("/api/levels/ES").status_code == 404
 

@@ -1,7 +1,8 @@
 """Older history from NinjaTrader (gapfill's older requests, add-on 20): from before anything stored, a month at a time,
 in the background back to a year once a symbol's gap is filled, and at once for a chart scrolled back past its stored
-minutes; one request at a time; an empty month is where NinjaTrader's history ends; charts aren't reloaded for it, the
-studies once the year is in. The add-on asks each part of it from its contract by NinjaTrader's roll dates."""
+minutes; one request at a time; an empty month is where NinjaTrader's history ends, an error never is (it puts the
+symbol off, longer each time, until the add-on's next hello); charts aren't reloaded for it, the studies once the year is
+in. The add-on asks each part of it from its contract by NinjaTrader's roll dates."""
 import re
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ import pytest
 
 from chartsrv import sessions
 from chartsrv.feeds.ninjatrader import NinjaTraderFeed
-from chartsrv.gapfill import DAY_MS, OLDER_LIMIT, OLDER_SPAN_MS, OLDER_TRIES
+from chartsrv.gapfill import DAY_MS, OLDER_LIMIT, OLDER_RETRY_MAX_S, OLDER_RETRY_S, OLDER_SPAN_MS
 from chartsrv.models import Bar
 from test_app import client  # noqa: F401  (the app on a database of the test's own)
 from test_hunt10_hold import Writer
@@ -138,7 +139,7 @@ def test_a_late_answer_counts_and_nothing_else_is_asked_for_the_symbol_meanwhile
     assert gf.want_older("ES", 0) == "wait"   # a chart at its first bar told so, not kept polling: asked again on its Z
     assert [ln.split("|")[1] for ln in older_lines(nt)] == ["ES", "NQ"]   # the others go on; ES not asked again
     gf.older_busy = ("NQ", time.monotonic() - 1000)
-    for _ in range(OLDER_TRIES + 1):   # however long: not NinjaTrader's limit, no second request for it (two would mix)
+    for _ in range(4):   # however long: not NinjaTrader's limit, no second request for it (two would mix)
         gf.kick_older()
     assert len(older_lines(nt)) == 2 and m.store.get_setting(OLDER_LIMIT) is None
     got = open_minutes(first - 10 * DAY_MS, 3)
@@ -147,26 +148,52 @@ def test_a_late_answer_counts_and_nothing_else_is_asked_for_the_symbol_meanwhile
     assert older_lines(nt)[-1] == f"GAP|ES|{got[0] - OLDER_SPAN_MS}|{got[0]}|older"   # on back from it
 
 
-def test_an_error_is_not_ninjatraders_limit_unless_it_keeps_failing(market):
+def test_errors_never_set_the_limit_they_put_the_symbol_off_longer_each_time(market):
+    """r23: NinjaTrader answered every request with Panic until it was restarted; three in a row were taken as where its
+    history ends, and nothing older was asked for a week. An error now only puts the symbol off: 10 minutes, doubling
+    with each in a row up to an hour; only an empty month is the limit."""
     m = market
     now = int(time.time() * 1000)
     floor = open_minutes(now - 5 * DAY_MS, 1)[0]
     store(m, "ES", [floor])
     nt = connect(m)
     gf = m.gapfill
-    for i in range(OLDER_TRIES):
+    waits = []
+    for _ in range(6):
         # an error after part of it: none of it kept (the first stored minute would hide the rest)
         sym = older_lines(nt)[-1].split("|")[1]
         for t in open_minutes(floor - 20 * DAY_MS, 2):
             nt._line(m, f"Y|{sym}|{t}|6100|6101|6099|6100.5|7\n".encode())
-        nt._line(m, b"Z|ES|error|0|no data connection\n")
+        t0 = time.monotonic()
+        nt._line(m, b"Z|ES|error|0|Panic\n")
         assert m.store.db.execute("SELECT COUNT(*) FROM bars_1m WHERE symbol='ES'").fetchone()[0] == 1
-        if i < OLDER_TRIES - 1:
-            assert m.store.get_setting(OLDER_LIMIT) is None and gf.want_older("ES", 0) == "wait"
-            gf.older_wait.clear()
-            gf.kick_older()
+        assert m.store.get_setting(OLDER_LIMIT) is None and gf.status["ES"]["state"] == "error"
+        assert gf.want_older("ES", 0) == "wait"
+        waits.append(round(gf.older_wait["ES"] - t0))
+        gf.older_wait["ES"] = 0   # its time comes (the watchdog's pass)
+        gf.kick_older()
+    assert waits == [OLDER_RETRY_S, 2 * OLDER_RETRY_S, 4 * OLDER_RETRY_S] + [OLDER_RETRY_MAX_S] * 3 == [600, 1200, 2400, 3600, 3600, 3600]
+    assert len(older_lines(nt)) == 7
+
+
+def test_the_add_ons_hello_asks_again_at_once_after_errors(market):
+    """NinjaTrader restarted (its Panic over): the add-on's hello asks the older history again now, not an hour later."""
+    m = market
+    now = int(time.time() * 1000)
+    floor = open_minutes(now - 5 * DAY_MS, 1)[0]
+    store(m, "ES", [floor])
+    nt = connect(m)
+    gf = m.gapfill
+    for _ in range(4):
+        nt._line(m, b"Z|ES|error|0|Panic\n")
+        gf.older_wait["ES"] = 0
+        gf.kick_older()
+    nt._line(m, b"Z|ES|error|0|Panic\n")
+    assert gf.want_older("ES", 0) == "wait" and gf.older_wait["ES"] - time.monotonic() > 3000
+    again = connect(m)   # NinjaTrader restarted: the add-on says hello
+    assert older_lines(again) == [f"GAP|ES|{floor - OLDER_SPAN_MS}|{floor}|older"]
+    answer(m, again, older_lines(again)[0], [])   # and an empty month is the limit
     assert m.store.get_setting(OLDER_LIMIT)["ES"][0] == floor and gf.want_older("ES", 0) == "limit"
-    assert len(older_lines(nt)) == OLDER_TRIES
 
 
 def test_a_lost_data_connections_hole_waits_for_the_older_request(market):

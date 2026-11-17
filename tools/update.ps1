@@ -26,10 +26,17 @@ foreach ($f in $clash) {   # yours and the update's on the same lines: the updat
 
 Write-Host '2/3  Rebuilding and restarting the server (docker compose)...' -ForegroundColor Cyan
 $env:CHART_COMMIT = (git rev-parse HEAD).Trim()   # the build knows its version: Connections > Updates
-docker compose up -d --build
+docker compose build
+if ($LASTEXITCODE) { Fail 'docker compose did not work (see above). Is Docker Desktop running?' }
+# Trades a NinjaTrader started mid-session stored twice before add-on 23 (docs/CONNECTIONS.md, "Each trade once"),
+# looked for since the last update's look. Exit 3: some found and listed, asked about at the end; else: nothing to ask.
+docker compose run --rm chart python -m chartsrv.fix_catchup --update
+$found = ($LASTEXITCODE -eq 3)
+docker compose up -d
 if ($LASTEXITCODE) { Fail 'docker compose did not work (see above). Is Docker Desktop running?' }
 
 Write-Host '3/3  The NinjaTrader add-on...' -ForegroundColor Cyan
+$addonUpdated = $false
 $addons = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'NinjaTrader 8\bin\Custom\AddOns'
 if (-not (Test-Path $addons)) {
     Write-Host '     NinjaTrader is not on this PC: skipped. (On the NinjaTrader PC: Connections > NinjaTrader > Download the add-on.)'
@@ -46,9 +53,33 @@ if (-not (Test-Path $addons)) {
         Write-Host '     Already up to date.'
     } else {
         [IO.File]::WriteAllText($dst, $new, (New-Object Text.UTF8Encoding $false))
-        Write-Host '     Updated. NinjaTrader compiles it by itself if its NinjaScript Editor is open;'
-        Write-Host '     otherwise: in NinjaTrader, New > NinjaScript Editor, press F5.'
+        Write-Host '     Updated.'
+        $addonUpdated = $true
+    }
+}
+if ($found) {   # asked last, with the new server running: Ctrl+C here leaves everything else done
+    Write-Host ''
+    # (no one to answer, as with -NonInteractive: not asked, and nothing remembered, so the next update asks)
+    try { $answer = Read-Host 'Fix the trades stored twice listed above now? The server stops for a few minutes. [y/N]' } catch { $answer = $null }
+    if ($null -eq $answer) {
+    } elseif ($answer -match '^\s*y') {
+        docker compose stop chart
+        if ($LASTEXITCODE) {
+            Write-Host '     Not fixed: the server did not stop.' -ForegroundColor Yellow
+        } else {
+            docker compose run --rm chart python -m chartsrv.fix_catchup --update --yes
+            if ($LASTEXITCODE) { Write-Host '     Not fixed (see above).' -ForegroundColor Yellow }
+        }
+        docker compose up -d
+        if ($LASTEXITCODE) { Fail 'docker compose did not start the server again (see above). Is Docker Desktop running?' }
+    } else {
+        docker compose run --rm chart python -m chartsrv.fix_catchup --decline
     }
 }
 Write-Host ''
 Write-Host 'Done. Open pages and the phone app reload by themselves in a few seconds.' -ForegroundColor Green
+if ($addonUpdated) {
+    Write-Host ''
+    Write-Host 'One more step, in NinjaTrader: New > NinjaScript Editor, press F5 (the new add-on runs once it compiles).' -ForegroundColor Yellow
+    Write-Host 'Connections > NinjaTrader in the app turns green when it does. (An editor left open compiles it by itself.)' -ForegroundColor Yellow
+}

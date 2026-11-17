@@ -24,6 +24,7 @@ web/               the app: index.html, app.js, ta.js (standard indicator formul
                    vendored Lightweight Charts 5.1.0
 ```
 
+
 Storage is SQLite in WAL mode (`/data/chart.db` in the container): raw ticks with aggressor side (kept for
 footprint and delta later), 1m bars, alerts and alert history.
 

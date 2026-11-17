@@ -319,3 +319,170 @@ def test_back_from_a_link_to_an_unchanged_file_reads_the_file(tmp_path, monkeypa
             seen.append((src.origin, levels[0].Price))
         assert seen == [("file", 7700.0), ("link", 5000.0), ("file", 7700.0)], file_spec
         assert d.status("ES")["read_ms"] == wed + 10_000
+
+
+class _Stop(BaseException):
+    """Ends DailyLevels.run() at its first pause."""
+
+
+def _kept_levels(store, setting, http, events=None):
+    """_link_levels on a real Store: each change is kept (levels_kept) as Market.levels_changed keeps it, so a new
+    DailyLevels on the same store is a server restart. events: the changes heard (levels_changed)."""
+    from types import SimpleNamespace
+    from chartsrv.config import Instrument
+    m = SimpleNamespace(store=store, http=http, broadcast=lambda msg: None,
+                        amt=SimpleNamespace(settings_value=lambda k: setting["v"], levels_changed=lambda s: None),
+                        instruments={"ES": Instrument("ES", "E-mini", 0.25, 50)})
+    d = dl.DailyLevels(m)
+
+    def changed():
+        d.remember(http.now)
+        if events is not None:
+            events.append(http.now)
+    m.levels_changed = changed
+    return d
+
+
+def _start(d, http, t, monkeypatch):
+    """DailyLevels.run() at t, to its first pause (what a server start does)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    async def stop(_s):
+        raise _Stop
+    monkeypatch.setattr(dl, "time", SimpleNamespace(time=lambda: t / 1000))
+    monkeypatch.setattr(dl.stopping, "pause", stop)
+    http.now = t
+    with pytest.raises(_Stop):
+        asyncio.run(d.run())
+
+
+def test_a_restart_keeps_the_links_last_good_levels_and_asks_until_it_answers(tmp_path, monkeypatch):
+    """Friday the link gave levels. The server restarts on Saturday and its first ask fails (the levels site down): the
+    levels are the ones the link gave last (kept), as NinjaTrader's Toolkit starts from its last-good cache, not none
+    until Sunday's open, and no row of none is kept at the restart. A link that has not answered since the start is
+    asked again on the failure back-off while the market is shut; once it answers, not until the market opens."""
+    import asyncio
+    from chartsrv.store import Store
+    store = Store(tmp_path / "chart.db")
+    line = "2026-11-16, 6800.00, 6820.00, 6840.00, 6780.00, 6760.00\n"
+    setting = {"v": "https://levels.example/l/KEY/{root}.txt"}
+    fri, sat, sun = (lambda h, mi, day=day: _ct(2026, 11, day, h, mi) for day in (13, 14, 15))
+    http = _Link(lambda url, now: (200, line))
+    _start(_kept_levels(store, setting, http), http, fri(14, 0), monkeypatch)
+    kept = [tuple(r) for r in store.db.execute("SELECT date, origin, source, levels FROM levels_kept")]
+    assert kept == [("2026-11-16", "link", "https://levels.example/…/ES.txt",
+                     "[[\"PIVOT\", 6800.0, 0], [\"RES1\", 6820.0, -1], [\"RES2\", 6840.0, -1], [\"SUPP1\", 6780.0, 1], "
+                     "[\"SUPP2\", 6760.0, 1]]")]
+
+    def down_until(back):
+        def answer(url, now):
+            if now < back:
+                raise ConnectionError("levels site down")
+            return 200, line
+        return answer
+    http, events = _Link(down_until(sat(10, 5))), []
+    d = _kept_levels(store, setting, http, events)
+    _start(d, http, sat(10, 0), monkeypatch)
+    st = d.status("ES")
+    assert (st["origin"], st["count"], st["date"]) == ("link", 5, "2026-11-16")
+    assert st["error"] == "Levels link unreachable (ConnectionError): keeping the last good levels."
+    assert [x.Price for x in d.current("ES")[0]] == [6800.0, 6820.0, 6840.0, 6780.0, 6760.0]
+    assert [x.Name for x in d.current("ES")[0]] == ["PIVOT", "RES1", "RES2", "SUPP1", "SUPP2"]
+    assert events == [sat(10, 0)]   # the Daily levels study, level alerts and the Toolkit heard them
+    assert store.db.execute("SELECT COUNT(*) FROM levels_kept").fetchone()[0] == 1   # no row of none at the restart
+    asyncio.run(_poll_until(d, http, sat(10, 0) + 60_000, sun(17, 1), step=60_000))
+    assert [t for t, _ in http.asked] == [sat(10, 0), sat(10, 1), sat(10, 3), sat(10, 7), sun(17, 0)]
+    assert d.status("ES")["error"] == "" and d.status("ES")["count"] == 5
+    assert store.db.execute("SELECT COUNT(*) FROM levels_kept").fetchone()[0] == 1
+
+    # first set on a Saturday with the site down, nothing kept: no levels, and it says so; asked until it answers
+    http = _Link(down_until(sat(10, 5)))
+    d = _kept_levels(Store(tmp_path / "other.db"), setting, http)
+    asyncio.run(_poll_until(d, http, sat(10, 0), sat(10, 1), step=60_000))
+    st = d.status("ES")
+    assert (st["origin"], st["count"]) == ("none", 0)
+    assert st["error"] == "Levels link unreachable (ConnectionError): no levels from it yet."
+    asyncio.run(_poll_until(d, http, sat(10, 1), sat(10, 30), step=60_000))
+    assert [t for t, _ in http.asked] == [sat(10, 0), sat(10, 1), sat(10, 3), sat(10, 7)]
+    assert d.status("ES")["count"] == 5 and d.status("ES")["error"] == ""
+
+
+def test_a_new_file_or_link_never_shows_the_levels_of_the_one_before(tmp_path, monkeypatch):
+    """From a levels file to a new link the levels service refuses (403, 404) or that does not answer: the file's
+    levels are not shown as the link's; none (or the pasted line) until the link answers, as NinjaTrader's Toolkit
+    starts a new source from that link's own cache. The other way, from a link to a file that is missing or bad: none
+    of the link's shown as the file's."""
+    import asyncio
+    docs = tmp_path / "docs"
+    (docs / "lv").mkdir(parents=True)
+    (docs / "lv" / "ES.txt").write_text("2026-11-13, 7700.00, 7720.00, 7680.00\n")
+    monkeypatch.setenv("CHART_DOCUMENTS_DIR", str(docs))
+    file_spec = r"C:\Users\you\Documents\lv\{root}.txt"
+    mon = _ct(2026, 11, 16, 10, 0)
+    for name, answer in (("403", lambda url, now: (403, "", {"X-Tatanka-Levels": "1"})),
+                         ("404", lambda url, now: (404, "", {"X-Tatanka-Levels": "1"})),
+                         ("timeout", lambda url, now: (_ for _ in ()).throw(TimeoutError("timed out")))):
+        setting = {"v": file_spec}
+        http = _Link(answer)
+        d = _link_levels(setting, http)
+        asyncio.run(d.poll(mon))
+        assert (d.status("ES")["origin"], d.status("ES")["count"]) == ("file", 3), name
+        setting["v"] = "https://levels.example/l/NEWKEY/{root}.txt"
+        asyncio.run(_poll_until(d, http, mon + 5000, mon + 60_000))
+        st = d.status("ES")
+        assert (st["origin"], st["count"], st["date"], d.current("ES")[0]) == ("none", 0, None, []), name
+        assert st["error"] and "keeping the last good levels" not in st["error"], name
+        d.set_paste("ES", LINE)
+        assert d.status("ES")["origin"] == "paste" and d.status("ES")["count"] == 7, name
+    # a link to a file that is missing, or bad
+    for bad in (None, "garbage"):
+        setting = {"v": "https://levels.example/l/KEY/{root}.txt"}
+        http = _Link(lambda url, now: (200, LINE))
+        d = _link_levels(setting, http)
+        asyncio.run(d.poll(mon))
+        assert (d.status("ES")["origin"], d.status("ES")["count"]) == ("link", 7)
+        if bad:
+            (docs / "bad").mkdir(exist_ok=True)
+            (docs / "bad" / "ES.txt").write_text(bad)
+        setting["v"] = r"C:\Users\you\Documents\bad\{root}.txt"
+        asyncio.run(d.poll(mon + 5000))
+        st = d.status("ES")
+        assert (st["origin"], st["count"], d.current("ES")[0]) == ("none", 0, []), bad
+        assert st["error"].startswith("No levels file at" if bad is None else r"C:\Users\you\Documents\bad\ES.txt: "), bad
+        assert "Keeping the last good levels" not in st["error"], bad
+
+
+def test_a_restart_with_no_documents_folder_takes_the_pasted_line_not_the_default_files_last_levels(tmp_path, monkeypatch):
+    """Levels File or Link blank: the default file (Documents\\Tatanka\\levels\\{root}.txt) is read only if it exists,
+    else the pasted line, as NinjaTrader's Toolkit. It gave levels, and the server restarts with no Documents folder
+    (not mounted): the levels it gave last are not shown as the file's (nor win over the pasted line), as when the
+    file is gone. An explicit file the server cannot see keeps them, with why."""
+    from chartsrv.store import Store
+    store = Store(tmp_path / "chart.db")
+    docs = tmp_path / "docs"
+    (docs / "Tatanka" / "levels").mkdir(parents=True)
+    (docs / "Tatanka" / "levels" / "ES.txt").write_text("2026-11-16, 7700.00, 7720.00, 7680.00\n")
+    monkeypatch.setenv("CHART_DOCUMENTS_DIR", str(docs))
+    setting = {"v": ""}
+    http = _Link(lambda url, now: (200, ""))
+    mon = _ct(2026, 11, 16, 9, 0)
+    _start(_kept_levels(store, setting, http), http, mon, monkeypatch)
+    assert [tuple(r) for r in store.db.execute("SELECT origin, source FROM levels_kept")] == [
+        ("file", dl.DEFAULT_FILE.replace("{root}", "ES"))]
+    monkeypatch.setenv("CHART_DOCUMENTS_DIR", str(tmp_path / "not-mounted"))
+    d = _kept_levels(store, setting, http)
+    _start(d, http, mon + 3_600_000, monkeypatch)
+    assert (d.status("ES")["origin"], d.status("ES")["count"], d.current("ES")[0]) == ("none", 0, [])
+    d.set_paste("ES", LINE)
+    assert (d.status("ES")["origin"], d.status("ES")["count"]) == ("paste", 7)
+    # the same file named in the setting: it is the source, so its last good levels stay, with why
+    setting["v"] = dl.DEFAULT_FILE
+    store2 = Store(tmp_path / "explicit.db")
+    monkeypatch.setenv("CHART_DOCUMENTS_DIR", str(docs))
+    _start(_kept_levels(store2, setting, http), http, mon, monkeypatch)
+    monkeypatch.setenv("CHART_DOCUMENTS_DIR", str(tmp_path / "not-mounted"))
+    d = _kept_levels(store2, setting, http)
+    _start(d, http, mon + 3_600_000, monkeypatch)
+    st = d.status("ES")
+    assert (st["origin"], st["count"]) == ("file", 3) and "outside Documents" in st["error"]

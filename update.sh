@@ -16,5 +16,26 @@ for f in $clash; do   # yours and the update's on the same lines: the update's i
   fi
 done
 echo "2/2  Rebuilding and restarting the server (docker compose)..."
-CHART_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
+CHART_COMMIT=$(git rev-parse HEAD) docker compose build
+# Trades a NinjaTrader started mid-session stored twice before add-on 23 (docs/CONNECTIONS.md, "Each trade once"),
+# looked for since the last update's look. Exit 3: some found and listed, asked about below; else: nothing to ask.
+found=0
+docker compose run --rm chart python -m chartsrv.fix_catchup --update || found=$?
+docker compose up -d
+# asked with the new server running; no terminal (or no answer): not asked, nothing remembered, the next update asks
+if [ "$found" -eq 3 ] && [ -t 0 ]; then
+  printf 'Fix the trades stored twice listed above now? The server stops for a few minutes. [y/N] '
+  if read -r answer; then
+    case "$(printf '%s' "$answer" | tr -d ' \t')" in
+      [yY]*) if docker compose stop chart; then
+               docker compose run --rm chart python -m chartsrv.fix_catchup --update --yes ||
+                 echo "     Not fixed (see above)."
+             else
+               echo "     Not fixed: the server did not stop."
+             fi
+             docker compose up -d ;;
+      *) docker compose run --rm chart python -m chartsrv.fix_catchup --decline || true ;;
+    esac
+  fi
+fi
 echo "Done. Open pages and the phone app reload by themselves in a few seconds."

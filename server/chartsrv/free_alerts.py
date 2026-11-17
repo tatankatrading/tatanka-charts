@@ -128,7 +128,8 @@ class FreeAlerts:
 
     def moved(self, key: str, ts: int):
         """`key`'s quote (or a live future's trade, key "ES1!") changed: the alerts it is part of are checked. ts: when
-        (the value's arrival: the expiry, the repeat's minute and the time it fired at are the clock's)."""
+        (the value's arrival: the expiry, the repeat's minute or N minutes and the time it fired at are the
+        clock's)."""
         for s in self.keys.get(key, ()):
             self._check(s, ts)
 

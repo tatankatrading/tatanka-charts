@@ -451,7 +451,8 @@ def test_times_are_placed_as_ninjatraders_get_x_by_time():
 def test_the_data_window_has_each_profiles_plots_at_the_bar():
     """POC, VAH and VAL in the data window for the bar under the crosshair, as NinjaTrader's Data Box has the plots:
     SVP's the session's as of the bar's close (the last bar: now), to a tick; AAVP's and PVP's only on the bars that formed
-    while it ran and the last one at load (NinjaTrader resets them on history), each at its latest. A hidden one, none."""
+    while it ran and the last one at load (NinjaTrader resets them on history; the one before it too when loaded while
+    it forms: test_hunt22_vp), each at its latest. A hidden one, none."""
     from test_hunt_web_chart import app_part
     js = js_part("svpAt") + "\n".join(app_part(n) for n in ("vpViewKey", "vpBarKey", "vpLiveNote", "vpBarValues", "vpDataCells")) + """
 const M = 60e3, P = 5 * M, tick = 0.25;
@@ -465,6 +466,7 @@ const vpKeys = () => ['prof', 'aavp', 'pvp_2', 'pvp'], baseOf = (k) => k.replace
 const vpBase = (k) => ({ kind: baseOf(k), periodMs: P, d: baseOf(k) === 'prof' ? { sessions } : {}, set: {}, key: k });
 const vpLatest = (st) => latest[st.key] ? { ...latest[st.key] } : null;
 const barCloseMs = (b) => b.t + P, pxTick = (p) => (Math.round(p / tick) * tick).toFixed(2);
+const isTime = () => true, calSpec = () => false;   // loaded long after these bars: the last bar only
 const out = {};
 vpLiveNote('aavp'); vpLiveNote('pvp_2');            // the answers at load: the last bar
 out.load = [0, 1, 2, 3].map((i) => vpDataCells(i));
@@ -582,7 +584,8 @@ def test_svp_forming_sessions_per_bar_values_take_a_late_trade(tmp_path, monkeyp
     a, b = asyncio.run(go())
     assert a["sessions"][-1]["dev"][-1][0] == _ct(14, 9)   # the 09:00 minute was fed by the first request
     cur = b["sessions"][-1]
-    fresh = vp_service.svp_dev(next(iter(svc.entries.values())).state.mins, 0.25, *sk)
+    st, = next(iter(svc.entries.values())).state.values()   # the forming session's state
+    fresh = vp_service.svp_dev(st.mins, 0.25, *sk)
     assert cur["dev"] == fresh and cur["dev_to"] == _ct(14, 9, 1)
     at9 = [v for v in cur["dev"] if v[0] <= _ct(14, 9)][-1]
     assert at9[1] == 7002.0 == cur["poc"]
@@ -929,6 +932,7 @@ const S = { vpSet: { aavp: { AnchorPeriod: 'Session' } }, st: { dsma: false, aav
 const vpHeld = {}, vpBusy = {}, vpPrims = { aavp: prim }, ax = { zone: 'America/Chicago' }, REPLAY_RID = 'r';
 const baseOf = (k) => k, indReady = () => true, replayUntil = noop, vpPrim = () => prim, vpKeys = () => ['aavp'];
 const vpBase = (k) => ({ kind: 'aavp', d: S.vp[k] }), vpLatest = (st) => st.d.profile;
+const isTime = () => true, calSpec = () => false, barCloseMs = (b) => b.t + 300e3;   // bars long closed (test_hunt22_vp)
 const TPO_DRAWING = [], instKeys = () => [];
 const [indSets, tpoRequest, renderTpoInfo, gapRequest, renderGapInfo, dsmaDraw, dsmaRequest, ifRequest, renderVpInfo, amtLayout,
   renderIfInfo, renderLlInfo, legend] = Array(13).fill(noop);

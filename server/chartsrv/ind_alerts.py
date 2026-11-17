@@ -4,9 +4,10 @@ crossing, crossing up, crossing down, above or below a value or another series.
 The formulas are NinjaTrader 8's, the same as the chart's (ta.py, web/ta.js), so an alert fires on the value the chart
 shows. Each (symbol, timeframe) with an indicator alert gets its own series, built from history as a chart's is, and
 keeps running with no chart open. Checked when a bar closes (TradingView's "Once Per Bar Close"), or on every trade
-with the forming bar's value, at most once a bar ("Once Per Bar"). A series is {ind, line, its settings} (any
-indicator in ta.IND), or as saved before there were more: {ind: ema|sma, len}, {ind: rsi|rsi_avg, len, smooth},
-{ind: macd|macd_avg|macd_diff, fast, slow, smooth}.
+with the forming bar's value, at most once a bar ("Once Per Bar"); Once every N minutes adds a gap of N minutes from the
+last fire on top (alerts.AlertEngine._ind_waits). A series is {ind, line, its settings} (any indicator in ta.IND), or as
+saved before there were more: {ind: ema|sma, len}, {ind: rsi|rsi_avg, len, smooth}, {ind: macd|macd_avg|macd_diff,
+fast, slow, smooth}.
 
 An alert's first look (after a restart, a gap fill, turning it on) steps its series through the closed bars, up to
 3000. Long settings (Regression 1000, Ichimoku 500) make that seconds of work: whatever doesn't fit in a few

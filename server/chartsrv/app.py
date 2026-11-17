@@ -18,7 +18,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -28,12 +28,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette._utils import get_route_path   # the path the routes are found by (FastAPI's routing uses it too)
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from . import auth
 from . import connections as conns
 from . import packages, sessions, setup, workers
 from . import watchlists as wl
+from .alerts import EVERY_MIN_MAX, core_params
 from .config import INSTRUMENTS_SETTING, Instrument, clean_instruments, futures_catalog, instruments_file, \
     instruments_state, load_holidays, load_instruments, load_settings, migrate_instruments
 from .feeds import make_feeds, quote_feed_names
@@ -491,9 +492,16 @@ async def auth_end_others(request: Request):
     return {"ended": n}
 
 
+# If/Then alerts: the rows chosen, each named by its LO and HI as written in the block (they hold through a new paste).
+# Any finite number: the block takes any (a no-top HI written 99999999999999 is a row like any other), and these are
+# only compared with the block's, never traded.
+_IfPrice = Annotated[float, Field(allow_inf_nan=False)]
+IfThenRows = Literal["all"] | Annotated[list[tuple[_IfPrice, _IfPrice]], Field(max_length=200)]
+
+
 class AlertIn(BaseModel):
     symbol: str
-    kind: Literal["price", "level", "study", "ind"]
+    kind: Literal["price", "level", "study", "ind", "ifthen"]
     study: Literal["vwap", "rth_vwap", "poc", "vah", "val"] | None = None
     band: int = Field(0, ge=-3, le=3)               # VWAP sigma band; 0 = the VWAP itself
     profile: Literal["eth", "rth"] = "eth"          # POC/VAH/VAL of the ETH (17:00) or RTH session
@@ -503,9 +511,13 @@ class AlertIn(BaseModel):
     price2: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)   # the channel's other edge (enter, exit)
     expires: int | None = Field(None, ge=0, le=4_102_444_800_000)   # epoch ms; the alert switches itself off then
     levels: list[str] | Literal["all"] = "all"
+    rows: IfThenRows = "all"                        # If/Then alerts: every row of the plan, or these
     tolerance_ticks: int = Field(0, ge=0, le=200)
     rearm_ticks: int = Field(8, ge=1, le=2000)
     repeat: bool | None = None
+    # Once every N minutes (repeats); 0/None: Every time. A whole number as JSON has it (not true, "5" or 5.0), as a
+    # drawn line's (drawings.clean)
+    every_min: StrictInt | None = Field(None, ge=0, le=EVERY_MIN_MAX)
     note: str = Field("", max_length=200)
     a: dict | None = None                           # indicator alerts: the series that crosses...
     b: dict | None = None                           # ...the one it crosses: a series or {value}
@@ -518,12 +530,28 @@ class AlertIn(BaseModel):
 class AlertPatch(BaseModel):
     enabled: bool | None = None
     repeat: bool | None = None
+    every_min: StrictInt | None = Field(None, ge=0, le=EVERY_MIN_MAX)   # Once every N minutes; 0: Every time
     note: str | None = Field(None, max_length=200)
     price: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)   # price alerts: moved (re-arms it)
     price2: float | None = Field(None, allow_inf_nan=False, gt=-1e12, lt=1e12)
     direction: Literal["cross", "above", "below", "gt", "lt", "enter", "exit"] | None = None
     expires: int | None = Field(None, ge=0, le=4_102_444_800_000)   # 0 = never
     tolerance_ticks: int | None = Field(None, ge=0, le=200)
+    rearm_ticks: int | None = Field(None, ge=1, le=2000)   # level, study and If/Then alerts: how far price goes to re-arm
+    rows: IfThenRows | None = None                  # If/Then alerts: the rows it watches (it takes a first look again)
+
+
+def _ifthen_rows(rows) -> str | list:
+    """An If/Then alert's row choice as kept: "all", or each row's [LO, HI] once."""
+    if rows == "all":
+        return "all"
+    out = []
+    for lo, hi in rows:
+        if [lo, hi] not in out:
+            out.append([lo, hi])
+    if not out:
+        raise HTTPException(400, "choose at least one If/Then row, or all rows")
+    return out
 
 
 def _price_params(inst, price: float, direction: str, price2: float | None) -> dict:
@@ -539,6 +567,20 @@ def _price_params(inst, price: float, direction: str, price2: float | None) -> d
             raise HTTPException(400, "a channel's edges must differ")
         params.update(price=lo, price2=hi)
     return params
+
+
+def _every(params: dict, every_min: int | None, repeat: bool | None) -> bool | None:
+    """Once every N minutes into params (0: none, Every time), and the repeat that goes with it: N repeats, so it turns
+    repeat on, and asking for Only once with it is an error. Returns the repeat to set (None: as it is)."""
+    if every_min is None:
+        return None
+    if not every_min:
+        params.pop("every_min", None)
+        return None
+    if repeat is False:
+        raise HTTPException(400, "Once every N minutes repeats: it can't be Only once too")
+    params["every_min"] = every_min
+    return True
 
 
 def _expiry(expires: int | None) -> int | None:
@@ -986,7 +1028,8 @@ async def gap_analysis(symbol: str, spec: str, RthStart: int = 83000, RthEnd: in
     chart's bars (the gap opens at its first regular-hours bar). UseInstrumentHours: the RTH times at the instrument's
     own regular hours (the default), or as typed. until: bar replay's clock: the gaps as they stood then. A seconds
     chart (1s-59s, as NinjaTrader allows Second charts): over its own bars from `start` (its first bar's open; none:
-    its last 3000 bars' time) on, built from the stored trades."""
+    its last 3000 bars' time; in replay, the session before the clock's at the latest) on, built from the stored
+    trades."""
     from . import gaps
     from .bars import parse_spec
     from .gaps_service import DAYS_MAX
@@ -1394,13 +1437,27 @@ async def ifthen_get(symbol: str, atr: int = 14, rth: bool = False, until: int |
 @app.put("/api/ifthen/{symbol}")
 async def ifthen_put(symbol: str, body: IfThenIn):
     """Saves the block for every device; open charts get it right away."""
+    from . import plan_history
     m = M()
     sym = _ifthen_symbol(symbol)
+    now = now_ms()
+    plan_history.remember(m.store, sym, body.rows, now)   # the version before it too, if it was never kept
     all_blocks = m.store.get_setting("ifthen", {})
-    all_blocks[sym] = {"rows": body.rows, "updated": now_ms()}
+    all_blocks[sym] = {"rows": body.rows, "updated": now}
     m.store.set_setting("ifthen", all_blocks)
+    m.alerts.ifthen_changed(sym, body.rows)   # its If/Then alerts follow the new plan, from where price is now
     m.broadcast({"type": "ifthen", "symbol": sym, **all_blocks[sym]})
     return all_blocks[sym]
+
+
+@app.get("/api/ifthen/{symbol}/history")
+async def ifthen_history(symbol: str, until: int | None = None):
+    """The symbol's If/Then block version by version, oldest first, each with when it was saved (plan_history: the
+    newest 90). until (epoch ms): only the versions saved by then, as the plan stood before a past session."""
+    from . import plan_history
+    m = M()
+    sym = _ifthen_symbol(symbol)
+    return {"symbol": sym, "versions": plan_history.versions(m.store, sym, until)}
 
 
 def _drawing_symbol(symbol: str) -> str:
@@ -1485,7 +1542,10 @@ def _sync_drawing_alert(m, keys: list[str], d: dict | None, drawing_id: str):
         a = linked[0]
         params = on_grid(params, a.symbol)
         changes = {"params": params, "repeat": d["alert"]["repeat"], "note": note}
-        if on_grid(a.params, a.symbol) != params:   # moved (one saved off the grid before has not)
+        # moved (one saved off the grid before has not; how often it fires is no move), or how often it fires changed
+        # on the line: either restarts a stopped one, as the Alerts dialog's Save does
+        if core_params(on_grid(a.params, a.symbol)) != core_params(params) or d["alert"]["repeat"] != a.repeat \
+                or params.get("every_min") != a.params.get("every_min"):
             changes["enabled"] = True
         m.store.update_alert(a.id, **changes)
         for extra in linked[1:]:
@@ -1594,11 +1654,16 @@ async def create_alert(a: AlertIn):
         else:
             params.update(profile=a.profile, which=a.which)
         repeat = True if a.repeat is None else a.repeat
+    elif a.kind == "ifthen":   # the symbol's own plan, read as it is each time (none pasted yet: none fire until one is)
+        params = {"rows": _ifthen_rows(a.rows), "tolerance_ticks": a.tolerance_ticks, "rearm_ticks": a.rearm_ticks}
+        repeat = True if a.repeat is None else a.repeat
     else:
         params = {"levels": a.levels, "tolerance_ticks": a.tolerance_ticks, "rearm_ticks": a.rearm_ticks}
         repeat = True if a.repeat is None else a.repeat
     if _expiry(a.expires):
         params["expires"] = a.expires
+    if _every(params, a.every_min, a.repeat):
+        repeat = True
     alert_id = m.store.add_alert(sym, a.kind, params, repeat, a.note, a.replaces)
     m.alerts_changed()
     return next(x for x in m.alerts.list() if x["id"] == alert_id)
@@ -1644,7 +1709,9 @@ async def indicators_put_symbol(key: str, symbol: str, values: dict):
         raise HTTPException(400, str(e)) from None
     m.broadcast({"type": "indicators", "key": key, "symbol": sym, "values": saved})
     if key == "ifthen" and "RowsBlock" in values:
-        m.broadcast({"type": "ifthen", "symbol": sym, **m.store.get_setting("ifthen", {})[sym]})
+        block = m.store.get_setting("ifthen", {})[sym]
+        m.alerts.ifthen_changed(sym, block["rows"])   # as a paste on the Plan tab
+        m.broadcast({"type": "ifthen", "symbol": sym, **block})
     return saved
 
 
@@ -1831,6 +1898,21 @@ async def patch_alert(alert_id: int, p: AlertPatch):
         fields.setdefault("enabled", True)
     if p.tolerance_ticks is not None and "tolerance_ticks" in params:
         params["tolerance_ticks"] = p.tolerance_ticks
+    if p.rearm_ticks is not None:   # changed alone it re-arms nothing: one that just fired stays quiet (STEADY_PARAMS)
+        if a.kind not in ("level", "study", "ifthen"):
+            raise HTTPException(400, "only level, study and If/Then alerts re-arm by distance")
+        params["rearm_ticks"] = p.rearm_ticks
+    if p.every_min is not None or p.repeat is not None:
+        if a.kind == "line":   # the drawing has them (drawings.clean), saved there: the alert follows the line
+            raise HTTPException(400, "a drawn line's alert is edited on the line")
+        if _every(params, p.every_min, p.repeat):
+            fields["repeat"] = True
+        if not fields.get("repeat", a.repeat):   # Only once: no wait between fires
+            params.pop("every_min", None)
+    if p.rows is not None:
+        if a.kind != "ifthen":
+            raise HTTPException(400, "only If/Then alerts choose rows")
+        params["rows"] = _ifthen_rows(p.rows)
     if p.expires is not None:
         if p.expires == 0:
             params.pop("expires", None)

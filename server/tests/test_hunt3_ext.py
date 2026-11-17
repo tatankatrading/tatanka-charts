@@ -199,7 +199,7 @@ const noop = () => {}, series = { setData: noop }, ax = { pick: '' };
 const [cmpClear, altSetData, fpSchedule, setStudyData, indsUpdate, hemaClear, hemaDraw, hemaRequest, dsmaDraw, dsmaRequest, renderIfInfo,
   scheduleRange, priceLineLayout, bigSchedule, fillsSchedule, goToTime, setChartZone, cmpLoad, legend, loadNote, header, vpLiveTick] = Array(22).fill(noop);
 const $ = () => ({ classList: { add: noop } }), toPoints = () => [{}, {}], vol = series, candles = series, inst = () => ({});
-const bigOn = () => false, viewKey = () => '', viewApply = () => true, anchorMs = () => null;
+const bigOn = () => false, viewKey = () => '', viewApply = () => true, anchorMs = () => null, chart = { timeScale: () => ({ width: () => 800 }) };
 /*APP*/
 const bars = BARS, out = {};
 for (const spec of ['5m', '1D']) { S.spec = spec; applyHistory({ kind: 'time', bars }); out[spec] = sessionClockKey; }
@@ -221,7 +221,7 @@ def test_free_data_day_bars_take_their_trade_dates_for_pivots():
     week = [b for b in bars if "2026-09-28" <= b["day"] <= "2026-10-02"]
     sept = [b for b in bars if b["day"] < "2026-10-01"]
     js = PIVOTS_JS.replace("/*TA*/", (WEB / "ta.js").read_text()).replace("BARS", json.dumps(bars))
-    got = run_app(["TZ_EXCHANGE", "calSpec", "exch", "BAR_CAP", "olderReset", "applyHistory"], js)
+    got = run_app(["TZ_EXCHANGE", "calSpec", "exch", "BAR_CAP", "olderReset", "applyHistory", "viewLoad"], js)
     assert got["5m"] == "America/New_York 00:00" and got["1D"] == "America/Chicago 17:00"   # intraday: the exchange's clock
     assert got["Weekly"]["mon"] == "2026-10-05" and got["Weekly"]["oct5"] == pp(week)   # Monday: the week before's levels
     assert got["Monthly"]["oct1"] == got["Monthly"]["oct2"] == pp(sept)   # October's from September, from its 1st

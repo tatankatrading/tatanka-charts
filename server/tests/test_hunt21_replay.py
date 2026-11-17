@@ -265,7 +265,7 @@ const S = { symbol: 'ZN', llSet: {}, st: { lines: true },
 const inst = () => S.instruments[S.symbol], puts = [], toasts = [];
 const indReady = () => true, levelLinesOf = () => [], toast = (m) => toasts.push(m), fail = (e) => toasts.push(e.message);
 const setStudy = () => {}, indPutSymbol = async (key, v) => { puts.push([v.RangeTop, v.RangeBottom]); Object.assign(S.llSet, v); };
-const llShared = () => S.symbol, renderLlLeft = () => {};
+const llShared = () => S.symbol, renderLlLeft = () => {}, indSym = (key, sym = S.symbol) => sym;
 /*APP*/
 /*STUDIES*/
 /*PLAN*/

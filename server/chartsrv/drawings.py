@@ -18,6 +18,7 @@ ALERTABLE = ("hline", "hray", "trend")
 DIRECTIONS = ("cross", "above", "below")
 DASHES = ("solid", "dashed", "dotted")
 MAX_PER_SYMBOL = 1000
+EVERY_MIN_MAX = 1440   # a line alert's Once every N minutes: at most a day (alerts.every_ms)
 ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -92,12 +93,17 @@ def clean(d: dict, drawing_id: str) -> dict:
         if check is None or not check(v):
             raise ValueError(f"bad style {k}")
     alert = d.get("alert") or {}
-    if not isinstance(alert, dict) or set(alert) - {"on", "direction", "repeat", *LAYOUT}:
-        raise ValueError("alert is {on, direction, repeat} and how the chart it was switched on from lays the line out")
+    if not isinstance(alert, dict) or set(alert) - {"on", "direction", "repeat", "every_min", *LAYOUT}:
+        raise ValueError("alert is {on, direction, repeat, every_min} and how the chart it was switched on from lays the "
+                         "line out")
     for k, check in LAYOUT.items():
         if k in alert and not check(alert[k]):
             raise ValueError(f"bad alert {k}")
+    every = alert.get("every_min")   # Once every N minutes (alerts.every_ms): with repeat only
+    if every is not None and not _int(every, 1, EVERY_MIN_MAX):
+        raise ValueError(f"alert every_min is whole minutes from 1 to {EVERY_MIN_MAX}")
     alert = {"on": bool(alert.get("on")), "direction": alert.get("direction", "cross"), "repeat": bool(alert.get("repeat")),
+             **({"every_min": every} if every and alert.get("repeat") else {}),
              **{k: alert[k] for k in LAYOUT if alert.get(k)}}
     if alert["direction"] not in DIRECTIONS:
         raise ValueError(f"alert direction must be one of {', '.join(DIRECTIONS)}")
@@ -122,7 +128,8 @@ def alert_params(d: dict) -> dict | None:
         s = d["style"]
         line = {"t1": a["t"], "p1": a["p"], "t2": b["t"], "p2": b["p"], "left": bool(s.get("extendLeft")),
                 "right": bool(s.get("extendRight")), **{k: v for k, v in d["alert"].items() if k in LAYOUT}}
-    return {**line, "type": d["type"], "direction": d["alert"]["direction"], "drawing": d["id"]}
+    every = {"every_min": d["alert"]["every_min"]} if d["alert"].get("every_min") else {}   # how often: as the line says
+    return {**line, "type": d["type"], "direction": d["alert"]["direction"], "drawing": d["id"], **every}
 
 
 def month_bars(ts: float, n: int) -> float:

@@ -43,7 +43,8 @@ MARKET = {"ticks", "bars_1m", "symbols", "fred_series", "eia_series", "cot_serie
 # Not the backup's (but see restore()'s on_sim).
 KEPT = (setup.LEAVE_SIM, setup.SETTING, "contracts", "contracts_old_names", ROLLED, ASKED, OLDER_LIMIT, setup.TS_NAMES,
         "alert_id_high",   # (ids made since a backup are never given again by restoring it)
-        "free_alert_last", "quote_contracts")
+        "free_alert_last", "quote_contracts",
+        "fix_catchup_checked")   # (the market data's: fix_catchup's last look at its trades)
 # the login, which a restore leaves as it is here when this database has had one (_had_login): the password (none, if
 # the login was turned off since), the signed-in devices, and the app-notification devices with the server key they
 # were made for. The backup's would sign in again a phone signed out since (and send it alerts), and bring back a

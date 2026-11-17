@@ -172,7 +172,7 @@ High and low are each bar's open and close (the symbols' highs don't come at the
 spread; no volume. Indicators, drawings and Compare work on it as on any chart; the last bar moves with the symbols'
 quotes between refreshes (as the watchlist works the formula out), and the legend says **formula**. Time bars only (a
 formula with a FRED or EIA series: days and longer). Price alerts work on formula and stock charts, on their quotes
-(ALERTS.md); level, study, indicator and drawn-line alerts run on the live futures.
+(ALERTS.md); level, study, If/Then, indicator and drawn-line alerts run on the live futures.
 
 Each free-data chart runs on its own exchange's clock: US stocks on New York's (regular hours 09:30-16:00 ET),
 crypto on UTC around the clock, currencies on the 17:00 New York roll, other markets on their exchange's zone (from
@@ -221,8 +221,8 @@ post-market trades stay off its bars.
   and 1M, from FRED's public CSV; no key needed. Kept in the database, asked again every few hours.
 - Your own indicators (EMA, RSI, MACD, …), drawings and chart settings work on them. The Tatanka studies, VWAP,
   profiles, footprint, big trades, fills and replay need this app's own futures trades, so they stay on the live
-  futures charts. Price alerts work here, on the symbol's quotes (ALERTS.md); level, study, indicator and drawn-line
-  alerts need a live future's trades.
+  futures charts. Price alerts work here, on the symbol's quotes (ALERTS.md); level, study, If/Then, indicator and
+  drawn-line alerts need a live future's trades.
 
 `CHART_SYMBOLS_ONLINE=0` keeps the server from reaching Nasdaq Trader, Coinbase and Yahoo's search (the built-in
 symbols still search). `/api/symbols/status` shows how many symbols of each kind it has and when it last refreshed.

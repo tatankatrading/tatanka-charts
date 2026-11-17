@@ -33,14 +33,16 @@ default; TPO Profile is there to turn on. Each is a row in Studies ▾.
     File or Link** AMT setting (a file under Documents, OneDrive's included, or anywhere with the server run on
     Windows without Docker; or an http(s) link; `{root}` = the symbol, MES reads ES), else
     `Documents\Tatanka\levels\ES.txt` if it exists, else the pasted line. The card says which one is in use and any
-    error. A file is re-read within 5 seconds of a change. A link is asked at once when the setting is set or
-    changed, then on the NinjaTrader Toolkit's schedule while the market is open (not while it is shut): until the
-    levels of the latest 8:15 or 16:45 CT publish are in hand (their Published line, or a change since), every 15
-    seconds for 10 minutes, then every minute to the end of the hour; every 2 minutes for 30 minutes after a change;
-    otherwise every 30 minutes. Failures wait 1, 2, 4, 8, then 15 minutes (1 at most while a publish is due); a link
-    the levels service says is not active, or has nothing for the symbol yet, is asked every 30 minutes. A bad file
-    or link keeps the last good levels; a link that answers 401, 403, 404 or 410 says "The levels link was refused
-    (HTTP n): check the link".
+    error. A file is re-read within 5 seconds of a change. A link is asked at once when the setting is set or changed
+    (and when the server starts), then on the NinjaTrader Toolkit's schedule while the market is open (not while it is
+    shut): until the levels of the latest 8:15 or 16:45 CT publish are in hand (their Published line, or a change
+    since), every 15 seconds for 10 minutes, then every minute to the end of the hour; every 2 minutes for 30 minutes
+    after a change; otherwise every 30 minutes. Failures wait 1, 2, 4, 8, then 15 minutes (1 at most while a publish
+    is due); a link the levels service says is not active, or has nothing for the symbol yet, is asked every 30
+    minutes. A link that has not answered since it was set or the server started is asked again after a failure even
+    while the market is shut. A bad file or link keeps the last good levels, across a restart too (the ones it gave
+    last, as NinjaTrader's last-good cache). A file or link newly set shows only its own levels, none until it gives
+    some. A link that answers 401, 403, 404 or 410 says "The levels link was refused (HTTP n): check the link".
   - **If/Then**: the block (below), saved per symbol.
   - **Level Lines**: range top/bottom and custom lines `price|label|color|style|width`, e.g.
     `7845.75|VAH|Magenta|Dash|2, 7810|VAL`.
@@ -71,7 +73,7 @@ down instead of overlapping. Range and lines are per symbol, on the Plan tab.
   Settings, as a second Level Lines with Sharing mode Off in NinjaTrader's guide.
 
 - Colors in a level as NinjaTrader reads them: a WPF color name (Orange, Magenta, Gray; not the CSS-only ones such as
-  Grey) or hex `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB` (alpha first: `#8F0F` is a see-through green). Anything else
+  Grey) or hex `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB` (alpha first: `#80F0` is a see-through green). Anything else
   takes the Default line's color.
 - A line between ticks (a range's mid on an odd number of ticks, a level typed off the tick) is labelled at its own
   price, with the decimals the instrument shows and up to 4 more: ES 5027.625, ZN 110.50781 (not the 32nd it rounds to).
@@ -241,7 +243,9 @@ the open (blue) to the close (pink), drawn one bar apart from the session's firs
 last 3 days get letters, the 15 before them a grey outline. POC in yellow, value area optional.
 
 - Minute and hour charts only (it is built from the chart's bars). The server rebuilds those bars from
-  stored 1-minute bars, so it draws all 18 days even when the chart holds fewer.
+  stored 1-minute bars, so it draws all 18 days even when the chart holds fewer. A bar that a holiday's halt or early
+  close cuts short ends there, as on NinjaTrader: CL's 13:00 1h bar on Thanksgiving ends at the 13:30 halt, so it is
+  in that day's 0800-1330 profile.
 - Session Time is in CT, NinjaTrader's 0830-1500 (Settings…). With **Session → Use Instrument Hours** on (the
   default, as NinjaTrader v1.1.0) it runs at each instrument's own hours, moved as a whole as the AMT Toolkit's fields
   are (above): 0800-1330 on CL, 0720-1230 on GC, 0725-1225 on SI. Off, it runs as typed on every instrument, as
@@ -263,7 +267,9 @@ last 3 days get letters, the 15 before them a grey outline. POC in yellow, value
 Parity check against the original C# (needs mono), from `server/`:
 `tests/tpo_csharp/build.sh <tatanka-indicators checkout> <workdir>` (v1.0.0 or v1.1.0), then
 `python tests/tpo_parity.py <workdir> [days] [minutes] [seed] [ES|NQ|CL|GC|SI] ['{"UseInstrumentHours": false}'] [rth]
-[zone=America/New_York]` (`rth`: an RTH chart's bars; the deliberate difference above is undone for the comparison).
+[zone=America/New_York] [holidays]` (`rth`: an RTH chart's bars; the deliberate difference above is undone for the
+comparison; `holidays`: days up to Dec 1 2026 with config/holidays.json's halts and early closes, Thanksgiving's
+short bars in them).
 The record carries the typed Session Time, the root and the setting: the C# v1.1.0 moves it itself (its own hours
 table), this port at config/futures.json's hours, and both print the session they run. A v1.0.0 build matches with
 the setting off only. `zone`: the C# runs as NinjaTrader set to that time zone (its Session Time is in chart time, so
@@ -310,8 +316,10 @@ CHARTS.md Studies).
   (MLK Day's 08:30-15:00 runs to the 12:00 halt), and the window that opens on a halt's evening is kept (17:00-16:00
   from MLK Day's 17:00: Tuesday's Globex day). Before, both were left out.
 - They run on the server, so every chart and device shows the same profiles (SVP's Chart zone aside, above); the chart
-  asks again every 3 seconds and gets only what changed. Finished SVP sessions are kept in the database; those older
-  than any Sessions to retain can reach (about 160 days) go at the daily upkeep.
+  asks again every 3 seconds and gets only what changed. Finished SVP sessions are kept in the database from two
+  minutes after their end. Until then a trade stamped before the end but stored a moment later (a feed's delay, a
+  clock behind this one) still counts, as on NinjaTrader. Those older than any Sessions to retain can reach (about
+  160 days) go at the daily upkeep.
 - PVP's "until touched" lines end at the first chart bar after their period whose high and low reach the level, as
   NinjaTrader checks it (v1.0.1: within a billionth of the level's price). It is the chart's own bars, so on Renko the
   bricks and on Heikin Ashi the Heikin Ashi highs and lows, as drawn. A period that ended before the chart's first
@@ -330,13 +338,16 @@ CHARTS.md Studies).
   between sessions, none before the oldest of Sessions to retain; NinjaTrader keeps the values it set on older bars).
   A finished session's are worked out in the background, newest first, the first time it is asked for with those
   settings (a busy session takes a second or two), and kept; until then its bars show none (the chart asks again every
-  3 seconds, in a paused replay too). A late trade (stored after its minute was counted) is taken into the forming
-  session's values from its minute on.
-  AAVP and PVP: NinjaTrader leaves the bars of history empty and fills the last one at load and the bars that form
-  while it runs; so does this, from when the chart loaded. Changing a setting empties them again, as NinjaTrader loads
-  the indicator again. NinjaTrader has the new setting's levels at once; here they take a moment to come, and a bar
-  that closes before they do stays empty (never the old setting's). The legend row stays NinjaTrader's label, with the
-  latest values.
+  3 seconds, in a paused replay too). A late trade (stored after its minute was counted) is taken into the values of
+  the forming session, or of one that ended under two minutes ago, from its minute on.
+  AAVP and PVP: NinjaTrader leaves the bars of history empty and fills the bars that form while it runs. At load it
+  fills the last bar, and on a minute or hour chart the bar before it too: its history ends with the forming minute,
+  which comes before the forming bar, so it lands on the bar before. Not when that minute is the forming bar's last
+  (so never on a 1-minute chart), nor once the last bar has closed. This does the same, from when the chart loaded
+  (in replay, by the replay clock). Changing a setting empties them again, as NinjaTrader loads the indicator again.
+  NinjaTrader has the new setting's levels at once; here they take a moment to come, and a bar that closes before
+  they do stays empty, but for the bar before the forming one, as at load (never the old setting's). The legend row
+  stays NinjaTrader's label, with the latest values.
 - Their texts on the chart are NinjaTrader's, but name this app's settings: the 1-minute history stored here
   (Backfill) for AAVP and PVP, the trades stored here and ETH/RTH for SVP, instead of Days to load and Trading Hours.
 - As on NinjaTrader: AAVP needs an intraday or 1 Day chart, PVP and SVP an intraday chart (seconds to hours, tick,
@@ -368,12 +379,16 @@ trades into them; the table shows the latest gap, its fill, bars elapsed and the
 - Minute, hour and second charts, as NinjaTrader's Minute and Second charts (any other chart says to use one). On a
   minute or hour chart the server runs the engine over the last 90 days of the chart's bars (rebuilt from stored
   1-minute bars, so old unfilled gaps show even when the chart holds fewer bars), up to the bar forming now; the
-  chart then fills gaps from every live tick, as the indicator does on each price change.
+  chart then fills gaps from every live tick, as the indicator does on each price change. A bar that a holiday's halt
+  or early close cuts short ends there, as on NinjaTrader: CL's 13:00 1h bar on Thanksgiving ends at the 13:30 halt,
+  inside its 08:00-13:30 hours, so the next day's gap is measured from its close. The alerts' bars end there too.
   On an RTH chart those are its regular-hours bars from the RTH open, as on an RTH trading-hours template: the gap
   opens at the 08:30 bar's open, not at a pre-market price, and its bar counts are the chart's.
 - On a second chart (1s to 59s) it runs over the chart's own bars, as NinjaTrader runs it over the bars loaded: built
   from the stored trades from the chart's first bar on, each stamped at its end as NinjaTrader stamps it. A gap shows
-  once the chart holds the RTH close before it: scroll left to load older bars and older gaps come with them. History
+  once the chart holds the RTH close before it: scroll left to load older bars and older gaps come with them. In bar
+  replay, where older bars do not load, it runs from the session before the replay clock's at the latest, so the
+  replayed day's gap shows, as NinjaTrader's Playback has the days before it loaded. History
   (days) does not apply; at most the last million stored trades are read, and older bars show no gaps. With a bar
   size that fits the minute (1s, 5s, 15s, 30s, ...) the gaps are the 1-minute chart's (same open, RTH close and size);
   a size that does not (7s) can straddle the RTH open, its open then that bar's, and the RTH close, which is then the
@@ -434,8 +449,9 @@ trades into them; the table shows the latest gap, its fill, bars elapsed and the
 Parity check against the original C# (needs mono), from `server/`:
 `tests/gap_csharp/build.sh <tatanka-indicators checkout> <workdir>` (v1.0.0 or v1.1.0), then
 `python tests/gap_parity.py <workdir> [days] [minutes] [seed] [ES|NQ|CL|GC|SI] ['{"UseInstrumentHours": false}']
-[rth]` (`rth`: an RTH chart's bars). The record carries the typed times, the root and the setting: the C# v1.1.0 moves
-them itself (its own hours table), this port at config/futures.json's hours, and both print the times they run or the
+[rth] [holidays]` (`rth`: an RTH chart's bars; `holidays`: days up to Dec 1 2026 with config/holidays.json's halts and
+early closes, Thanksgiving's short bars in them). The record carries the typed times, the root and the setting: the
+C# v1.1.0 moves them itself (its own hours table), this port at config/futures.json's hours, and both print the times they run or the
 same refusal. A v1.0.0 build matches with the setting off only. `tests/test_gap_seconds.py` runs the same C# engine over
 second bars built from synthetic trades by NinjaTrader's rule (7s, 10s, 15s and 30s, ETH and RTH, ES and GC) and checks
 every gap against this port's.
@@ -594,6 +610,9 @@ D|0|7385|Below 7385 → range break
 `0` = no bottom, `9999999` = no top, a literal `\n` breaks the text, `#` at the start of a line is a comment.
 The block is stored on the server per symbol, so the phone shows what you pasted on the PC (open charts update
 right away). A line and a label at each band's bottom; the band price is in now is highlighted, on every tick.
+**Alerts on the plan**: **Create alert** under the block on the Plan tab (or Condition → **If/Then bands** in the
+alert dialog). A line row alerts when price touches it, a zone row when price comes into it, with no chart open, and
+the alert follows each new paste (see [Alerts](ALERTS.md#alerts)).
 On a phone-width chart the labels are one line each (… where cut, at the chart's edge) and the table shows only the
 band price is in, so the chart stays readable; the whole block is on the Plan tab. **Tap a label** (or the table) for
 the full text, wrapped to fit; tap again for one line. The same switch is **Full text** in Studies > If/Then (this
@@ -606,7 +625,7 @@ previous day's ATR = neutral). The table and ATR zones are off by default, as in
   bars as a price type (Close by default, Open, High, Low, Median, Typical, Weighted) or a line on this chart: an
   indicator's (EMA 21, Bollinger 14 2: Upper), the session or RTH VWAP and the bands shown, an HTF EMA, or a Daily SMA
   x4 plot. The anchored VWAP and the Tatanka profiles are not offered. It is this chart's own, and Apply to all charts
-  leaves it as each chart has it. A line taken off the chart reads Close.
+  leaves it as each chart has it (this chart's as the dialog shows it). A line taken off the chart reads Close.
 - The table's **Background** and **Border** colors have an opacity, as NinjaTrader honors their alpha. The Position
   colors have none: NinjaTrader sets the zones', lines' and labels' alpha itself, so theirs never shows.
 - The header's **Instrument label** starts as the chart's symbol, not NinjaTrader's fixed "ES": NinjaTrader's is typed

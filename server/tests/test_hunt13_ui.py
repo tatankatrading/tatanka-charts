@@ -160,7 +160,7 @@ def test_reset_chart_view_keeps_the_room_the_toolkit_labels_need():
     """The AMT Toolkit on: amtLayout made the right margin 55 bars for its labels and developing profile (more than
     the 'right margin' setting's 6). Alt+R, the reset button or the menu's Reset chart view shows the latest bars with
     that margin, as a fresh load does, not 6 bars with the labels drawn over the latest candles."""
-    out = run_app(["resetView"], RESET_JS)
+    out = run_app(["latestRange", "resetView"], RESET_JS)
     assert out == {"range": {"from": 568 - 150 - 55, "to": 568 + 55}, "auto": True}
 
 

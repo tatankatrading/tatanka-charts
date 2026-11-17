@@ -34,7 +34,7 @@ def test_a_zoom_with_the_amt_margin_keeps_its_view_unless_the_empty_space_is_ove
     the cap (30% of the view) and applying the new margin scrolled the last bar to it, undoing the library's zoom on the
     cursor: the bar zoomed on slid off the left. Now a zoom keeps its view, unless the space right of the last bar is
     over the cap (zoomed in that space: the last bar comes in to it); turning a study on still scrolls to its margin."""
-    out = run_app(["AMT_ROOM", "amtLayout"], """
+    out = run_app(["AMT_ROOM", "rightMargin", "amtLayout"], """
 const n = 1000;
 let range, opts;
 const ts = { options: () => ({ ...opts, barSpacing: 6 }), getVisibleLogicalRange: () => ({ ...range }), setVisibleLogicalRange(r) { range = { ...r }; },
@@ -62,7 +62,7 @@ def test_a_resize_sets_the_amt_margin_and_only_a_zoom_keeps_its_view():
     """Every range change ran amtLayout as a zoom, a resize too: a phone turned to landscape (the AMT margin 25 bars to
     55) kept its 26 bars of space, and the margin option, now 55, stopped every later amtLayout from setting it. A zoom
     is now a range change with a new bar spacing on the same width; a new width sets the margin as a load does."""
-    out = run_app(["AMT_ROOM", "amtRoomFrame", "amtRoomCheck", "amtLayout"], """
+    out = run_app(["AMT_ROOM", "amtRoomFrame", "amtRoomCheck", "rightMargin", "amtLayout"], """
 const n = 1000;
 let width = 390, spacing = 2, range, opts = { rightOffset: 25 };
 const ts = { width: () => width, options: () => ({ ...opts, barSpacing: spacing }), getVisibleLogicalRange: () => ({ ...range }),
@@ -103,7 +103,7 @@ def test_reset_view_and_a_first_load_after_a_zoom_are_not_a_zoom():
     zoom now: the margin is set as on a fresh load. A wheel zoom right after still keeps the view it made, also after
     a Reset that set the range it already had (the library then sends no range change)."""
     load = app_lines("    const ro = chart.timeScale().options().rightOffset;", "    chart.timeScale().setVisibleLogicalRange(")
-    out = run_app(["AMT_ROOM", "amtRoomFrame", "amtRoomCheck", "amtLayout", "resetView"], """
+    out = run_app(["AMT_ROOM", "amtRoomFrame", "amtRoomCheck", "rightMargin", "latestRange", "amtLayout", "resetView"], """
 let n = 1000, width = 1200, spacing = 1, range = { from: 0, to: 1 }, opts = { rightOffset: 55 };
 const ts = { width: () => width, options: () => ({ ...opts, barSpacing: spacing }), getVisibleLogicalRange: () => ({ ...range }),
   setVisibleLogicalRange(r) { range = { ...r }; spacing = width / (r.to - r.from); },

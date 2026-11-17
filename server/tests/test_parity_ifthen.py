@@ -29,8 +29,9 @@ def test_a_color_with_opacity_is_kept_as_rrggbbaa():
 
 
 ADAPTER_JS = """
-const S = { symbol: 'ES', st: { ifthen: true }, bars: [{ o: 10, h: 14, l: 8, c: 12 }, { o: 12, h: 20, l: 11, c: 15 }],
-  inds: [{ c: { type: 'ema', len: 21 }, vals: [[11], [13.5]] }, { c: { type: 'boll', len: 14, dev: 2 }, vals: [[1, 2, 3], [18, 14, 10]] }],
+const CFG = [{ type: 'ema', len: 21 }, { type: 'boll', len: 14, dev: 2 }];   // the chart's indicators, and as built
+const S = { symbol: 'ES', st: { ifthen: true }, bars: [{ o: 10, h: 14, l: 8, c: 12 }, { o: 12, h: 20, l: 11, c: 15 }], indCfg: CFG,
+  inds: [{ c: CFG[0], vals: [[11], [13.5]] }, { c: CFG[1], vals: [[1, 2, 3], [18, 14, 10]] }],
   ind: { schema: { ifthen: { title: 'If/Then Bias Table', version: '1.0.0', settings: SCHEMA } }, overrides: {}, symbols: {},
     per_symbol: { ifthen: ['InstrumentLabel', 'RowsBlock'] }, share: {} }, ifData: null };
 let TAB = { ifthen: { PriceSource: 'Input series', InputSeries: 'Bollinger 14 2: Lower' } };

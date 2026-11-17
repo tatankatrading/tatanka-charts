@@ -153,7 +153,7 @@ const S = { st: { fp: 'bidask' }, ext: null, symbol: 'ES', spec: '500v', rth: fa
     timer: 0, hidden: {}, req: 1 },
   subId: 1, cs: {}, vp: {}, seqTime: new Map(), dsmaLive: new Map(), holidays: {} };
 const el = { classList: { add() {}, toggle() {} }, setAttribute() {} }, $ = () => el, drawLevels = () => {}, replayClearStudies = () => {};
-const chart = { timeScale: () => ({ getVisibleLogicalRange: () => ({ from: 0, to: S.bars.length + 3 }),
+const chart = { timeScale: () => ({ width: () => 800, getVisibleLogicalRange: () => ({ from: 0, to: S.bars.length + 3 }),
   options: () => ({ barSpacing: 50, rightOffset: 0 }), setVisibleLogicalRange() {} }) };
 const FP_MIN_SPACING = 40, fpPrim = { update() {} }, isTime = () => S.kind === 'time', TK_MULTI = false, extTimer = 0, extStop = null;
 const VP_KINDS = [], WL_FUT = /^$/, ax = { pick: '' }, drawings = { state: { loadedFor: 'ES' }, load() {} };
@@ -189,7 +189,7 @@ def test_back_from_replay_the_footprint_waits_for_the_live_history():
     + 1 h, seconds of server work thrown away, the live chart's own footprint waiting behind it. Another symbol or bar
     type meanwhile: the old chart's bars. fpFetch now waits for the history."""
     out = run_app(["specSeconds", "daysSpec", "barEnd", "replayPause", "replayExit", "fpBusy", "fpSchedule", "fpFetch",
-                   "subscribe", "BAR_CAP", "olderReset", "applyHistory"], EXIT_JS)
+                   "subscribe", "BAR_CAP", "olderReset", "applyHistory", "viewLoad"], EXIT_JS)
     assert out["subs"] == ["ES", "NQ"]
     assert [a["at"] for a in out["asked"]] == ["history", "refresh"], out["asked"]   # nothing before the history comes
     for a in out["asked"]:

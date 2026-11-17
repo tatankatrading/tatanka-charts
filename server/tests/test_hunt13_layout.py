@@ -96,7 +96,7 @@ def test_a_journal_trade_clicked_on_a_layouts_page_scrolls_the_active_chart_to_i
     js = JOURNAL_JS.replace("/*APP*/", studies_part("barIndexTo") + "\n/*APP*/\n" + app_lines("if (TK_CELL !== null) {", "}"))
     out = run_app(["journalShow", "goToTime"], js)
     assert out["same"] == {"ranges": [{"from": 10, "to": 110}], "switched": []}
-    assert out["other"] == {"ranges": [], "switched": ["NQ"], "goTo": 1_700_000_000_000 + 20 * 60_000}
+    assert out["other"] == {"ranges": [], "switched": ["NQ"], "goTo": {"sym": "NQ", "ms": 1_700_000_000_000 + 20 * 60_000}}
     assert out["toasts"] == []
 
 

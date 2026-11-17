@@ -7,7 +7,20 @@ Only the stretch is filled: trades strictly after the last stored data and befor
 sends after connecting (its buffer included), so nothing is counted twice. That end is open until the first live
 trade comes: NinjaTrader starts the add-on before its data connection is up, so the add-on (6+) waits for the
 connection, then asks up to its own now (GAP|...|live). Minutes wholly inside get bars built from those trades; the
-minute where stored data ended is merged; the minute where live data starts is left to the live feed.
+minute where stored data ended is merged; the history's trades of the minute where live data starts go into that
+minute's bar (the live feed's, or the stored one if it has moved on), whose trades are counted again for it.
+
+NinjaTrader started mid-session raises a one-time catch-up of recent trades as live ones, its last trade (or the newest)
+first: the add-on asks the history up to the first one's second (firstLive), so it holds the others too. Add-on 23
+marks those with NinjaTrader's own time (a T line's 7th field). Of a gap at the live edge (not a hole, older history
+or the AMT's), the marked trades sent in the first EARLY_MS after the first live trade (by the add-on's stamps, not the
+stored times: in the 16:00 break on_tick moves them into a session) are kept, and the history's last TAIL trades are
+held unwritten until its Z; then copies() pairs the two, print by print (price and size), in runs of COPY_RUN or more
+with COPY_KINDS different prints, in either order; each pair is kept once: the history's copy (in its order: a
+millisecond's trades as the exchange printed them) with the live trade's aggressor side, the live one taken out; and
+every minute either touched is built again from its trades. What isn't in such a run stays as it came. An error answer
+compares nothing, nor does a Z that finds the live trades not written yet (the database not writable), nor a history
+of 1-minute bars (a stretch over 3 days, no tick history: no trade to pair; the catch-up counts twice in their volume).
 
 Then the holes inside the stored data of the last days (minutes with no bar while the market was open: NinjaTrader
 closed and its history not reached then, a fill that failed, its data connection lost while the add-on stayed
@@ -27,7 +40,8 @@ contract's by NinjaTrader's roll dates. In the background, once a symbol's gap a
 /api/older), a few months at a time. One such request at a time for all symbols, after the others. A month that comes
 back empty is where the data provider's history ends: remembered (OLDER_LIMIT), asked again after a week. Charts
 don't reload for them (they load older bars as they are scrolled back); a symbol's studies reload once its year is
-in, if any of it is from the last STUDY_DAYS."""
+in, if any of it is from the last STUDY_DAYS. An error answer (or none in time) only puts that symbol off: OLDER_RETRY_S,
+doubling up to OLDER_RETRY_MAX_S, until the add-on says hello again; only an empty month sets the limit."""
 import logging
 import math
 import os
@@ -41,6 +55,11 @@ MAX_GAP_MS = 14 * 86_400_000     # older than this comes from backfill
 LONG_GAP_MS = 90 * 86_400_000    # add-on 8+: each contract of a stretch across rolls in turn, so this far back
 MIN_GAP_MS = 120_000
 CHUNK = 20_000
+TAIL = 20_000                    # a live-edge gap's last trades, held unwritten till its Z: the catch-up's copies are there
+EARLY_MS = 30_000                # marked live trades (add-on 23) kept this long after the first live trade...
+EARLY_MAX = 50_000               # ...this many at most
+COPY_RUN = 50                    # a live trade is the history's copy only inside a run of this many alike...
+COPY_KINDS = 5                   # ...with this many different prints (price, size) in it
 HOLE_DAYS = 7                    # holes inside the stored data looked for this far back
 HOLE_MIN_MS = 5 * 60_000         # open-market minutes with no bar that make a hole
 QUIET_HOLE_MIN_MS = 30 * 60_000  # for a thin market (quiet: no stale alerts) minutes without a trade are normal
@@ -53,9 +72,10 @@ DAY_MS = 86_400_000
 OLDER_ADDON = 20                 # the add-on version that answers GAP|...|older
 OLDER_SPAN_MS = 30 * DAY_MS      # older history asked a month at a time...
 OLDER_MAX_SPAN_MS = 180 * DAY_MS # ...or, for a chart scrolled back, as much as it wants, up to this
-OLDER_TIMEOUT_S = 360            # unanswered this long (the add-on waits 5 minutes for NinjaTrader): dropped, and the
-OLDER_RETRY_S = 600              # symbol asked again after OLDER_RETRY_S...
-OLDER_TRIES = 3                  # ...until this many in a row failed: then taken as where its history ends
+OLDER_TIMEOUT_S = 360            # unanswered this long (the add-on waits 5 minutes for NinjaTrader): the others go on
+OLDER_RETRY_S = 600              # an error answer: the symbol asked again after this, doubling with each in a row...
+OLDER_RETRY_MAX_S = 3600         # ...up to this; never taken as where its history ends (NinjaTrader's Panic, a lost
+                                 # data connection), and asked again at the add-on's next hello
 OLDER_LIMIT = "history_limit"    # {symbol: [ms, when]}: NinjaTrader had nothing before ms (asked again after a week)
 OLDER_LIMIT_DAYS = 7
 STUDY_DAYS = 400                 # older minutes this recent reload the symbol's studies (AMT, Daily SMA x4...) once
@@ -103,6 +123,15 @@ class _Window:
         self.older = False                         # older history (GAP|...|older): 1-minute bars before anything stored
         self.late = False                          # ...not answered in time: the others go on; its answer is kept
         self.hold = False                          # only holds its alerts: NinjaTrader's last answer for it still coming
+        self.early: list[tuple[Tick, int]] = []    # marked live trades (add-on 23) as stored, with their own time
+        self.moved: set[int] = set()               # minutes below the cutoff with live trades sent in the 16:00
+                                                   # break, moved back into the closing session (moved())
+        self.copies = 0                            # history trades that were live ones again: kept once (copies())
+
+    @property
+    def edge(self) -> bool:
+        """The stretch up to the live trades: not a hole, older history or the AMT's prior day."""
+        return not (self.hole or self.older or self.collect is not None)
 
 
 def shut(ts: int, group: str | None) -> bool:
@@ -111,6 +140,91 @@ def shut(ts: int, group: str | None) -> bool:
     (a million contracts on NQ); stored, it was a day's volume in one minute on every chart and volume profile holding
     it (store.drop_settlement_bars takes out the ones stored before)."""
     return not sessions.is_open(ts, group)
+
+
+def copies(hist: list, live: list, run: int | None = None, kinds: int | None = None) -> list[tuple[int, int]]:
+    """Which history trades are live trades sent again: (i, j) pairs, hist[i] being live[j], each of either in one pair
+    at most. Both are lists of prints, (price, size): the history's in time order, the live ones as they came. A pair is
+    taken only inside a run of `run` (COPY_RUN) or more alike one for one, in the same order or the reverse one (a
+    catch-up newest first), with `kinds` (COPY_KINDS) or more different prints in it: a quiet market's tape (one print
+    again and again) or two tapes that aren't the same trades never pair by chance. Runs are found from windows of `run`
+    live prints with that many kinds (a start that can't reach a run is skipped), by a hash of each, then grown both ways
+    as far as the prints stay alike."""
+    run = COPY_RUN if run is None else run
+    kinds = COPY_KINDS if kinds is None else kinds
+    n, m = len(hist), len(live)
+    if run < 1 or n < run or m < run:
+        return []
+    ids: dict = {}
+    h = [ids.setdefault(k, len(ids) + 1) for k in hist]
+    lv = [ids.get(k, 0) for k in live]   # a print the history hasn't: 0, alike with nothing
+    mod, base = (1 << 61) - 1, 1_000_003
+    top = pow(base, run - 1, mod)
+
+    def windows(seq):   # the hash of each window of `run`, by its start
+        out, x = [], 0
+        for k, v in enumerate(seq):
+            if k >= run:
+                x = (x - seq[k - run] * top) % mod
+            x = (x * base + v) % mod
+            if k >= run - 1:
+                out.append(x)
+        return out
+    fwd: dict[int, list[int]] = {}
+    for i, x in enumerate(windows(h)):
+        fwd.setdefault(x, []).append(i)
+    rev: dict[int, list[int]] = {}
+    for r, x in enumerate(windows(h[::-1])):   # live[j + k] is hist[i - k]
+        rev.setdefault(x, []).append(n - 1 - r)
+    ok, seen, zeros = [], {}, 0   # whether each live window has `kinds` prints, all of them the history's
+    for k, v in enumerate(lv):
+        seen[v] = seen.get(v, 0) + 1
+        zeros += v == 0
+        if k >= run:
+            old = lv[k - run]
+            seen[old] -= 1
+            zeros -= old == 0
+            if not seen[old]:
+                del seen[old]
+        if k >= run - 1:
+            ok.append(not zeros and len(seen) >= kinds)
+    hashes = windows(lv)
+    used_h, used_l = [False] * n, [False] * m
+    first: dict[tuple, int] = {}   # (direction, hash) -> its first window not paired yet (a periodic tape: no rescans)
+    pairs: list[tuple[int, int]] = []
+    j = 0
+    while j <= m - run:
+        found = None
+        if ok[j]:
+            for d, table in ((1, fwd), (-1, rev)):
+                cands = table.get(hashes[j], ())
+                k0 = first.get((d, hashes[j]), 0)
+                # a window touching a pair touches one of its ends (each run paired is `run` long at least): gone for good
+                while k0 < len(cands) and (used_h[cands[k0]] or used_h[cands[k0] + d * (run - 1)]):
+                    k0 += 1
+                first[(d, hashes[j])] = k0
+                for i in cands[k0:]:
+                    if not (used_h[i] or used_h[i + d * (run - 1)]) and all(h[i + d * k] == lv[j + k] for k in range(run)):
+                        found = i, d
+                        break
+                if found:
+                    break
+        if found is None:
+            j += 1
+            continue
+        i, d = found
+        a = 0   # back along it, over live prints passed by (no window of their own matched)
+        while j - a > 0 and 0 <= i - d * (a + 1) < n and not used_l[j - a - 1] and not used_h[i - d * (a + 1)] \
+                and lv[j - a - 1] == h[i - d * (a + 1)]:
+            a += 1
+        e = run
+        while j + e < m and 0 <= i + d * e < n and not used_h[i + d * e] and lv[j + e] == h[i + d * e]:
+            e += 1
+        for k in range(-a, e):
+            used_l[j + k] = used_h[i + d * k] = True
+            pairs.append((i + d * k, j + k))
+        j += e
+    return pairs
 
 
 class GapFill:
@@ -160,6 +274,7 @@ class GapFill:
         self.minutes_ok, self.contracts_ok, self.older_ok = minutes, contracts, older
         self.live_asks, self.reopen, self.nt_out = live, set(), set()
         self.older_busy = None
+        self.older_failed, self.older_wait = {}, {}   # a new connection: what failed on the last one is asked again now
         self.fail_values()   # asked on the connection before: no answer comes now
         owned = getattr(self.m, "trade_owner", {})
         out = []
@@ -390,6 +505,28 @@ class GapFill:
         if w and ts < w.cutoff:
             w.cutoff = max(ts, w.start)
 
+    def moved(self, sym: str, ts: int):
+        """A live trade sent in the 16:00 CT break that Market.on_tick moved back to the closing session's last ms
+        (`ts`, as stored): below the cutoff its stamp set, in a minute whose bar the history's trades replace at the
+        Z. That minute is built again then from all its stored trades (the history's and these, marked or not, paired
+        or not)."""
+        w = self.windows.get(sym)
+        if w is not None and w.edge and not w.discard and ts < w.cutoff:
+            w.moved.add(ts // 60_000 * 60_000)
+
+    def early(self, sym: str, tk: Tick, at: int, sent: int | None = None):
+        """A live trade add-on 23 marked with NinjaTrader's own time for it (`at`): older than the second its history
+        request stops at, so that history brings it again (NinjaTrader's catch-up of recent trades as it starts
+        mid-session). `tk` as stored; `sent` the add-on's stamp for it, as live() had it (tk.ts if not given: on_tick
+        moves one stamped in the 16:00 break into a session, 16:30 on to the next 17:00 open). Kept for its gap's Z
+        (copies()), if its gap is the live edge's and it was sent within EARLY_MS of the first live trade (by the
+        add-on's stamps, both), EARLY_MAX at most; never a feed plugin's symbol's."""
+        w = self.windows.get(sym)
+        if w is None or not w.edge or w.discard or w.cutoff == math.inf or sym in getattr(self.m, "trade_owner", {}) \
+                or (tk.ts if sent is None else sent) - w.cutoff >= EARLY_MS or len(w.early) >= EARLY_MAX:
+            return
+        w.early.append((tk, int(at)))
+
     def tick(self, sym: str, ts: int, price: float, size: int):
         w = self.windows.get(sym)
         if not w or w.discard or size <= 0 or w.older:   # older history comes as 1-minute bars only
@@ -421,8 +558,9 @@ class GapFill:
         else:
             b[1], b[2], b[3], b[4], b[5] = max(b[1], price), min(b[2], price), price, b[4] + size, b[5] + 1
         w.count += 1
-        if len(w.ticks) % CHUNK == 0:   # a failed write (the database not writable) keeps them for the next chunk
-            self._write_ticks(w)
+        keep = TAIL if w.edge else 0   # the live edge's last ones wait for its Z: live trades sent again are there
+        if len(w.ticks) >= keep + CHUNK and (len(w.ticks) - keep) % CHUNK == 0:
+            self._write_ticks(w, keep)   # a failed write (the database not writable) keeps them for the next chunk
 
     def minute(self, sym: str, t: int, o: float, h: float, lo: float, c: float, v: int):
         """A 1-minute bar (by its open) when the provider has no tick history: only minutes wholly in the gap."""
@@ -483,9 +621,25 @@ class GapFill:
         open_end = w.cutoff == math.inf
         if open_end:   # no live trade yet: up to now, the minute it is now kept going by the live feed
             w.cutoff = int(time.time() * 1000)
+        live_min = int(w.cutoff) // 60_000 * 60_000
+        touched: set[int] = set()   # minutes built again from their stored trades
+        pending: list[Tick] = []   # live trades not written yet (the database not writable just now)
+        if w.edge and not open_end:
+            # the live trades stored: to compare with, and the live minute's to merge with
+            pending = self.m.flush_for_read(sym) or []
+            if kind == "ticks" and w.early and w.ticks and not pending:   # (else both kept, as before r23)
+                touched |= self._copies(sym, w)
+            if live_min in w.minutes:   # the history's trades of the minute live ones start in: into its bar
+                touched.add(live_min)
+            # live ones moved below the cutoff (sent in the 16:00 break), in a minute the history's trades replace: with
+            # no pair in the history (a catch-up too short to compare, or unmarked) that bar would hold its trades only
+            touched |= w.moved & set(w.minutes)
         self._write_ticks(w)
         self._write_rows(sym, w)
         merged = self._write_minutes(sym, w, open_end)
+        if touched:   # (those before the live minute were written above, from the history: counted once)
+            self._rebuild(sym, touched, live_min, pending)
+            merged += sum(k >= live_min for k in touched)
         if w.hole and kind != "error":
             self._remember(sym, w)
         w.answered = kind not in ("error", "none")   # (a gap alert held meanwhile is sent: gaps_service)
@@ -494,9 +648,9 @@ class GapFill:
         took = time.monotonic() - w.t0
         self.status[sym] = {"from": w.start, "to": w.cutoff, "state": "done", "kind": kind, "sent": count,
                             "stored": w.count, "minutes": merged, "note": note, "seconds": round(took, 1),
-                            **({"hole": True} if w.hole else {})}
+                            **({"hole": True} if w.hole else {}), **({"copies": w.copies} if w.edge else {})}
         log.info("gap fill %s: %s, %d sent, %d stored, %d minutes (%s) in %.1fs", sym, kind, count, w.count, merged, note, took)
-        if w.count or merged:
+        if w.count or merged or w.copies:
             self.changed.add(sym)
         # the gap at the end reloads now, and again once its rest is in (the alerts it held go on then); holes once they
         # are done
@@ -504,15 +658,97 @@ class GapFill:
         if not w.hole or not more or w.stale and not (len(more[0]) > 4 and more[0][4]):
             self.settle(sym)
 
+    def _copies(self, sym: str, w: _Window) -> set[int]:
+        """The marked live trades its history brought again (copies() of the trades still held): each kept once, the
+        history's (in its place: a millisecond's trades keep the exchange's order, however the catch-up came) with the
+        live one's aggressor side, the live one taken out, in one transaction with the history's trades still held,
+        which it writes. The minutes either was in, to build again."""
+        got = copies([(t.price, t.size) for t in w.ticks], [(tk.price, tk.size) for tk, _ in w.early])
+        if not got:
+            return set()
+        db = self.m.store.db
+        n, touched = 0, set()
+        with db:
+            for i, j in got:
+                h, tk = w.ticks[i], w.early[j][0]
+                if db.execute("DELETE FROM ticks WHERE rowid=(SELECT rowid FROM ticks WHERE symbol=? AND ts=? AND "
+                              "price=? AND size=? AND side=? ORDER BY rowid LIMIT 1)",
+                              (sym, tk.ts, tk.price, tk.size, tk.side)).rowcount:
+                    w.ticks[i] = Tick(h.symbol, h.ts, h.price, h.size, tk.side)
+                    n += 1
+                    touched |= {h.ts // 60_000 * 60_000, tk.ts // 60_000 * 60_000}
+                # else not stored (not found): both kept, as before r23, nothing lost
+            if n:   # (a live trade taken out only with its history's copy written)
+                db.executemany("INSERT INTO ticks VALUES (?,?,?,?,?)", [(t.symbol, t.ts, t.price, t.size, t.side)
+                                                                         for t in w.ticks])
+        w.copies = n
+        if n:
+            w.ticks = []
+            log.warning("gap fill %s: %d trades sent live came again in NinjaTrader's history (its catch-up as it "
+                        "started): kept once, at the history's time", sym, n)
+        return touched
+
+    def _rebuild(self, sym: str, minutes: set[int], live_min: int, pending: list[Tick] = ()):
+        """These minutes' bars built again from their stored trades in time order (any stored before the gap, then the
+        history's, then the live ones), and the live trades still `pending` (not written yet, written after the others):
+        written, and changed in place in the live feed's memory while it still holds them, also when it has moved on
+        (and in the bars waiting to be written); one left with no trade goes. The live minute, if the live feed has no
+        bar for it yet, is handed to it (a live trade in it extends it)."""
+        db = self.m.store.db
+        built: dict[int, Bar | None] = {}
+        for k in sorted(minutes):
+            trades = list(db.execute("SELECT ts, price, size, side FROM ticks WHERE symbol=? AND ts>=? AND ts<? "
+                                     "ORDER BY ts, rowid", (sym, k, k + 60_000)))
+            trades += [(tk.ts, tk.price, tk.size, tk.side) for tk in pending if k <= tk.ts < k + 60_000]
+            trades.sort(key=lambda r: r[0])   # (stable: of one ms, as stored, then as they wait)
+            b = None
+            for _, px, size, side in trades:
+                if b is None:
+                    b = Bar(t=k, o=px, h=px, l=px, c=px)
+                b.add(px, size, side)
+            built[k] = b
+        self.m.store.write([], [(sym, b) for b in built.values() if b is not None])
+        gone = [k for k, b in built.items() if b is None]
+        if gone:
+            with db:
+                db.executemany("DELETE FROM bars_1m WHERE symbol=? AND t=?", [(sym, k) for k in gone])
+        dirty = getattr(self.m, "dirty", {})
+        for k, b in built.items():   # one still to be written (the live feed's, or one it let go while writes failed)
+            x = dirty.get((sym, k))  # would be written over these
+            if x is None:
+                continue
+            if b is None:
+                del dirty[(sym, k)]
+            else:
+                x.o, x.h, x.l, x.c, x.v, x.bv, x.sv, x.n = b.o, b.h, b.l, b.c, b.v, b.bv, b.sv, b.n
+        s = getattr(self.m, "m1", {}).get(sym)
+        if s is None:
+            return
+        for x in list(s.bars):
+            if x.t not in built:
+                continue
+            b = built[x.t]
+            if b is None:
+                s.bars.remove(x)
+            else:
+                x.o, x.h, x.l, x.c, x.v, x.bv, x.sv, x.n = b.o, b.h, b.l, b.c, b.v, b.bv, b.sv, b.n
+        b = built.get(live_min)
+        if b is not None and (s.last is None or s.last.t < live_min):
+            s._seq += 1   # as after a restart (Market.seed)
+            b.seq = s._seq
+            s.bars.append(b)
+
     def _write_rows(self, sym: str, w: _Window):
         if w.rows:
             self.m.store.insert_rows_if_missing(sym, w.rows)
             w.rows = []
 
-    def _write_ticks(self, w: _Window):
-        if w.ticks:
-            self.m.store.write(w.ticks, [])
-            w.ticks = []
+    def _write_ticks(self, w: _Window, keep: int = 0):
+        """Its trades so far, but the last `keep`."""
+        if len(w.ticks) > keep:
+            cut = len(w.ticks) - keep
+            self.m.store.write(w.ticks[:cut], [])
+            w.ticks = w.ticks[cut:]
 
     def _rest_as_minutes(self, sym: str, w: _Window):
         """The trades came for part of the stretch only (NinjaTrader recorded them itself; the provider keeps no tick
@@ -686,7 +922,7 @@ class GapFill:
                 # no answer yet (NinjaTrader's data connection down, a slow download): the other symbols go on. Its
                 # window stays until its Z (or the add-on reconnects), so nothing else is asked for it meanwhile (the
                 # add-on answers each request on a thread of its own: two at once for a symbol would mix), and its answer
-                # counts as any: kept, or an error toward the limit. No answer yet isn't NinjaTrader's limit
+                # counts as any: kept, or an error that puts it off. No answer yet isn't NinjaTrader's limit
                 w.late = True
                 self.status[sym] = {**self.status.get(sym, {}), "state": "late", "note": "no answer from NinjaTrader yet"}
                 log.warning("older history %s: no answer from NinjaTrader yet", sym)
@@ -725,7 +961,8 @@ class GapFill:
             self.older_busy = None
         if kind in ("error", "none"):   # cut short: none of it kept (the first stored minute would hide what's missing)
             w.rows, w.count = [], 0
-            state = "limit" if self._older_failed(sym, w) else "error"
+            self._older_failed(sym)
+            state = "error"
         elif not w.count:   # nothing before its end: where the data provider's history ends
             self._set_limit(sym, w.end)
             state = "limit"
@@ -778,17 +1015,15 @@ class GapFill:
         if hasattr(self.m, "broadcast"):   # a chart waiting at its first bar (or told to wait) asks again now
             self.m.broadcast({"type": "older", "symbol": sym})
 
-    def _older_failed(self, sym: str, w: _Window) -> bool:
-        """An older request failed (an error answer): asked again in OLDER_RETRY_S, or, the OLDER_TRIES-th in a
-        row, taken as where NinjaTrader's history ends (True; checked again in a week, as an empty month)."""
+    def _older_failed(self, sym: str):
+        """An older request failed (an error answer): asked again in OLDER_RETRY_S, twice that after the next in a row,
+        and so on up to OLDER_RETRY_MAX_S, or at the add-on's next hello. Never taken as where NinjaTrader's history
+        ends: an error says nothing of that (NinjaTrader answered every request with Panic until it was restarted;
+        three errors in a row stopped its older history for a week)."""
         n = self.older_failed[sym] = self.older_failed.get(sym, 0) + 1
-        if n >= OLDER_TRIES:
-            self.older_failed.pop(sym, None)
-            self._set_limit(sym, w.end)
-            log.warning("older history %s: %d requests in a row failed; none asked before %s for a week", sym, n, w.end)
-            return True
-        self.older_wait[sym] = time.monotonic() + OLDER_RETRY_S
-        return False
+        wait = min(OLDER_RETRY_S * 2 ** min(n - 1, 16), OLDER_RETRY_MAX_S)
+        self.older_wait[sym] = time.monotonic() + wait
+        log.warning("older history %s: %d requests in a row failed; asked again in %d minutes", sym, n, wait // 60)
 
     def _older_studies(self, sym: str):
         """`sym`'s studies built from its last months (AMT, Daily SMA x4, TPO's days...) load again with the older

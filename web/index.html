@@ -177,7 +177,8 @@
         <h5>Chart</h5>
         <label class="chk"><input type="checkbox" data-cs="sessions"> Session breaks <small>(futures: <span data-ct="17:00">17:00 CT</span>; others at their exchange's day)</small></label>
         <div class="row seg" data-cs="crosshair"><span class="dim">Crosshair</span><button type="button" data-v="normal">Free</button><button type="button" data-v="magnet">Magnet (OHLC)</button></div>
-        <div class="row"><label class="inline">Right margin <input type="number" data-cs="rightBars" min="0" max="200" step="1"> bars</label></div>
+        <div class="row"><label class="inline">Right margin <input type="number" data-cs="rightBars" min="0" max="200" step="1" aria-label="Right margin in bars"><input type="number" data-cs="rightPct" min="0" max="90" step="1" aria-label="Right margin in % of the chart's width" hidden></label>
+          <span class="seg" data-cs="rightUnit" role="group" aria-label="Right margin unit" title="% of width: the latest bar stays that far in from the right edge, at any zoom"><button type="button" data-v="bars">bars</button><button type="button" data-v="pct">% of width</button></span></div>
         <p class="hint">Keys: ← → scroll, ↑ ↓ or + − zoom, Home/End, Alt+R reset view, Shift+drag measure. Type a timeframe or symbol (5, 1h, 2000t, NQ) and press Enter to switch.</p>
         <div class="row"><button type="button" id="cs-reset">Reset chart settings</button></div>
         <p class="hint credit">Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> Lightweight Charts™ (Apache 2.0).</p>
@@ -285,6 +286,7 @@
         <label class="df chk" data-f="background"><input type="checkbox" data-k="background"> <span class="s">box</span><span class="l">Background box</span></label>
         <span class="df alert-ctl" data-f="alert"><label class="chk" title="Alert to your channels when price crosses"><input type="checkbox" data-k="alertOn"> <span class="s">alert</span><span class="l">Alert when price</span></label>
           <select data-k="alertDir"><option value="cross">crosses</option><option value="above">crosses up</option><option value="below">crosses down</option></select>
+          <select data-k="alertFreq" aria-label="How often it alerts" title="How often it alerts: once (then it stops), every time (at most once a minute), or at most once every so many minutes"></select>
           <small class="alert-state"></small></span>
         <label class="df chk" data-f="tab" title="Off: on every tab of this symbol. On: only on this chart tab."><input type="checkbox" data-k="tabOnly"> <span class="s">this tab</span><span class="l">This tab only</span></label>
         <div class="df pts" data-f="pts"></div>
@@ -356,7 +358,9 @@
             <button type="button" class="ib" data-ind="ifthen" title="If/Then settings" aria-label="If/Then settings">⚙</button></header>
           <textarea id="pl-if" rows="8" spellcheck="false" autocomplete="off" aria-label="If/Then block for this symbol"
             placeholder="Paste an If/Then block: BIAS|LO|HI|TEXT, one band per line, top band first.&#10;U|5050|9999999|Accepts above 5050 → continuation&#10;P|4995|5005|Pivot ~5000&#10;D|0|4960|Below 4960 → range break"></textarea>
-          <div class="row"><button type="button" class="primary" id="pl-if-save">Save</button><span class="dim" id="pl-if-msg"></span></div>
+          <div class="row"><button type="button" class="primary" id="pl-if-save">Save</button><span class="dim" id="pl-if-msg"></span><span class="grow"></span>
+            <button type="button" class="link" id="pl-if-alert" title="Alerts on this plan: a line when price touches it, a zone when price enters it. They follow each new paste.">Create alert</button>
+            </div>
         </section>
         <section class="plan-card">
           <header><b>Level Lines</b><span class="grow"></span><label class="chk"><input type="checkbox" data-st="lines"> Show</label>
@@ -454,12 +458,13 @@
     </div>
   </div>
   <div id="al-dlg" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="al-title">
-    <form class="sheet" id="al-form" autocomplete="off">
+    <form class="sheet" id="al-form" autocomplete="off" novalidate>
       <div class="sheet-hd"><b id="al-title">Create alert</b><button type="button" id="al-close" aria-label="Close">✕</button></div>
       <div class="al-body">
         <label class="fld"><span>Condition</span><select id="al-src">
           <option value="price">Price</option><option value="vwap">Session VWAP</option><option value="rth_vwap">RTH VWAP</option>
           <option value="poc">POC</option><option value="vah">VAH</option><option value="val">VAL</option><option value="level">Daily levels</option>
+          <option value="ifthen">If/Then bands</option>
         </select></label>
         <div class="fld" id="al-i-row" hidden><span>Indicator</span><span class="pair">
           <select id="al-ispec" aria-label="Timeframe it runs on"></select>
@@ -482,9 +487,19 @@
         </select></label>
         <div class="fld" id="al-prof-row" hidden><span>Profile</span><span class="pair"><select id="al-prof" aria-label="Session"><option value="eth">ETH</option><option value="rth">RTH</option></select>
           <select id="al-which" aria-label="Which session"><option value="current">developing</option><option value="previous">previous</option></select></span></div>
-        <label class="fld" id="al-tol-row" hidden><span>Touch within</span><span class="pair"><input id="al-tol" type="number" min="0" max="200" step="1" value="0"> ticks</span></label>
+        <label class="fld" id="al-tol-row" hidden><span>Touch within</span><span class="pair"><input id="al-tol" type="number" min="0" max="200" step="1" value="0"> <span id="al-tol-unit">ticks</span></span></label>
+        <div class="fld" id="al-if-row" hidden><span>Rows</span><div class="al-if">
+          <label class="chk"><input type="checkbox" id="al-if-all" checked> All rows, as the plan changes</label>
+          <div id="al-if-list" role="group" aria-label="The plan's rows"></div>
+          <small class="hint" id="al-if-msg"></small>
+        </div></div>
         <div class="fld" id="al-on-row" hidden><span>Check</span><span class="seg" id="al-on"><button type="button" data-v="close" title="TradingView's Once Per Bar Close">Bar close</button><button type="button" data-v="bar" title="TradingView's Once Per Bar: the first trade that meets it">Intrabar</button></span></div>
-        <div class="fld"><span>Trigger</span><span class="seg" id="al-trig"><button type="button" data-v="once">Only once</button><button type="button" data-v="repeat">Every time</button></span></div>
+        <div class="fld"><span>Trigger</span><span class="pair"><select id="al-trig" aria-label="How often it fires">
+          <option value="once">Only once</option><option value="repeat">Every time</option>
+          <option value="1">Once a minute</option><option value="5">Once every 5 min</option><option value="15">Once every 15 min</option>
+          <option value="30">Once every 30 min</option><option value="60">Once an hour</option><option value="custom">Once every … min</option>
+        </select><span id="al-every-box" hidden><input id="al-every" type="number" min="1" max="1440" step="1" aria-label="Minutes between alerts"> min</span></span></div>
+        <label class="fld" id="al-rearm-row" hidden><span>Re-arm after</span><span class="pair"><input id="al-rearm" type="number" min="1" max="2000" step="1" value="8"> <span>ticks away</span></span></label>
         <small class="hint" id="al-trig-hint"></small>
         <div class="fld"><span>Expiration</span><span class="seg" id="al-expseg"><button type="button" data-v="never" title="Never expires: it stays armed until you delete it">Open-ended</button><button type="button" data-v="date">Until…</button></span></div>
         <div class="fld" id="al-exp-row" hidden><span></span><span class="pair"><input type="checkbox" id="al-exp-on" hidden><input type="datetime-local" id="al-exp" aria-label="Expires at, in the chart's time zone"> <span id="al-exp-tz">CT</span></span></div>

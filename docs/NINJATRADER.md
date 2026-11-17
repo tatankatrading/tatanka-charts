@@ -109,6 +109,55 @@ one, it stays as it is. Never from before the market's last contract roll (the h
 contract's); and each is asked from 3 minutes before it, so if NinjaTrader's prices there don't match the stored ones
 (a roll before this version kept roll times), the answer is dropped.
 
+The minute the live trades start in holds the history's trades from before them too (before, that minute's bar was
+short of them at every reconnect, though the trades themselves were stored): the live feed's own bar is changed in
+place, or the stored one once the live feed has moved on.
+
+**NinjaTrader started mid-session** raises a one-time catch-up of the last trades as live ones, and the add-on sends
+them. Raised with its last trade first, or newest first, the history (asked up to the first one's second) holds the
+others again, and they were stored twice. Add-on 23 marks each trade older than that second with NinjaTrader's own
+time for it, and the server keeps one of each, at the history's (the exchange's) time with the live trade's buy/sell
+side, in the exchange's order (several trades in one millisecond too, however the catch-up came), and builds those
+minutes' bars again from their trades, stored and the live feed's own (open charts reload). That takes add-on 23 and a
+server that says it takes the mark (this one, on connecting; to an older server the add-on sends its trades unmarked,
+as before); the marked trades the add-on sent in the first 30 s after the first live trade (by its stamps, not the
+stored times: a catch-up raised in the 16:00 CT break, whose trades are stored in a session, is compared too); and a run
+of 50 or more of them matching the history trade for trade (price and size), in the same or the reverse order, with at
+least 5 different prints in it. Raised oldest first, the history stops before the catch-up, so nothing comes twice:
+those trades keep the time the add-on sent them at (in the break, as any trade stamped then: before 16:30 the closing
+session's last millisecond, from 16:30 the next 17:00 open). When the history fails, nothing is compared and nothing is
+lost. `/api/health` shows how many were kept once as `copies` under `gap_fill` (the server's log says so too). The
+add-on's volume check in NinjaScript Output still counts the catch-up, so it warns after such a start all the same
+(see [CONNECTIONS.md](CONNECTIONS.md)): that warning does not mean those trades were stored twice.
+
+Still stored twice:
+- a shorter run (a quiet market, one price and size again and again, never matches);
+- marked trades that come after the history's answer, or sent 30 s or more after the first live trade;
+- of a catch-up of more than 20,000 trades, those before the history's last 20,000 (only those are held back to
+  compare; the history writes the older ones as they come);
+- trades the add-on queued before the server's version line came on that connection (a catch-up raised while the
+  add-on was not yet connected to the server): it sends them unmarked;
+- catch-up trades from before where the stored data ended (the history is asked from there, so it never holds them);
+- the add-on reconnecting before the history's answer: a stretch of 5 minutes or more of open market with no
+  1-minute bar comes back as a hole, which is not compared; a shorter one is not asked again, so nothing in it is
+  stored twice, but its trades from before the catch-up never come (as before add-on 23);
+- live trades still waiting to be written when the history's answer comes (the database not writable just then): both
+  kept, nothing lost;
+- a history answered as 1-minute bars: a stretch over 3 days (the add-on asks it as bars from the start: NinjaTrader
+  closed Friday at noon and started Monday afternoon, or after a long weekend), a data provider with no tick history,
+  or trades failing where bars work. Bars have no trade to pair, so nothing is compared: the catch-up's trades are
+  stored once, at the add-on's stamps, but count twice in the bars, in the history's bars of their own minutes and
+  again in the live minute's;
+- everything from add-on 22 or older.
+
+When NinjaTrader answers a history request with an error (on Nov 16 it answered every one with `Panic` until it was
+restarted), add-on 23 asks twice more each way it asks, 30 s apart, then answers the error: a stretch with a whole
+minute in it is asked 3 times as trades, then 3 times as 1-minute bars, 6 requests in all (before, 11 and 11: 11
+minutes a symbol); older history (1-minute bars only) 3 times. No answer, or an error while NinjaTrader's data
+connection is down, is still asked again 10 times. A stretch with no whole minute in it (a short reconnect's) is not
+asked again as 1-minute bars, which could fill none of it: after its 3 tries as trades the error is the answer, and no
+trades there is answered as no trades.
+
 **Older history** (add-on 20): the 1-minute bars from before anything stored, also from NinjaTrader, nothing to run.
 Once a future's gap and holes are filled, the server asks for the month before its first stored minute, then the
 month before that, until it has a year (`CHART_HISTORY_PREFILL_DAYS` in `.env`, 365; 0 turns it off), one request at a
@@ -117,11 +166,12 @@ months as it needs (up to 6 a time), ahead of that ("loading older bars from Nin
 back as the data provider's history does. Each part comes from its own contract by NinjaTrader's roll dates (Tools >
 Instruments > the symbol > Contract months), however old, none from before the first roll date NinjaTrader lists. A
 month that comes back empty is where the provider's history ends: the chart says so, and it isn't asked again for a
-week. Answered with an error (no data connection): asked again 10 minutes later; three errors in a row, and that is
-taken as where the history ends too. Not answered in 6 minutes (NinjaTrader's data connection down, a slow
-download): the other futures go on, and that one's answer is kept whenever it comes; nothing else is asked for that
-future meanwhile, so answers never mix. A chart waiting at its first bar says NinjaTrader didn't send older history
-and asks again as soon as it does.
+week. Answered with an error (no data connection, NinjaTrader's `Panic`): asked again 10 minutes later, then 20, 40,
+and from then on every hour, and at once when the add-on connects again (NinjaTrader restarted). An error is never
+taken as where the history ends (before, three in a row were, and nothing older was asked for a week). Not answered
+in 6 minutes (NinjaTrader's data connection down, a slow download): the other futures go on, and that one's answer is
+kept whenever it comes; nothing else is asked for that future meanwhile, so answers never mix. A chart waiting at its
+first bar says NinjaTrader didn't send older history and asks again as soon as it does.
 Charts don't reload for it (they load the older bars as they are scrolled back); a future's studies (AMT Toolkit,
 Daily SMA x4, TPO's days...) load again once its older months are in, if any are from the last 400 days. About 50-70
 MB per future per year. NinjaScript Output shows `filling ES 06-26 ... from NinjaTrader's 1-minute bars`;

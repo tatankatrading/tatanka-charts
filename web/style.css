@@ -263,8 +263,8 @@ h4 { margin: 14px 0 4px; color: var(--fg-dim); font-weight: 600; font-size: 12px
    and dialog, and the chart's bars and buttons (nothing it covers waits for OK) */
 #fired { position: fixed; right: 16px; bottom: calc(66px + env(safe-area-inset-bottom)); z-index: 4; width: min(380px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 #fired[hidden] { display: none; }
-/* a layout: above the charts' bars (a chart under 760 px wide has them at its bottom, as a phone), and out of the way
-   while a chart's dialog, menu, note or drawing bar is open in its frame */
+/* a layout: above the charts' bars (a chart under 760 px wide has its replay bar at its bottom, as a phone), and out
+   of the way while a chart's dialog, menu, note or drawing bar is open in its frame */
 body.multi #fired { bottom: calc(118px + env(safe-area-inset-bottom)); }
 body.cell-over #fired { visibility: hidden; }
 #fired .fired-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
@@ -474,6 +474,20 @@ body.ios-short .modal { padding-bottom: 0; }   /* the home indicator is below th
 #al-dlg .sheet-ft, #ask-dlg .sheet-ft { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
 #al-dlg .grow, #ask-dlg .grow { flex: 1; }
 #al-del { color: var(--down); }
+/* If/Then bands: All rows, or the plan's rows picked one by one (each a line or a zone) */
+#al-dlg #al-if-row { align-items: start; }
+#al-dlg .al-if { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#al-dlg .al-if .chk { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+#al-dlg .al-if .hint { margin: 0; }
+#al-if-list { display: flex; flex-direction: column; gap: 1px; max-height: 172px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+#al-if-list:empty { display: none; }
+#al-if-list label { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr); align-items: center; gap: 6px; font-size: 12.5px; padding: 2px 0; }
+#al-if-list .px { font-family: var(--num); white-space: nowrap; }
+#al-if-list .kind { font-size: 10px; line-height: 15px; padding: 0 4px; border-radius: 3px; border: 1px solid var(--line); color: var(--fg-dim); text-transform: uppercase; letter-spacing: .04em; }
+#al-if-list .kind.zone { border-color: var(--accent); color: var(--accent-hi); }
+#al-if-list .txt { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#al-if-list label.off { opacity: .55; }
+@media (max-width: 760px) { #al-if-list .txt { grid-column: 2 / -1; white-space: normal; } }   /* a phone: the text on its own line, under the price, so zones can be told apart */
 #ctx { position: fixed; z-index: 60; min-width: 220px; padding: 4px 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 #ctx[hidden] { display: none; }
 #ctx button { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; background: none; padding: 7px 12px; font-size: 13px; }
@@ -687,6 +701,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .plan-card .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .plan-card .pl-left { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12.5px; }
 .plan-card .pl-left textarea { margin-top: 4px; }
+.plan-card .row .grow { flex: 1; }
+.plan-card button.link { border: 0; background: none; padding: 2px 4px; color: var(--accent-hi); font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
 .plan-card .row .inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--fg-dim); }
 #pl-ll-top, #pl-ll-bot { width: 96px; }
 .plan-card .hint { color: var(--fg-dim); font-size: 11.5px; margin: 4px 0 0; line-height: 1.4; }
@@ -732,6 +748,9 @@ body.cell #top button, body.cell #top select { padding: 3px 7px; font-size: 12.5
 body.cell #splash img { width: 56px; height: 56px; }
 body.cell #tf-menu, body.cell #st-menu, body.cell #cs-menu { position: fixed; top: 36px; left: 6px; right: auto; width: min(360px, calc(100vw - 12px)); max-height: calc(100vh - 46px); overflow-y: auto; }
 body.cell #cs-menu { left: auto; right: 6px; }
+/* its drawing tools stay a column beside the chart however narrow the frame (placeDrawBar), not a phone's row */
+body.cell main { flex-direction: row; }
+body.cell #draw-bar.col { flex-direction: column; }
 
 /* ---- time and sales (the Tape tab) ---- */
 #tab-tape { padding: 0; flex-direction: column; }
@@ -1001,6 +1020,7 @@ body.ios-app { position: fixed; top: 0; left: 0; right: 0; bottom: auto; height:
 #amt-dash.pill { border-radius: 4px; overflow: hidden; }
 #amt-dash.pill .t { white-space: nowrap; }
 #amt-dash.pill .t::after { content: ' ▾'; color: var(--accent); }
+#amt-dash.pill .site { display: none; }   /* folded, a title tab only: a phone turned (wider than 760 px) wrote the site over it */
 #draw-edit .grow { flex: 1; }
 @media (max-width: 760px) { #overlay { font-size: 10.5px; right: 64px; } }
 /* layers in the Studies menu: drag the grip; higher draws in front */

@@ -17,9 +17,12 @@ A file is re-read when it changes (checked every 5 s). A link is asked at once w
 market is open, and not while it is shut: until the levels of the latest 8:15 or 16:45 CT publish are in hand, every
 15 s for 10 minutes and then every minute to the end of the hour; for 30 minutes after a new answer, every 2 minutes;
 otherwise every 30 minutes. Failures back off from 1 to 15 minutes (1 at most while a publish is due); a link the
-levels service says is not active, or has nothing for the symbol yet, is asked every 30 minutes. An answer that has
-not changed (ETag, 304) counts as an answer. A file or link that fails keeps the last good levels and says why. The
-Daily levels study, level alerts and /api/levels take these levels too (levels.py), made again on every change
+levels service says is not active, or has nothing for the symbol yet, is asked every 30 minutes. A link that has not
+answered since it was set or the server started is asked again after a failure even while the market is shut. An
+answer that has not changed (ETag, 304) counts as an answer. A file or link that fails keeps the last good levels and
+says why; at a start, until it is read or answers, those are the ones it gave last (levels_kept), as NinjaTrader's
+Toolkit starts from its last-good cache. A file or link newly set shows only its own levels, none until it gives some.
+The Daily levels study, level alerts and /api/levels take these levels too (levels.py), made again on every change
 (Market.levels_changed)."""
 import json
 import logging
@@ -146,6 +149,18 @@ def _redact(url: str) -> str:
     return re.sub(r"(https?://[^/]+/).*(/[^/]*)$", r"\1…\2", re.split(r"[?#]", url, maxsplit=1)[0])
 
 
+def _left(s: Source) -> str:
+    """What a failure leaves: the last good levels, or none yet."""
+    return "keeping the last good levels." if s.text else "no levels from it yet."
+
+
+def levels_text(levels: list, day: str) -> str:
+    """Levels as the Pivot Level / Resistance Levels / Support Levels block parse_levels reads back the same (each
+    kind's prices in their order, so the same names), with their date."""
+    kind = {k: ", ".join(repr(float(x.Price)) for x in levels if x.Kind == k) for k in (0, -1, 1)}
+    return f"Date: {day}\nPivot Level: {kind[0]}\nResistance Levels: {kind[-1]}\nSupport Levels: {kind[1]}\n"
+
+
 class DailyLevels:
     def __init__(self, market):
         self.m = market
@@ -257,12 +272,15 @@ class DailyLevels:
 
     # --- reading files and links -------------------------------------------------------------------------
     async def run(self):
-        self.remember()   # the levels as they are at start (a pasted line set before levels were kept)
+        first = True
         while True:
             try:
                 await self.poll()
             except Exception:
                 log.exception("daily levels poll failed")
+            if first:   # the levels as they are at start, once looked at (a pasted line set before levels were kept;
+                first = False   # not a row of none before a file's or link's last good levels are back)
+                self.remember()
             await stopping.pause(FILE_CHECK_S)   # not after a stop a link's request swallowed (stopping.py)
 
     async def poll(self, now_ms: int | None = None):
@@ -272,9 +290,12 @@ class DailyLevels:
         changed = set()
         for root in roots:
             target = (spec or DEFAULT_FILE).replace("{root}", root)
-            s = self.src.setdefault(root, Source())
-            before = (s.text, s.error)
-            if re.match(r"^https?://", target, re.I):
+            link = bool(re.match(r"^https?://", target, re.I))
+            s = self.src.get(root)
+            before = (s.text, s.error) if s else ("", "")
+            if s is None:   # the first look since the start: from the levels this file or link gave last
+                s = self.src[root] = self._last_good(root, target, link)
+            if link:
                 await self._read_link(root, target, s, now_ms)
             else:
                 self._read_file(target, s, now_ms, explicit=bool(spec))
@@ -290,14 +311,41 @@ class DailyLevels:
         if changed:
             self.m.levels_changed()   # the Daily levels study's and level alerts' too
 
+    def _last_good(self, root: str, target: str, link: bool) -> Source:
+        """A file's or link's Source at the start: the levels it gave last (the latest kept for the root with that
+        origin and source), as NinjaTrader's LevelFileSource loads its last-good cache before it reads or asks."""
+        origin, where = ("link", _redact(target)) if link else ("file", target)
+        s = Source(origin=origin, where=where, url=target if link else "")
+        db = getattr(getattr(self.m, "store", None), "db", None)
+        syms = [x for x in self.m.instruments if levels_root(x) == root]
+        if db is None or not syms:
+            return s
+        try:
+            row = db.execute(f"SELECT date, seen, levels FROM levels_kept WHERE symbol IN ({','.join('?' * len(syms))}) "
+                             "AND origin=? AND source=? AND levels!='[]' ORDER BY seen DESC LIMIT 1",
+                             (*syms, origin, where)).fetchone()
+            if row is None:
+                return s
+            text = levels_text([amt.Level(str(n), float(p), int(k)) for n, p, k in json.loads(row[2])], row[0])
+            s.date = amt.parse_levels(text)[1]
+        except (sqlite3.Error, ValueError, TypeError) as e:
+            log.warning("last levels kept for %s not used: %s", root, e)
+            return s
+        s.text, s.read_ms = text, row[1]
+        return s
+
     def _read_file(self, target: str, s: Source, now_ms: int, explicit: bool):
         docs = self.docs_dir()
         path = local_path(target, docs)
         held = s.origin == "file" and s.where == target   # the text held is this file's, not a link's or another file's
+        if not held:   # only this file's levels from now on, none until it gives some
+            s.text, s.date, s.read_ms = "", None, None
         s.origin, s.where = "file", target
         if path is None:
             s.error = (f"{target} is outside Documents: the server only sees the Documents folder (DOCUMENTS_DIR)."
                        if explicit else "")
+            if not explicit:   # the default file, with no Documents folder to look in: the pasted line, as when it is
+                s.text, s.origin = "", "none"   # not there (not the levels it gave before a restart)
             return
         try:
             st = path.stat()
@@ -315,28 +363,33 @@ class DailyLevels:
             if not levels:
                 raise ValueError("The levels file is empty.")
         except (OSError, UnicodeError, ValueError) as e:
-            s.error = f"{target}: {e}. Keeping the last good levels."
+            s.error = f"{target}: {e}. {_left(s).capitalize()}"
             s.mtime = st.st_mtime
             return
         s.text, s.date, s.read_ms, s.mtime, s.error = text, date, now_ms, st.st_mtime, ""
 
     async def _read_link(self, root: str, url: str, s: Source, now_ms: int):
-        if s.origin != "link" or s.url != url or s.link is None:   # set, changed, or the server just started: asked at
-            s.next_ask_ms, s.link = 0, LinkState()                  # once, its schedule from the start
+        if s.origin != "link" or s.url != url:   # set or changed: only this link's levels from now on, none until it
+            s.text, s.date, s.read_ms, s.link = "", None, None, None   # answers (not the file's or link's before)
+        if s.link is None:   # ...or the server just started (from its last good levels): asked at once, its schedule
+            s.next_ask_ms, s.link = 0, LinkState()   # from the start
         s.origin, s.where, s.url = "link", _redact(url), url
         if now_ms < s.next_ask_ms:
             return
-        groups = [self.m.instruments[x].calendar for x in self.m.instruments if levels_root(x) == root]
-        if s.next_ask_ms and not any(sessions.is_open(now_ms, g) for g in groups):
-            return   # shut: the last levels stand, and it is asked at the first check once the market opens
         k, now = s.link, datetime.fromtimestamp(now_ms / 1000, sessions.CT).replace(tzinfo=None)
+        groups = [self.m.instruments[x].calendar for x in self.m.instruments if levels_root(x) == root]
+        # shut: the last levels stand, and it is asked at the first check once the market opens; one that has not
+        # answered since it was set or the server started (a failed first ask) is asked on the failure back-off meanwhile
+        shut = not any(sessions.is_open(now_ms, g) for g in groups)
+        if s.next_ask_ms and shut and (k.answered or k.status in (403, 404)):
+            return
         try:
             try:
                 r = await self.m.http.get(url, timeout=15, follow_redirects=True,
                                           headers={"If-None-Match": k.etag} if k.etag else {})
             except Exception as e:   # network: keep the last good levels
                 k.status, k.failures = 0, k.failures + 1
-                s.error = f"Levels link unreachable ({type(e).__name__}): keeping the last good levels."
+                s.error = f"Levels link unreachable ({type(e).__name__}): {_left(s)}"
                 return
             code, headers = r.status_code, getattr(r, "headers", None) or {}
             # a 403 or 404 the levels service did not mark came from something in between: retried as a failure
@@ -347,7 +400,7 @@ class DailyLevels:
             if code != 200:
                 k.failures += 1
                 s.error = (f"The levels link was refused (HTTP {code}): check the link." if code in (401, 403, 404, 410)
-                           else f"Levels link unreachable (HTTP {code}): keeping the last good levels.")
+                           else f"Levels link unreachable (HTTP {code}): {_left(s)}")
                 return
             k.failures, k.etag, text = 0, headers.get("ETag", "") or "", r.text
             if text != k.body or not k.answered:   # a new text: the publish it is (its Published line), or this answer
@@ -362,7 +415,7 @@ class DailyLevels:
                 if not levels:
                     raise ValueError("no levels in the answer")
             except ValueError as e:   # keep the last good levels
-                k.problem = s.error = f"Levels link unreachable ({type(e).__name__}): keeping the last good levels."
+                k.problem = s.error = f"Levels link unreachable ({type(e).__name__}): {_left(s)}"
                 return
             k.problem = ""
             if text != s.text:

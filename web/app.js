@@ -520,7 +520,7 @@ chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
 // ---- chart settings (per device): bar style, colors, grid, session breaks, crosshair, price line, countdown ------
 const CS_DEFAULTS = { style: 'candles', up: NT.up, down: NT.down, doji: NT.doji, bg: NT.bg, volume: true, priceOnly: false, priceLine: true,
   countdown: true, gridLines: 'both', gridColor: NT.grid, textColor: NT.text, xhairColor: '#9598a1', fontSize: 12, watermark: false,
-  sessions: true, crosshair: 'normal', rightBars: 6, plAuto: true, plColor: '#ffffff', plStyle: 'dashed', plWidth: 1, plOpacity: 100, dataWin: false,
+  sessions: true, crosshair: 'normal', rightBars: 6, rightUnit: 'bars', rightPct: 50, plAuto: true, plColor: '#ffffff', plStyle: 'dashed', plWidth: 1, plOpacity: 100, dataWin: false,
   barsFront: true };   // the price bars in front of every study (layerPlan)
 const LW_STYLE = { solid: 0, dotted: 1, dashed: 2, large: 3 };
 // Background, grid and axis text together, as the chart themes in NinjaTrader and TradingView.
@@ -1382,18 +1382,27 @@ async function vpRequest(k, reset) {
 }
 function vpAll(reset) { S.vpLive = {}; for (const k of vpKeys()) vpRequest(k, reset); }   // the chart's bars again: as an indicator loaded again
 // AAVP's and PVP's POC, VAH and VAL plots: NinjaTrader resets them on every bar of history and publishes the profile's
-// levels on the bars that form while it runs (and the last one at load), each at its latest. Kept here per bar (its open
-// and seq) as the answers and the live bar come, for the data window (S.vpLive).
+// levels on the bars that form while it runs (and the last one at load), each at its latest. Its history pass runs the
+// series by time stamp (bars stamped at their end, the chart's first on a tie), so the forming minute publishes on the
+// chart bar then current: when it ends before the forming bar does, the bar before that one keeps them too (not on a
+// 1-minute chart, nor in a bar's last minute, nor on tick or range bars). Kept here per bar (its open and seq) as the
+// answers and the live bar come, for the data window (S.vpLive); the first note since a load (or a changed setting) is
+// the load's.
 // Not while the bars shown are another view's, on their way out (a replay jump, another timeframe or ETH/RTH: noted on
 // the new last bar when they come, applyHistory), nor from an answer of another view or of a setting changed since (the
-// bars that close before the new setting's answer stay empty; NinjaTrader's load is at once).
+// bars that close before the new setting's answer stay empty, but for the one before the forming bar, as at load;
+// NinjaTrader's load is at once).
 const vpBarKey = (b) => `${b.t}|${b.seq ?? ''}`;
 function vpLiveNote(k) {
   if (!['aavp', 'pvp'].includes(baseOf(k)) || !S.bars.length || S.liveWait || S.replay?.loading || S.vp[k]?.view !== vpViewKey(k)) return;
   const p = vpLatest(vpBase(k));
   if (!p) return;
-  const m = S.vpLive[k] || (S.vpLive[k] = new Map());
-  m.set(vpBarKey(S.bars[S.bars.length - 1]), [p.poc, p.vah, p.val]);
+  const n = S.bars.length, load = !S.vpLive[k], m = S.vpLive[k] || (S.vpLive[k] = new Map()), v = [p.poc, p.vah, p.val];
+  if (load && n > 1 && isTime() && !calSpec()) {   // the minute forming now (the replay clock's) ends before the last bar
+    const at = S.replay ? S.replay.at : Date.now();
+    if (Math.floor(at / 60e3) * 60e3 + 60e3 < barCloseMs(S.bars[n - 1])) m.set(vpBarKey(S.bars[n - 2]), v);
+  }
+  m.set(vpBarKey(S.bars[n - 1]), v);
   if (m.size > 20000) m.delete(m.keys().next().value);
 }
 function vpLiveTick() { for (const k of vpKeys()) if (S.st[k] && S.vp[k]) vpLiveNote(k); }   // the forming bar: the levels now
@@ -1488,11 +1497,12 @@ function ifStudyLines() {
   if (S.st.dsma) for (const p of [0, 1, 2, 3]) out.push([`Daily SMA x4: DailySMA${p + 1}`, (i) => ifNum(S.dsmaVals[p]?.[i])]);
   return out;
 }
+// (from the chart's indicator list, not the built ones: a layout's page has only the list of the chart last clicked)
 function ifInputChoices() {
   const out = Object.keys(IF_BAR_INPUTS);
-  for (const x of S.inds || []) {
-    const lines = IND_DEFS[x.c.type].lines;
-    for (const [, label] of lines) out.push(ifInputName(x.c, label, lines.length));
+  for (const c of S.indCfg || []) {
+    const lines = IND_DEFS[c.type].lines;
+    for (const [, label] of lines) out.push(ifInputName(c, label, lines.length));
   }
   for (const [name] of ifStudyLines()) out.push(name);
   return [...new Set(out)];
@@ -1652,10 +1662,30 @@ function amtRoomCheck() {
   const load = !!amtRoomSet && !!lr && Math.abs(lr.from - amtRoomSet.from) < 0.5 && Math.abs(lr.to - amtRoomSet.to) < 0.5;
   amtRoomWas = now;
   if (load) amtRoomSet = null;
-  if (S.st.amt || S.st.ifthen || S.st.dsma) amtLayout(!load && !!was && was[0] === now[0] && was[1] !== now[1]);
+  // A margin in % of the width: a load and every zoom and resize set it again. now[2]: the latest bar at its place
+  // (following the latest bars), or put there now (the library moves it on its next frame: the range read here is still
+  // the old one).
+  const pct = S.cs.rightUnit === 'pct', moved = !load && !!was && (was[0] !== now[0] || was[1] !== now[1]);
+  const set = (S.st.amt || S.st.ifthen || S.st.dsma || pct) && amtLayout(!load && !!was && was[0] === now[0] && was[1] !== now[1], pct && (load || moved) ? load || !!was[2] : null);
+  const r = pct && !set && ts.getVisibleLogicalRange(), n = S.bars.length;
+  now[2] = pct && (set || (!!r && n > 0 && Math.abs(r.to - (n - 1) - ts.options().rightOffset) * now[1] < Math.max(4, now[1] / 2)));
 }
-function amtLayout(zoomed = false) {
-  let ro = Math.max(S.cs.rightBars, S.st.amt && !S.ext ? (window.innerWidth < 760 ? 25 : 55) : 0);   // never less than the setting
+// The Right margin setting in bars at this width and bar spacing. In % of the width: the latest bar's middle at
+// (100 - p)% of the price pane (the library draws it offset + 0.5 bars and 1 px in from the right edge).
+const pctBars = (width, spacing, p) => (width > 0 && spacing > 0 ? Math.max(0, (width * p / 100 - 1) / spacing - 0.5) : 0);
+const rightMargin = () => (S.cs.rightUnit === 'pct' ? pctBars(chart.timeScale().width(), chart.timeScale().options().barSpacing, S.cs.rightPct) : S.cs.rightBars);
+// A load's and Reset view's range: the latest 150 bars and the margin (ro: the option, with the labels' room). In % of
+// the width: as many bars across as a fresh chart's (163), the latest at its place.
+function latestRange(n, ro) {
+  if (S.cs.rightUnit !== 'pct') return { from: n - 150 - ro, to: n + ro };
+  const to = n - 1 + Math.max(0, 163 * S.cs.rightPct / 100 - 0.5);
+  return { from: to - 162, to };
+}
+// follow (a margin in % of the width, after a zoom or resize): whether the latest bar was at its place before it. It
+// goes back there, also from out of view; a chart scrolled back keeps its view. The % is never capped.
+function amtLayout(zoomed = false, follow = null) {
+  const base = rightMargin();
+  let ro = Math.max(base, S.st.amt && !S.ext ? (window.innerWidth < 760 ? 25 : 55) : 0);   // never less than the setting
   if (S.st.ifthen && S.ifSet.LineLabels && S.ifRows.length) ro = Math.max(ro, S.ifSet.LabelOffset + 2);   // If/Then labels
   if (S.st.dsma && S.dsmaSet.ShowLabels) {   // Daily SMA x4's: LabelOffset bars on, then about "200 SMA - 6897.25"
     const fs = { Tiny: 10, Small: 12, Large: 18 }[S.dsmaSet.LabelSize] || 14;
@@ -1665,16 +1695,17 @@ function amtLayout(zoomed = false) {
   // (footprint's wide bars: the last at the legend); the labels further right show again zoomed out
   const view = chart.timeScale().getVisibleLogicalRange();
   if (view && view.to > view.from) ro = Math.min(ro, Math.max(2, Math.floor((view.to - view.from) * AMT_ROOM)));
-  ro = Math.max(ro, S.cs.rightBars);
+  ro = Math.max(ro, base);
   // Setting the margin scrolls the chart to the latest bars: only when it changes, and a chart scrolled back stays put.
   // A zoom (the cap again) keeps the view it made, on the bar under the cursor, unless the empty space right of the
   // last bar is more than the new cap: then the last bar comes in to it.
   const ts = chart.timeScale();
-  if (ts.options().rightOffset === ro) return;
   const lr = ts.getVisibleLogicalRange(), n = S.bars.length, back = lr && n && lr.to < n - 1;
-  const keep = back || (zoomed && lr && n && lr.to - (n - 1) <= ro);
+  if (Math.abs(ts.options().rightOffset - ro) < 1e-6 && !(follow && lr && n && Math.abs(lr.to - (n - 1) - ro) > 1e-6)) return false;
+  const keep = follow !== null ? !follow : back || (zoomed && lr && n && lr.to - (n - 1) <= ro);
   ts.applyOptions({ rightOffset: ro });
   if (keep) ts.setVisibleLogicalRange(lr);
+  return !keep;   // the latest bar put at the margin
 }
 // The chart's Toolkit settings: the server's starting ones with the open tab's on top (tabSet). The alert settings
 // are the server's for the chart's symbol, the same on every chart of it (one runner per symbol alerts), and the levels
@@ -1741,8 +1772,10 @@ function renderAmtDash() {
     : !d.ready ? 'Tatanka AMT v1.2.4 — waiting for bars' : [amtTzWarning(), d.warning].filter(Boolean).join(' ');
   el.hidden = !(ready && S.st.amtDash && d.style?.tbl_show !== false);
   if (!el.hidden) {
-    // Folding to SESSION and DAY TYPE is this app's (phones start folded); NinjaTrader always shows every row.
-    const phone = window.innerWidth < 760, folded = (local.get('amtCollapsed', '') || (phone ? '1' : '0')) === '1';
+    // Folding to SESSION and DAY TYPE is this app's (phones start folded); NinjaTrader always shows every row. A phone
+    // turned is wider than 760 px, its chart then only about 280 px high: by its screen, it is still a phone.
+    const phone = window.innerWidth < 760 || Math.min(screen.width, screen.height) < 500;
+    const folded = (local.get('amtCollapsed', '') || (phone ? '1' : '0')) === '1';
     el.classList.toggle('collapsed', folded);
     el.querySelector('.rows').replaceChildren(...d.dash.labels.slice(0, folded ? (phone ? 0 : 2) : undefined).map((label, i) => {
       const r = document.createElement('div'), k = document.createElement('span'), v = document.createElement('span');
@@ -1973,7 +2006,8 @@ function renderTpoInfo() {
   if (S.tpoError) { el.textContent = S.tpoError; return; }
   const d = S.tpo, t = inst().tick_size;
   const step = d?.profiles?.at(-1)?.step ?? d?.step;   // the newest profile's rows (the engine's can be the next day's already)
-  const hours = S.tpoSet.UseInstrumentHours === false ? S.tpoSet.SessionTime : ownHours(S.tpoSet.SessionTime);   // as the server runs it
+  // the Session Time the server ran (one the profile can't read, 0860-1500, as typed); an older server's has none
+  const hours = d?.session ?? (S.tpoSet.UseInstrumentHours === false ? S.tpoSet.SessionTime : ownHours(S.tpoSet.SessionTime));
   el.textContent = !d ? 'Loading…' : step ? `Rows ${px(step)} (${Math.round(step / t)} ticks), ${d.minutes}-minute bars, ${hours} CT.` : 'Waiting for bars.';
 }
 
@@ -2487,13 +2521,16 @@ function renderLlInfo(k = 'lines') {
 }
 
 // ---- Plan tab: this symbol's daily levels (as TradingView takes them), If/Then block and Level Lines ---------------------
-const markDirty = (e) => { e.target.dataset.dirty = '1'; e.target.dataset.sym ||= S.symbol; };
+// who: whose text the box holds, the chart's symbol (the Level Lines boxes: the symbol whose levels they are, MES's are
+// ES's)
+const markDirty = (e, who = S.symbol) => { e.target.dataset.dirty = '1'; e.target.dataset.sym ||= who; };
 // fill: replace what is in a box unless it has unsaved edits or the cursor is in it; says whether it did. A box holding
 // another symbol's text (dataset.sym: the chart switched since) is replaced, edited or not; its own symbol's edits stay
-// through a reconnect or new levels.
-function fillBox(el, v, fill) {
-  fill ||= !!el.dataset.sym && el.dataset.sym !== S.symbol;
-  if ((fill || !el.dataset.dirty) && document.activeElement !== el) { el.value = v; delete el.dataset.dirty; el.dataset.sym = S.symbol; return true; }
+// through a reconnect or new levels, and the Level Lines edits through a switch between a micro and its full-size
+// contract, which edit the same levels.
+function fillBox(el, v, fill, who = S.symbol) {
+  fill ||= !!el.dataset.sym && el.dataset.sym !== who;
+  if ((fill || !el.dataset.dirty) && document.activeElement !== el) { el.value = v; delete el.dataset.dirty; el.dataset.sym = who; return true; }
   return false;
 }
 S.lvStatus = null;
@@ -2540,6 +2577,7 @@ function renderPlanIf(fill = true) {
   const other = !!box.dataset.sym && box.dataset.sym !== S.symbol;
   if ((d || other) && fillBox(box, d?.rows || '', fill || other)) box.dataset.sym = S.symbol;
   $('#pl-if-msg').textContent = !d ? '' : `${S.ifRows.length} bands${d.updated ? `, saved ${ax.full.format(d.updated)} ${zs(d.updated)}` : ''}`;
+  $('#pl-if-alert').hidden = !S.instruments[S.symbol];   // alerts run on a live future's trades
 }
 $('#pl-if').oninput = markDirty;
 $('#pl-if-save').onclick = async () => {
@@ -2556,6 +2594,15 @@ $('#pl-if-save').onclick = async () => {
   ifPrim.update();
   renderPlanIf(false);
   renderIfInfo();
+};
+// alerts on this plan, as it changes. The alert reads the saved plan: a paste not saved yet is saved first (as Save),
+// so the dialog lists the rows in the box; not saved (an error, shown), no dialog
+$('#pl-if-alert').onclick = async () => {
+  if ($('#pl-if').dataset.dirty) {
+    await $('#pl-if-save').onclick();
+    if ($('#pl-if').dataset.dirty) return;
+  }
+  openAlertDialog({ sym: S.symbol, src: 'ifthen' });
 };
 
 const LL_BOXES = ['#pl-ll-top', '#pl-ll-bot', '#pl-ll'];
@@ -2575,14 +2622,15 @@ function renderPlanLines(fill = true) {
   if (!indReady('lines')) return;
   const s = S.llSet, mode = bondTick(S.symbol) ? 'text' : 'decimal';   // a phone's keypad: 32nds need the apostrophe
   for (const q of ['#pl-ll-top', '#pl-ll-bot']) $(q).inputMode = mode;
-  fillBox($('#pl-ll-top'), llRangeShown(s.RangeTop), fill);
-  fillBox($('#pl-ll-bot'), llRangeShown(s.RangeBottom), fill);
-  fillBox($('#pl-ll'), s.CustomLevels || '', fill);
+  const who = indSym('lines');
+  fillBox($('#pl-ll-top'), llRangeShown(s.RangeTop), fill, who);
+  fillBox($('#pl-ll-bot'), llRangeShown(s.RangeBottom), fill, who);
+  fillBox($('#pl-ll'), s.CustomLevels || '', fill, who);
   const n = levelLinesOf(s).length, both = llShared();
   $('#pl-ll-msg').textContent = [n ? `${n} lines` : '', both !== S.symbol ? `shared by ${both}` : ''].filter(Boolean).join(', ');
   renderLlLeft();
 }
-LL_BOXES.forEach((q) => { $(q).oninput = markDirty; });
+LL_BOXES.forEach((q) => { $(q).oninput = (e) => markDirty(e, indSym('lines')); });
 $('#pl-ll-save').onclick = async () => {
   const top = llRangeIn($('#pl-ll-top').value), bot = llRangeIn($('#pl-ll-bot').value);
   if (!(top >= 0) || !(bot >= 0)) { toast('Range top and bottom: a price, or empty for none'); return; }
@@ -2723,6 +2771,10 @@ function indAdapter(key) {
       const freeze = INST_RE.test(`${key}_2`) ? { nt, was: { ...nt, ...(S.ind.overrides[key] || {}) }, now: { ...nt, ...put } } : null;
       const undo = instFreeze(key, freeze);
       try { await indPut(key, put); } catch (e) { undo?.(); throw e; }
+      // this app's own settings (If/Then's Input series) are no starting settings, and allCharts leaves each chart's as
+      // saved (TK_CHART_ONLY): this chart's as the dialog shows it, applied or not, is saved first (none: back to Close)
+      const only = new Set(Object.keys(local)), had = tabSet()[key] || {};
+      if (only.size && !same(pickSet(d, only, true), pickSet(had, only, true))) tabSetSave(key, { ...pickSet(had, only, false), ...pickSet(d, only, true) });
       // as OK does, for this symbol's alerts (another's keep theirs); this tab's own may still be in S.gapSet until allCharts
       if (key === 'gap') await gapAlertsFollow(full, pickSet(d, shared, true));
       return freeze;
@@ -2981,17 +3033,7 @@ function applyHistory(m) {
   const scaleKey = viewKey(), want = S.viewWant;
   S.loadedKey = scaleKey;
   S.loadedSym = S.symbol;   // whose bars the chart shows (subscribe())
-  S.viewWant = null;
-  if (viewApply(want)) S.scaleKey = scaleKey;   // the tab's view from before (or the same bars again: as they were)
-  else {
-    const ro = chart.timeScale().options().rightOffset;
-    chart.timeScale().setVisibleLogicalRange(amtRoomSet = { from: c.length - 150 - ro, to: c.length + ro });   // not a zoom
-    if (S.lock) applyLock(true);   // a locked ratio centres on the new bars
-    if (scaleKey !== S.scaleKey) {   // another symbol or bar type: a fixed price range from before would show nothing
-      if (S.scaleKey && !S.lock && !PS().options().autoScale) setAuto(true);
-      S.scaleKey = scaleKey;
-    }
-  }
+  viewLoad();
   // scrolled back into older history before (a reconnect, a gap fill's reload, another tab and back): loaded back to it
   // (the view not if it was moved meanwhile: scrolled, zoomed, a go-to-date); and back to an anchored VWAP's anchor,
   // so it starts there, not at the first bar loaded
@@ -3007,12 +3049,36 @@ function applyHistory(m) {
         if (backAnchor != null && S.bars[0]?.t > backAnchor && (S.bars.length >= OLDER_MAX || ended)) avwapFar.add(akey);
       });
   }
-  if (S.goTo != null) { const ms = S.goTo; S.goTo = null; goToTime(ms); }   // a journal trade on another symbol
+  if (S.goTo) { const go = S.goTo; S.goTo = null; if (go.sym === S.symbol) goToTime(go.ms); }   // a journal trade on another symbol
   if (ax.pick === 'exchange' && exch().tz !== ax.zone) setChartZone('exchange', false);   // another exchange's clock
   cmpLoad();
   loadNote('');   // loaded: the legend says the source
   header();
 }
+// A load's view: the tab's from before (S.viewWant), else the latest 150 bars. Not while the chart has no width (a
+// phone's panel page): a range set then put the bars the library's least 0.5 px apart, shown so once the chart had its
+// width, and saved so. It waits, S.viewWant kept (nothing saves over it), until the chart has a width.
+function viewLoad() {
+  const want = S.viewWant, scaleKey = S.loadedKey;
+  S.viewHeld = !chart.timeScale().width();
+  if (S.viewHeld) return;
+  S.viewWant = null;
+  if (viewApply(want)) S.scaleKey = scaleKey;   // the tab's view from before (or the same bars again: as they were)
+  else {
+    const ro = chart.timeScale().options().rightOffset;
+    chart.timeScale().setVisibleLogicalRange(amtRoomSet = latestRange(S.bars.length, ro));   // not a zoom
+    if (S.lock) applyLock(true);   // a locked ratio centres on the new bars
+    if (scaleKey !== S.scaleKey) {   // another symbol or bar type: a fixed price range from before would show nothing
+      if (S.scaleKey && !S.lock && !PS().options().autoScale) setAuto(true);
+      S.scaleKey = scaleKey;
+    }
+  }
+}
+chart.timeScale().subscribeSizeChange((w) => {
+  if (!(w > 0 && S.viewHeld && S.loadedKey === viewKey())) return;
+  viewLoad();
+  if (S.goTo?.sym === S.symbol) { const ms = S.goTo.ms; S.goTo = null; goToTime(ms); }   // a journal trade picked meanwhile
+});
 // The chart's bars, gone: while another symbol's bars (a free-data chart's other timeframe or session) are on their
 // way, and when they don't come. The tab's view to restore (S.viewWant) stays for them.
 function barsClear() {
@@ -4708,6 +4774,22 @@ function studyName(p) {
   return `${p.which === 'previous' ? 'previous' : 'developing'} ${(p.profile || 'eth').toUpperCase()} ${p.study.toUpperCase()}`;
 }
 
+// If/Then plan alerts (the server's alerts.py, ifthen.alert_band): each row alerts by itself. A line is one price (LO
+// equal to HI, or one end open: LO 0, the line at HI; HI 9999999, at LO) and fires on a touch; a zone has both ends
+// and fires when price comes into it. No bottom and no top: never. A row chosen is named by its [LO, HI] as written.
+function ifAlertBand(low, high) {
+  const lo = Math.min(low, high), hi = Math.max(low, high);
+  if (lo <= 0 && hi > 1000000) return null;
+  if (lo <= 0) return { kind: 'line', lo: hi, hi };
+  if (hi > 1000000 || lo === hi) return { kind: 'line', lo, hi: lo };
+  return { kind: 'zone', lo, hi };
+}
+function ifBandText(sym, low, high) {
+  const b = ifAlertBand(low, high), f = (v) => fmtSym(sym, v);
+  return !b ? 'no price' : b.kind === 'line' ? f(b.lo) : `${f(b.lo)}–${f(b.hi)}`;
+}
+const ifRowsText = (sym, rows) => (rows === 'all' || !Array.isArray(rows) ? 'all rows' : rows.map(([lo, hi]) => ifBandText(sym, lo, hi)).join(', '));
+
 // [condition, details] for the list.
 // Indicator alert series, as the server names them (ind_alerts.line_name): "Bollinger(14,2) Upper", "EMA(21)".
 function indLineName(d) {
@@ -4731,13 +4813,26 @@ function describe(a) {
   if (a.kind === 'ind') what = `${indLineName(p.a)} ${OPS[p.direction] || p.direction} ${indLineName(p.b)} on ${p.spec}${p.rth ? ' RTH' : ''}${p.on === 'close' ? ' bar close' : ''}`;
   else if (a.kind === 'price') what = CHANNEL.has(p.direction) ? `${OPS[p.direction]} ${f(p.price)} – ${f(p.price2)}` : `${OPS[p.direction] || p.direction} ${f(p.price)}`;
   else if (a.kind === 'study') what = `touches ${studyName(p)}${tol}`;
+  else if (a.kind === 'ifthen') what = `If/Then plan: ${ifRowsText(a.symbol, p.rows)}${tol}`;
   else if (a.kind === 'line') {
     const kind = { hline: 'line', hray: 'ray', trend: 'trend line' }[p.type] || 'line';
     const now = drawingLinePrice(p, Date.now(), S.holidays, S.instruments[a.symbol]?.calendar || 'equity');   // the server's level
     what = `${OPS[p.direction] || p.direction} drawn ${kind}${now != null ? ` (now ${f(now)})` : ''}`;
   } else what = `touches ${p.levels === 'all' ? 'Daily levels' : p.levels.join(', ')}${tol}`;
-  const details = [a.repeat ? (a.kind === 'ind' ? 'Once a bar' : 'Every time') : 'Only once', p.expires ? `until ${ax.full.format(p.expires)} ${zs(p.expires)}` : 'open-ended', a.note].filter(Boolean);
+  const rearm = a.repeat && REARMS.has(a.kind) ? `re-arms ${ticksText(p.rearm_ticks ?? 8)} away` : '';
+  const details = [trigText(a), rearm, p.expires ? `until ${ax.full.format(p.expires)} ${zs(p.expires)}` : 'open-ended', a.note].filter(Boolean);
   return [`${a.symbol} ${what}`, details.join(' · ')];
+}
+// How often an alert fires (Alert.repeat, params.every_min), as the Alerts tab writes it: Only once, Every time (Once a
+// bar for an indicator), Once every 5 min.
+const REARMS = new Set(['level', 'study', 'ifthen']);   // the kinds that re-arm by distance (params.rearm_ticks)
+const ticksText = (n) => `${n} tick${n === 1 ? '' : 's'}`;
+const everyText = (n) => (n === 1 ? 'Once a minute' : n === 60 ? 'Once an hour' : n === 1440 ? 'Once a day' : `Once every ${n} min`);
+function trigText(a) {
+  const n = a.repeat ? a.params.every_min : 0;
+  if (!a.repeat) return 'Only once';
+  if (a.kind === 'ind') return n ? `Once a bar, at most ${everyText(n).toLowerCase()}` : 'Once a bar';
+  return n ? everyText(n) : 'Every time';
 }
 function alertState(a) {
   if (a.enabled) return ['Active', 'on'];
@@ -4795,14 +4890,49 @@ $('#al-clear').onclick = async () => {
 };
 
 // ---- the Create / Edit alert dialog ---------------------------------------------------------------------------
-const dlg = { edit: null, sym: null, repeat: false };
-function setTrig(repeat) {
+// dlg.repeat: Only once (false) or not; dlg.every: Once every N minutes (0: Every time; NaN: a custom one not typed yet)
+const dlg = { edit: null, sym: null, repeat: false, every: 0 };
+const EVERY_PRESETS = [1, 5, 15, 30, 60];   // the Trigger list's; any other N (1 to 1440) is its "Once every … min"
+const perText = (n) => (n === 1 ? 'once a minute' : n === 60 ? 'once an hour' : n === 1440 ? 'once a day' : `once every ${n} minutes`);
+function setTrig(repeat, every = dlg.every, custom = false) {   // custom: "Once every … min" picked (its box shown)
+  const src = $('#al-src').value, price = src === 'price', rearms = !price && !src.startsWith('i:');
   dlg.repeat = repeat;
-  $('#al-trig').querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === 'repeat') === repeat));
+  dlg.every = !repeat ? 0 : Number.isNaN(every) ? NaN : every || 0;
+  if (price && dlg.every === 1 && !custom) dlg.every = 0;   // a price alert's Every time: the same thing (trigList)
+  trigList(price);
+  const n = dlg.every, mine = custom || Number.isNaN(n) || (n > 0 && !EVERY_PRESETS.includes(n));
+  $('#al-trig').value = !repeat ? 'once' : mine ? 'custom' : n ? String(n) : 'repeat';
+  $('#al-every-box').hidden = !mine;
+  if (mine && n && Number($('#al-every').value) !== n) $('#al-every').value = n;
+  $('#al-rearm-row').hidden = !repeat || !rearms;
+  const r = dlgTicks('#al-rearm', 1, 2000, 8), away = `${ticksText(r)} away`, wait = n > 0 ? perText(n) : '';   // as Save sends it
   $('#al-trig-hint').textContent = !repeat ? 'Fires once, then stops.'
-    : $('#al-src').value === 'price' ? 'Fires each time the condition is met, at most once a minute.'
-      : $('#al-src').value.startsWith('i:') ? 'Fires each bar the condition is met: on its close, or on the first trade that meets it (Intrabar).'
-        : 'Fires on each touch, again after price has moved 8 ticks away.';
+    : Number.isNaN(n) ? 'Type the minutes it waits between alerts: a whole number from 1 to 1440.'
+      : rearms && Number.isNaN(r) ? 'Type how far price must move away before it can fire again: a whole number of ticks from 1 to 2000.'
+        : price ? `Fires each time the condition is met, at most ${wait || 'once a minute'}.`
+          : src.startsWith('i:') ? `Fires each bar the condition is met: on its close, or on the first trade that meets it (Intrabar)${wait ? `; at most ${wait}` : ''}.`
+            : src === 'ifthen' ? (wait ? `Each row fires when price touches its line or comes into its zone, then waits: at most ${wait}, and not before price has been ${away}. The other rows fire meanwhile.`
+              : `Fires each time price touches a line or comes into a zone, again once it has been ${away}.`)
+              : src === 'level' && wait ? `Each level fires on a touch, then waits: at most ${wait}, and not before price has moved ${away}. The other levels fire meanwhile.`
+                : wait ? `Fires on a touch, then at most ${wait}, and not before price has moved ${away}.`
+                  : `Fires on each touch, again after price has moved ${away}.`;
+}
+// The Trigger list: a price alert's has no "Once a minute", as its Every time is at most once a minute already (the same
+// choice twice). Taken out, not hidden: iOS lists a hidden option.
+let trigOne = null;
+function trigList(price) {
+  const sel = $('#al-trig'), one = (trigOne ||= sel.querySelector('option[value="1"]'));
+  if (!one) return;
+  if (price) one.remove();
+  else if (one.parentNode !== sel) sel.insertBefore(one, sel.querySelector('option[value="5"]'));
+}
+// A ticks field (Touch within, Re-arm after) as Save sends it: a whole number lo to hi (empty: the default), else NaN.
+// The form checks nothing itself (novalidate): a field it has hidden with a wrong number in it would block Save with
+// nowhere to say why, so dlgBody checks those it shows.
+function dlgTicks(id, lo, hi, empty) {
+  const el = $(id), v = String(el.value ?? '').trim(), n = Number(v);
+  if (el.validity?.badInput) return NaN;   // typed, but not a number (the input then reads '')
+  return v === '' ? empty : Number.isInteger(n) && n >= lo && n <= hi ? n : NaN;
 }
 function syncDlg() {
   const src = $('#al-src').value, ind = src.startsWith('i:'), price = src === 'price', chan = price && CHANNEL.has($('#al-op').value);
@@ -4817,6 +4947,8 @@ function syncDlg() {
   $('#al-band-row').hidden = !src.includes('vwap');
   $('#al-prof-row').hidden = !['poc', 'vah', 'val'].includes(src);
   $('#al-tol-row').hidden = price || ind;
+  $('#al-if-row').hidden = src !== 'ifthen';
+  $('#al-tol-unit').textContent = src === 'ifthen' ? 'ticks of a line' : 'ticks';   // a zone fires on coming into it
   if (chan && !$('#al-v2').value) {   // a channel starts 20 ticks tall, under the value
     const v = num($('#al-v1').value);
     // no tick (a stock, series or formula not on this chart): 20 steps of the value's 4th significant digit
@@ -4825,8 +4957,8 @@ function syncDlg() {
   }
   setTrig(dlg.repeat);
 }
-function openAlertDialog({ price, alert, sym } = {}) {   // sym: another symbol's (the watchlist's), the chart kept
-  closeCtx();
+function openAlertDialog({ price, alert, sym, src } = {}) {   // sym: another symbol's (the watchlist's), the chart kept
+  closeCtx();   // src: the condition a new one starts on (the Plan tab's If/Then: 'ifthen')
   const a = alert || null, p = a?.params || {}, chan = a?.kind === 'price' && CHANNEL.has(p.direction);
   dlg.edit = a;
   dlg.sym = a?.symbol || sym || S.symbol;
@@ -4836,7 +4968,8 @@ function openAlertDialog({ price, alert, sym } = {}) {   // sym: another symbol'
   // a new one starts at the last price: the chart's, or the quote's where there are no bars (the page around a layout's charts)
   const at = a?.kind === 'price' ? (chan ? p.price2 : p.price) : price ?? (dlg.sym === S.symbol && S.lastBar ? S.lastBar.c : symQuote(dlg.sym)?.last);
   $('#al-title').textContent = `${a ? 'Edit' : 'Create'} alert on ${dlg.sym}`;
-  $('#al-src').value = !a || a.kind === 'price' ? 'price' : a.kind === 'level' ? 'level' : a.kind === 'ind' ? `i:${indBase(p.a.ind)}` : p.study;
+  $('#al-src').value = !a ? (src && !free ? src : 'price') : a.kind === 'price' ? 'price' : a.kind === 'level' || a.kind === 'ifthen' ? a.kind
+    : a.kind === 'ind' ? `i:${indBase(p.a.ind)}` : p.study;
   indDlgFill(a?.kind === 'ind' ? p : null);
   $('#al-op').value = a?.kind === 'price' || a?.kind === 'ind' ? p.direction : 'cross';
   $('#al-v1').value = at != null ? fmtSym(dlg.sym, snap(at, dlg.sym)) : '';
@@ -4850,12 +4983,17 @@ function openAlertDialog({ price, alert, sym } = {}) {   // sym: another symbol'
   $('#al-exp-tz').textContent = ax.short;   // on the chart's time zone's clock
   setExp(!!exp);   // open-ended unless it has a date
   $('#al-msg').value = a?.note || '';
-  dlg.repeat = a ? a.repeat : false;
+  dlg.repeat = a ? a.repeat : $('#al-src').value !== 'price';   // touches re-arm
+  dlg.every = a?.repeat && p.every_min > 0 ? p.every_min : 0;
+  $('#al-every').value = dlg.every || '';
+  $('#al-rearm').value = p.rearm_ticks ?? 8;
+  dlg.ifRows = a?.kind === 'ifthen' ? p.rows : 'all';
+  if ($('#al-src').value === 'ifthen') ifDlgLoad();
   $('#al-del').hidden = !a;
   $('#al-ok').textContent = a ? 'Save' : 'Create';
   syncDlg();
   $('#al-dlg').hidden = false;
-  if (a) $('#al-ok').focus(); else { $('#al-v1').focus(); $('#al-v1').select(); }
+  if (a || $('#al-src').value !== 'price') $('#al-ok').focus(); else { $('#al-v1').focus(); $('#al-v1').select(); }
 }
 function closeAlertDialog() { $('#al-dlg').hidden = true; dlg.edit = null; }
 
@@ -4863,6 +5001,11 @@ function closeAlertDialog() { $('#al-dlg').hidden = true; dlg.edit = null; }
 function dlgBody() {
   const src = $('#al-src').value;
   const b = { symbol: dlg.sym, repeat: dlg.repeat, note: $('#al-msg').value.trim() };
+  const every = dlg.repeat ? dlg.every ?? 0 : 0;   // Once every N minutes (NaN: typed wrong, or not yet)
+  if (every !== 0) {
+    if (!(Number.isInteger(every) && every >= 1 && every <= 1440)) { toast('Type the minutes between alerts: a whole number from 1 to 1440'); $('#al-every').focus(); return null; }
+    b.every_min = every;
+  }
   if ($('#al-exp-on').checked) {
     const ms = ax.input.toMs($('#al-exp').value);
     if (ms == null || ms <= Date.now()) { toast(`Pick an expiration in the future (${ax.short})`); return null; }
@@ -4880,9 +5023,18 @@ function dlgBody() {
     }
     return b;
   }
-  const tol = parseInt($('#al-tol').value, 10);
-  b.tolerance_ticks = Number.isFinite(tol) ? Math.max(0, Math.min(200, tol)) : 0;
+  const tol = dlgTicks('#al-tol', 0, 200, 0), rearm = dlgTicks('#al-rearm', 1, 2000, 8);
+  if (Number.isNaN(tol)) { toast('Touch within: a whole number of ticks from 0 to 200'); $('#al-tol').focus(); return null; }
+  // how far price goes to re-arm it: checked when it shows (it repeats); hidden (Only once), a wrong one is not sent
+  if (Number.isNaN(rearm) && dlg.repeat) { toast('Re-arm after: a whole number of ticks from 1 to 2000'); $('#al-rearm').focus(); return null; }
+  b.tolerance_ticks = tol;
+  b.rearm_ticks = Number.isNaN(rearm) ? dlg.edit?.params.rearm_ticks ?? 8 : rearm;
   if (src === 'level') return { ...b, kind: 'level' };
+  if (src === 'ifthen') {
+    const rows = ifDlgRows();
+    if (!rows) { toast('Pick a row, or All rows'); return null; }
+    return { ...b, kind: 'ifthen', rows };
+  }
   Object.assign(b, { kind: 'study', study: src });
   if (src.includes('vwap')) b.band = Number($('#al-band').value);
   else Object.assign(b, { profile: $('#al-prof').value, which: $('#al-which').value });
@@ -4895,9 +5047,10 @@ function sameAlert(a, b) {
   if (b.kind === 'ind') {   // only its trigger, message or expiry changed: kept, with the bar it last fired in (not sent again)
     const was = { ...p, a: indLineNew(p.a), b: indLineNew(p.b) };   // a series as saved before there were more, as the dialog shows it
     delete was.expires;
+    delete was.every_min;   // how often: its trigger
     return same(was, { a: b.a, b: b.b, spec: b.spec, on: b.on, direction: b.direction, ...(b.rth ? { rth: true } : {}) });
   }
-  if (b.kind !== 'study') return true;
+  if (b.kind !== 'study') return true;   // (an If/Then alert's rows are PATCHed: it keeps its place and history)
   return p.study === b.study && (b.study.includes('vwap') ? (p.band ?? 0) === b.band : p.profile === b.profile && p.which === b.which);
 }
 $('#al-form').onsubmit = async (e) => {
@@ -4912,8 +5065,10 @@ $('#al-form').onsubmit = async (e) => {
       toast(`Alert created: ${describe(r)[0]}`);
     } else if (sameAlert(a, b)) {   // saving restarts a stopped alert, as on TradingView
       const patch = { enabled: true, repeat: b.repeat, note: b.note, expires: b.expires || 0 };
+      if (b.every_min || a.params.every_min) patch.every_min = b.every_min || 0;   // 0: no longer (Every time or Only once)
       if (b.kind === 'price') Object.assign(patch, { price: b.price, direction: b.direction, price2: b.price2 });
-      else patch.tolerance_ticks = b.tolerance_ticks;
+      else Object.assign(patch, { tolerance_ticks: b.tolerance_ticks, rearm_ticks: b.rearm_ticks });
+      if (b.kind === 'ifthen') patch.rows = b.rows;
       await api('PATCH', `/api/alerts/${a.id}`, patch);
       toast('Alert saved');
     } else {   // another kind of alert: the new one in its place, in one step
@@ -4925,10 +5080,58 @@ $('#al-form').onsubmit = async (e) => {
 };
 $('#al-src').onchange = () => {
   const src = $('#al-src').value;
-  if (!dlg.edit) dlg.repeat = src !== 'price';   // touches re-arm; indicator alerts fire once a bar
+  if (!dlg.edit && !(dlg.every || Number.isNaN(dlg.every))) dlg.repeat = src !== 'price';   // touches re-arm; indicator alerts once a bar (a wait picked stays)
   if (src.startsWith('i:')) indDlgDefaults(src.slice(2));
+  if (src === 'ifthen') ifDlgLoad();
   syncDlg();
 };
+// ---- If/Then bands in the dialog: All rows (whatever the plan holds as it changes), or rows picked from the plan as
+// it is now, each named by its LO and HI so the choice holds through a new paste. A row picked before and not in the
+// plan now stays listed (and kept) until unticked. ----
+dlg.ifRows = 'all';
+dlg.ifBlock = null;   // the plan shown: the symbol's block, as /api/ifthen keeps it
+async function ifDlgLoad() {
+  const sym = dlg.sym;
+  if (sym === S.symbol && S.ifData && typeof S.ifData.rows === 'string') { dlg.ifBlock = S.ifData.rows; ifDlgRender(); return; }
+  dlg.ifBlock = null;
+  ifDlgRender();
+  try {
+    const d = await api('GET', `/api/ifthen/${encodeURIComponent(sym)}`);
+    if (dlg.sym === sym && !$('#al-dlg').hidden) { dlg.ifBlock = d.rows || ''; ifDlgRender(); }
+  } catch (e) { if (dlg.sym === sym) $('#al-if-msg').textContent = e.message; }
+}
+function ifDlgRender() {
+  const sym = dlg.sym, all = dlg.ifRows === 'all', picked = all ? [] : dlg.ifRows, eps = (symTick(sym) || 1e-6) * 0.01;
+  const same = (w, low, high) => Math.abs(w[0] - low) <= eps && Math.abs(w[1] - high) <= eps;
+  const rows = dlg.ifBlock == null ? [] : biasParse(dlg.ifBlock), el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+  const item = (low, high, text, on) => {
+    const b = ifAlertBand(low, high), box = el('input', { type: 'checkbox', checked: !!b && on, disabled: !b || all });
+    box.dataset.lo = String(low);
+    box.dataset.hi = String(high);
+    const short = text.replace(/\s+/g, ' ').trim();
+    const label = el('label', { className: b ? '' : 'off', title: b ? `${ifBandText(sym, low, high)}: ${short}` : 'No bottom and no top: never alerts' });
+    label.append(box, el('span', { className: 'px', textContent: ifBandText(sym, low, high) }),
+      el('span', { className: `kind ${b ? b.kind : ''}`, textContent: b ? b.kind : 'none' }),
+      el('span', { className: 'txt', textContent: short.length > 60 ? `${short.slice(0, 59).trimEnd()}…` : short }));
+    return label;
+  };
+  const items = rows.map((r) => item(r.Low, r.High, r.Text, all || picked.some((w) => same(w, r.Low, r.High))));
+  for (const w of picked) if (!rows.some((r) => same(w, r.Low, r.High))) items.push(item(w[0], w[1], '(not in the plan now)', true));
+  $('#al-if-all').checked = all;
+  $('#al-if-list').replaceChildren(...items);
+  $('#al-if-msg').textContent = dlg.ifBlock == null ? 'Loading the plan…'
+    : !rows.length ? `No If/Then plan for ${sym} yet: paste one on the Plan tab` : 'Lines alert on a touch, zones when price comes into them.';
+}
+function ifDlgRows() {   // 'all', the rows ticked as [[LO, HI], ...], or null (none)
+  if ($('#al-if-all').checked) return 'all';
+  const rows = [...$('#al-if-list').querySelectorAll('input:checked')].map((b) => [Number(b.dataset.lo), Number(b.dataset.hi)]);
+  return rows.length ? rows : null;
+}
+$('#al-if-all').onchange = (e) => {   // unticked: every row the plan has now, ticked, to untick the ones not wanted
+  dlg.ifRows = e.target.checked ? 'all' : biasParse(dlg.ifBlock || '').filter((r) => ifAlertBand(r.Low, r.High)).map((r) => [r.Low, r.High]);
+  ifDlgRender();
+};
+$('#al-if-list').onchange = () => { dlg.ifRows = ifDlgRows() || []; };
 // ---- indicator alerts in the dialog: an EMA, SMA, RSI or MACD line on a timeframe, against the price, a value or
 // another line; checked on bar close or intrabar (ind_alerts.py) ----
 const IND_SPECS = ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1D'];
@@ -5022,7 +5225,18 @@ function setExp(on) {
 }
 $('#al-expseg').onclick = (e) => { const b = e.target.closest('button'); if (b) setExp(b.dataset.v === 'date'); };
 $('#al-exp').oninput = () => setExp(true);
-$('#al-trig').onclick = (e) => { const b = e.target.closest('button'); if (b) setTrig(b.dataset.v === 'repeat'); };
+$('#al-trig').onchange = () => {   // Only once, Every time, Once every N min (the list's, or typed)
+  const v = $('#al-trig').value;
+  if (v === 'custom') {
+    setTrig(true, parseInt($('#al-every').value, 10) || NaN, true);
+    $('#al-every').focus(); $('#al-every').select();
+  } else setTrig(v !== 'once', v === 'once' || v === 'repeat' ? 0 : Number(v));
+};
+$('#al-every').oninput = () => {
+  const v = $('#al-every').value, n = Number(v);
+  setTrig(true, v !== '' && Number.isInteger(n) && n >= 1 && n <= 1440 ? n : NaN, true);
+};
+$('#al-rearm').oninput = () => setTrig(dlg.repeat);   // the hint says how far
 $('#al-del').onclick = () => { const a = dlg.edit; if (a) api('DELETE', `/api/alerts/${a.id}`).then(closeAlertDialog).catch(fail); };
 $('#al-close').onclick = $('#al-cancel').onclick = closeAlertDialog;
 $('#al-dlg').addEventListener('pointerdown', (e) => { if (e.target === e.currentTarget) closeAlertDialog(); });
@@ -5188,18 +5402,19 @@ function showKeys(on) {
 $('#keys-close').onclick = () => showKeys(false);
 $('#keys-dlg').onpointerdown = (e) => { if (e.target.id === 'keys-dlg') showKeys(false); };
 $('#keys-dlg').onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Escape') showKeys(false); };
-// A drag on the chart that goes clearly up or down, with Auto on: TradingView moves the chart and turns Auto off; the
-// library alone ignores it (it only pans prices with Auto off). Not a long press first (that is the crosshair), a pinch,
-// or a drag a drawing has; a sideways swipe's wobble doesn't count.
+// A mouse drag on the chart that goes clearly up or down, with Auto on: TradingView moves the chart and turns Auto off;
+// the library alone ignores it (it only pans prices with Auto off). Not a drag a drawing has; a sideways drag's wobble
+// doesn't count. A finger never turns Auto off: on a phone nearly every pan goes a little up or down (with Auto off a
+// finger still moves the prices, through the library; the price axis scales them).
 {
   const el = $('#chart');
   let g = null;
   el.addEventListener('pointerdown', (e) => {
     g = null;
-    if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (!e.isPrimary || e.pointerType !== 'mouse' || e.button !== 0) return;   // a finger or pen: never (above)
     const r = el.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
     if (x > r.width - PS().width() || y > chart.paneSize(0).height) return;   // the axes and the panes below have their own
-    g = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), moved: false, on: false };
+    g = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, on: false };
   }, true);
   window.addEventListener('pointerdown', (e) => { if (g && e.pointerId !== g.id) g = null; }, true);   // a second finger
   window.addEventListener('pointermove', (e) => {
@@ -5208,11 +5423,10 @@ $('#keys-dlg').onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Escape')
     if (!g.moved) {
       if (Math.hypot(dx, dy) < 6) return;
       g.moved = true;
-      if (e.pointerType !== 'mouse' && performance.now() - g.t > 220) { g = null; return; }   // held first: the crosshair
     }
     if (!g.on) {
       const hs = chart.options().handleScroll, o = PS().options();
-      if (!(e.pointerType === 'mouse' ? hs.pressedMouseMove : hs.vertTouchDrag) || !o.autoScale || S.lock || o.mode === PSM.Percentage) { g = null; return; }
+      if (!hs.pressedMouseMove || !o.autoScale || S.lock || o.mode === PSM.Percentage) { g = null; return; }
       if (Math.abs(dy) < 24 || Math.abs(dy) < Math.abs(dx)) return;
       const r = PS().getVisibleRange();
       if (!r) { g = null; return; }
@@ -5465,7 +5679,10 @@ function pageUi() {
   $('.tabs .pg-more').classList.toggle('on', !!on);
   $('.tabs .pg-more').textContent = on ? `${on.textContent.trim()} ▴` : 'More';
 }
-setSide(local.get(sideKey(), phoneLayout() ? '0' : '1') === '1');   // a phone starts on the chart
+// A phone opens on the chart, not on the page it was left on (whose chart, built with no width, came up squeezed);
+// turned, each layout comes back to the page it had before.
+if (TK_CELL === null && !TK_MULTI) local.set('sideOpenPhone', '0');
+setSide(local.get(sideKey(), phoneLayout() ? '0' : '1') === '1');
 {
   let wasPhone = phoneLayout();   // turned (landscape is wider): that layout's own page
   window.addEventListener('resize', () => { if (phoneLayout() !== wasPhone) { wasPhone = phoneLayout(); setSide(local.get(sideKey(), wasPhone ? '0' : '1') === '1'); } });
@@ -5963,7 +6180,7 @@ function scrollBars(f) {
 }
 function resetView() {
   const n = S.bars.length, ro = chart.timeScale().options().rightOffset;   // as a fresh load: the room amtLayout gives the labels
-  chart.timeScale().setVisibleLogicalRange(amtRoomSet = { from: n - 150 - ro, to: n + ro });   // not a zoom (amtRoomCheck)
+  chart.timeScale().setVisibleLogicalRange(amtRoomSet = latestRange(n, ro));   // not a zoom (amtRoomCheck)
   setAuto(true);
 }
 // Go to date (TradingView's Alt+G): a moment on the chosen zone's clock, centred at the zoom you have, the crosshair on
@@ -6016,7 +6233,10 @@ function goLiveUi() {
   const r = chart.timeScale().getVisibleLogicalRange();
   $('#go-live').hidden = !r || !S.bars.length || r.to >= S.bars.length - 1;
 }
-$('#go-live').onclick = () => { chart.timeScale().scrollToRealTime(); };
+// » and End. The library's scroll there stops a frame short (it never applies its last step): a margin in % of the width
+// goes straight to its place.
+const goLive = () => { const ts = chart.timeScale(); if (S.cs.rightUnit === 'pct') ts.scrollToPosition(ts.options().rightOffset, false); else ts.scrollToRealTime(); };
+$('#go-live').onclick = goLive;
 // Floating controls follow the price pane (indicator panes below it and the axis widths change).
 function layoutControls() {
   const w = chart.priceScale('right').width(), th = chart.timeScale().height(), h0 = chart.paneSize(0).height, W = $('#chart').clientWidth;
@@ -6044,17 +6264,18 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey && e.key.startsWith('Arrow')) return;
   const k = { ArrowLeft: () => scrollBars(-0.05), ArrowRight: () => scrollBars(0.05), ArrowUp: () => zoom(0.8), ArrowDown: () => zoom(1.25),
     '+': () => zoom(0.8), '=': () => zoom(0.8), '-': () => zoom(1.25), Home: () => chart.timeScale().scrollToPosition(-S.bars.length + 20, false),
-    End: () => chart.timeScale().scrollToRealTime() }[e.key];
+    End: () => goLive() }[e.key];
   if (k) { e.preventDefault(); k(); return; }
   if (/^[a-z0-9]$/i.test(e.key)) { e.preventDefault(); quickOpen(e.key); }
 });
 // The symbol switch searches the symbol database (symsearch.js); it takes timeframes too.
 // Opened by Compare it picks a symbol to compare instead (no timeframes).
-let quickCompare = false;
+let quickCompare = false, quickBlurT = 0;
 const quickSearch = createSymbolSearch({ input: $('#quick-in'), list: $('#quick-list'), chips: $('#quick-types'), api,
   onPick: (r) => { const cmp = quickCompare; quickClose(); if (cmp) cmpAdd(r.symbol); else setSymbol(r.symbol); } });
 function quickOpen(first, compare = false) {
   const box = $('#quick'), inp = $('#quick-in');
+  clearTimeout(quickBlurT);   // the last box's, closed by Enter: it would hide this one (and what is typed next is lost)
   quickCompare = compare;
   box.classList.toggle('cmp', compare);
   inp.placeholder = compare ? 'Compare with: symbol or name (ES, RTY, AAPL, DXY…)' : 'Symbol, name or timeframe';
@@ -6096,7 +6317,10 @@ $('#quick-in').addEventListener('keydown', (e) => {
   else if (v && chartSym(v)) setSymbol(v);
   else if (v) toast(`"${v}" is not a symbol or timeframe here (5, 15m, 4h, D, W, M, 2000t, 5000v, 16r, ES, AAPL)`);
 });
-$('#quick-in').addEventListener('blur', () => setTimeout(() => { $('#quick').hidden = true; }, 100));
+// Hidden a moment after it loses the focus (a pick in the list registers first), unless it has it again.
+$('#quick-in').addEventListener('blur', () => {
+  quickBlurT = setTimeout(() => { if (document.activeElement !== $('#quick-in')) $('#quick').hidden = true; }, 100);
+});
 
 // Time left in the forming bar, under the last price (TradingView): time bars only, to the bar's end or the day's close:
 // 16:00 CT, the RTH end on an RTH chart, or CME's holiday halt or early close (hello's holidays).
@@ -6208,6 +6432,8 @@ function renderCsMenu() {
   $('#pl-op').textContent = `${S.cs.plOpacity}%`;
   $('#cs-menu .pl-opts').hidden = !S.cs.priceLine;
   $('#cs-menu [data-cs=plColor]').disabled = S.cs.plAuto;
+  $('#cs-menu [data-cs=rightBars]').hidden = S.cs.rightUnit === 'pct';
+  $('#cs-menu [data-cs=rightPct]').hidden = S.cs.rightUnit !== 'pct';
   document.querySelectorAll('#cs-menu .seg[data-cs]').forEach((seg) => seg.querySelectorAll('button')
     .forEach((b) => b.classList.toggle('on', b.dataset.v === S.cs[seg.dataset.cs])));
 }
@@ -6227,7 +6453,7 @@ function csChanged(k) {
   if (['style', 'up', 'down', 'priceLine'].includes(k)) { barsLayout(); altSetData(); }
   if (/^pl[A-Z]/.test(k)) priceLineLayout(true);
   if (['gridLines', 'gridColor', 'textColor', 'xhairColor', 'fontSize', 'crosshair', 'rightBars', 'volume', 'bg'].includes(k)) chartLayout();
-  if (k === 'rightBars') amtLayout();   // the room the AMT labels need stays
+  if (['rightBars', 'rightUnit', 'rightPct'].includes(k)) amtLayout();   // the room the AMT labels need stays
   if (k === 'watermark' || k === 'textColor') watermarkLayout();
   if (k === 'priceOnly') priceOnlyLayout();
   if (k === 'sessions') sessionBreaks.update();
@@ -6517,6 +6743,7 @@ function onMessage(m) {
     case 'alerts': S.alerts = m.alerts; renderAlerts(); drawings.update(); break;
     case 'drawing': case 'drawing_deleted': drawings.onMessage(m); break;
     case 'ifthen':   // a block saved on another device (also while ifRequest's answer is on its way)
+      if ($('#al-src').value === 'ifthen' && !$('#al-dlg').hidden && dlg.sym === m.symbol) { dlg.ifBlock = m.rows; ifDlgRender(); }   // an open alert dialog's rows
       if (m.symbol === S.symbol) {
         ifHeard += 1;
         S.ifData = { ...(S.ifData || {}), rows: m.rows, updated: m.updated };
@@ -6541,7 +6768,9 @@ function onMessage(m) {
       S.events.unshift(m.event); renderEvents();
       if (TK_CELL !== null) break;   // the page around the charts announces it once
       if (m.event.alert_id != null) firedShow(m.event); else toast(m.event.message);
-      navigator.vibrate?.(200);
+      // not before the page is first tapped or clicked: the browser refuses it then, and logs an error (a page just
+      // reloaded, a layout's page whose charts take the clicks)
+      if (navigator.userActivation?.hasBeenActive !== false) navigator.vibrate?.(200);
       chime(alertSound(m.event));
       break;
     case 'workspaces': if (workspaces) workspaces.heard(m); break;
@@ -7563,10 +7792,11 @@ const watch = createWatchlist({
   },
 });
 // On a computer the drawing tools are a column beside the chart, as TradingView's, so they cover none of it; a phone
-// keeps them in a row over the bottom of the chart.
+// keeps them in a row over the bottom of the chart. A chart of a layout (one only in a window 760 px or wider) keeps
+// the column however narrow its frame: a row there covered the Gap table and the AMT notice.
 const phoneWidth = matchMedia('(max-width: 760px)');
 function placeDrawBar() {
-  const bar = $('#draw-bar'), wrap = $('#chart-wrap'), side = !phoneWidth.matches;
+  const bar = $('#draw-bar'), wrap = $('#chart-wrap'), side = !phoneWidth.matches || TK_CELL !== null;
   if (side && bar.parentElement === wrap) wrap.before(bar);
   else if (!side && bar.parentElement !== wrap) wrap.insertBefore(bar, $('#replay-bar'));
   bar.classList.toggle('col', side);
@@ -8201,10 +8431,12 @@ function journalShow(t) {
   if (!S.instruments[t.symbol]) { toast(`${t.symbol} is not a chart symbol here`); return; }
   if (TK_MULTI) { workspaces.toActive({ type: 'journal', symbol: t.symbol, entry_ts: t.entry_ts }); return; }   // that chart scrolls to it itself
   if (S.symbol === t.symbol && S.bars.length) { goToTime(t.entry_ts); return; }
-  S.goTo = t.entry_ts;   // when its history is in (applyHistory)
+  S.goTo = { sym: t.symbol, ms: t.entry_ts };   // when its history is in (applyHistory)
   setSymbol(t.symbol);
 }
 function goToTime(ms) {
+  // a phone's Journal page: the chart has no width, so its bars' view waits for one (viewLoad); this goes after it
+  if (S.viewHeld) { S.goTo = { sym: S.symbol, ms }; return; }
   const i = barIndexTo(S.bars, ms);
   if (i < 0) {
     olderGo(() => S.bars[0].t <= ms, () => goToTime(ms), () => 'That trade is older than the stored history of this timeframe: pick a longer one');
@@ -8261,7 +8493,7 @@ function hostActive(m) {
   indSets();
   renderAmtMenu();   // the symbol's AMT alert switch and alert settings
   indDlg.refresh();
-  renderPlanLines(true);
+  renderPlanLines(false);   // another symbol's levels show; the edits stay between ES and MES (the same levels)
   S.lvStatus = null;
   loadPlanLevels();
   subscribe();

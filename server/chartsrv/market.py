@@ -719,6 +719,8 @@ class Market:
                 log.info("%s: a print at %s CT after its roll to %s left out (that session is the old contract's)",
                          tk.symbol, sessions.to_ct(tk.ts).strftime("%Y-%m-%d %H:%M:%S"), self.contracts.get(tk.symbol))
                 return   # (the new contract's: NinjaTrader replays its last trade on switching to it)
+            if ts < tk.ts and hasattr(self, "gapfill"):   # below where a gap fill's history stops: its minute
+                self.gapfill.moved(tk.symbol, ts)          # built again at the Z
             tk.ts = ts
         self.m1_ticked.add(tk.symbol)
         self.tick_buf.append(tk)
@@ -1451,12 +1453,14 @@ class Market:
                 self._write_failed("store flush failed")
 
     def levels_changed(self):
-        """The daily levels changed (daily_levels.py: a file, link or pasted line): each symbol's set made again; one
-        that changed starts its level alerts afresh, and every page hears. Each day's are kept for bar replay."""
+        """The daily levels changed (daily_levels.py: a file, link or pasted line): each symbol's set made again; in one
+        that changed, its level alerts start afresh at each level that is new or moved (one still at its price keeps
+        its state: alerts.reset_levels), and every page hears. Each day's are kept for bar replay."""
         self.daily.remember()
+        old = {s: self.levels.get(s) for s in list(self.instruments)}
         for sym in self.levels.poll():
-            self.alerts.reset_levels(sym)
             ls = self.levels.get(sym)
+            self.alerts.reset_levels(sym, old.get(sym), ls)
             self.broadcast({"type": "levels", "symbol": sym, "levels": ls.to_dict() if ls else None})
 
     async def _watchdog_loop(self):

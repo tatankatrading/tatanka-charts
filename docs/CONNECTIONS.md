@@ -81,15 +81,49 @@ A change applies at once (no restart). The list shows the contract each one is o
 `Contracts` list are only a starting point; any month NinjaTrader knows will do. A roll sends a "Contract roll"
 message to Discord/phone, and `/api/health` shows the contract each symbol is on. Bars before a roll are not adjusted, so the chart steps by
 the spread between the contracts at the roll (as NinjaTrader's unadjusted merge does). That step crosses no line or
-level for the alerts: price, level, study and indicator alerts start again from the new contract's first trade, the
-AMT Toolkit's alerts 15 minutes after the roll, and a gap from the old contract's RTH close to the new one's open is
-not alerted (nor its fill), though Gap Analysis still draws it.
+level for the alerts: price, level, study, If/Then and indicator alerts start again from the new contract's first
+trade, the AMT Toolkit's alerts 15 minutes after the roll, and a gap from the old contract's RTH close to the new
+one's open is not alerted (nor its fill), though Gap Analysis still draws it.
 
 Each trade once: the add-on has a market-data subscription of its own per contract, as NinjaTrader's add-on
 framework has it (an earlier version listened on the instrument's shared one, and a day forwarded that way came out
 at twice NinjaTrader's volume). Once 5,000 contracts have traded after it starts, NinjaScript Output says
 `NQ volume check OK: sent …, NinjaTrader counted …`; if the two ever disagree it says so instead (`trades are not
-reaching the server one for one`), every 30 minutes while they do.
+reaching the server one for one`), every 30 minutes while they do. A NinjaTrader started mid-session sends its last
+trades again as a one-time catch-up that its gap fill's history also holds: with add-on 23 the server keeps those
+once, on the conditions in [NINJATRADER.md](NINJATRADER.md#the-ninjatrader-feed) (a run of 50 or more matching the
+history, with 5 or more different prints, in the first 30 s); add-on 22 and older store them twice. A history that
+comes as 1-minute bars (a stretch over 3 days, no tick history, or its trades failing) is not compared: the catch-up
+counts twice in those minutes' volume. The volume check still counts the catch-up (NinjaTrader's count it starts from
+holds it already), so after a mid-session start that warning comes with add-on 23 too (as on Nov 16: ES sent 13,527
+while NinjaTrader counted 5,010), every 30 minutes until the day's later trades bring the two within 25%: it does not
+mean the server stored those trades twice (`/api/health` shows how many it kept once, `copies` under `gap_fill`).
+
+A catch-up stored twice before add-on 23 (a NinjaTrader started mid-session with add-on 22 or older) is looked for by
+`update.cmd` (and `update.sh`) on each update, since its last look (the first time, the last 90 days): it lists what
+it finds and, once the new server runs, asks before fixing it (the server stops for a few minutes meanwhile). Either
+answer, or nothing found, moves the last look to now. The update that brings this in still runs the old update
+script, so the first look is on the next `update.cmd` (run it twice to look at once). To fix them yourself (or look
+further back),
+stop the server first. The first `fix_catchup` lists each one it finds (when, how many trades and contracts) and
+changes nothing; with `--yes` it backs up chart.db (it checks there is room for the copy first), then fixes. It looks
+at the last 30 days; `--days N` for more:
+```
+docker compose stop chart
+docker compose run --rm chart python -m chartsrv.fix_catchup
+docker compose run --rm chart python -m chartsrv.fix_catchup --yes
+docker compose up -d
+```
+It compares, as add-on 23 does, the catch-up (the burst of live trades sent right after a gap fill) with the gap fill
+history's trades before it, and only removes a live trade inside a run of 50 or more matching the history one for one
+(with 5 or more different prints): the history's copy stays, at the exchange's time, with the live trade's aggressor
+side, and every minute either was in is built again. Where it can't tell, it leaves a trade twice: a catch-up whose
+history came as 1-minute bars, or that came with no aggressor side when the history was written first. The dry run's
+contracts for a day should come close to the excess NinjaScript Output's volume check showed for it.
+
+Without Docker, from `server`: `python -m chartsrv.fix_catchup [--yes] [--days N]`. The backup is `chart.db.bak-<date>`
+next to chart.db (in Docker, inside its data volume: `docker compose run --rm chart rm /data/chart.db.bak-...` once
+the charts look right).
 
 NinjaTrader must be running and connected to its data feed. Market Replay (Playback) and the Simulated
 Data Feed are never forwarded: while either is connected, nothing is sent (disconnect the Simulated Data Feed

@@ -208,6 +208,8 @@ class IndicatorSettings:
         symbol = share_symbol(key, symbol)
         vals = clean_symbol(key, values)
         if key == "ifthen" and "RowsBlock" in vals:   # the same store the chart's If/Then reads
+            from .plan_history import remember
+            remember(self.store, symbol, vals["RowsBlock"], now_ms)   # kept version by version, as the Plan tab's
             blocks = self.store.get_setting("ifthen", {}) or {}
             blocks[symbol] = {"rows": vals.pop("RowsBlock"), "updated": now_ms}
             self.store.set_setting("ifthen", blocks)

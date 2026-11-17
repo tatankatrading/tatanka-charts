@@ -14,7 +14,13 @@
 //                                            connect and at a roll (22+; before, at a roll only). One other than before is
 //                                            a roll (the settlements known are the old one's), and no Q line after it
 //                                            carries the old one's numbers
-//   T|<sym>|<utc epoch ms>|<price>|<size>|<side>   side +1 at/above ask, -1 at/below bid, 0 between
+//   T|<sym>|<utc epoch ms>|<price>|<size>|<side>[|<own ms>]   side +1 at/above ask, -1 at/below bid, 0 between. own ms
+//                                            (23+, only to a server that sent V|23 or later on this connection):
+//                                            NinjaTrader's own time for the trade, on a trade older than the second the
+//                                            symbol's history request stops at (firstLive), which that history holds
+//                                            too: NinjaTrader starting mid-session raises a one-time catch-up of recent
+//                                            trades, and the server keeps those once (a server before 23 takes a T
+//                                            line of 6 fields only and would drop the line)
 //   Q|<sym>|<last>|<prior session close>|<day volume>   once a second per symbol, for the watchlist, while its
 //                                            market data comes (none after 60 s without, nor while NinjaTrader's
 //                                            live data is down or Playback or the Simulated Data Feed is connected)
@@ -47,14 +53,19 @@
 // for holes inside it, one at a time per symbol); the add-on fetches that stretch from NinjaTrader (trades, else
 // 1-minute bars) and sends it back, once NinjaTrader's data connection is up (at NinjaTrader's start the add-on is
 // running before it). live: up to the add-on's first live trade then. minutes: 1-minute bars, for a stretch the
-// trades didn't cover (the provider keeps no tick history that far back). A stretch across contract rolls comes from
-// each contract in turn, switching at NinjaTrader's roll dates, from the one the server charted last (R line) to the
-// one forwarded now. older (20+): history from before anything the server has stored (charts scrolled back, the last
-// year filled in the background), as 1-minute bars, each contract's by NinjaTrader's roll dates however old, none for
-// a time before the first roll date NinjaTrader knows; answered with Y lines and Z as the others.
+// trades didn't cover (the provider keeps no tick history that far back). With no trades (or an error), a stretch is
+// asked again as 1-minute bars only if a whole minute fits in it (23+): the server keeps whole minutes inside it, so
+// none of a shorter one could be stored; it is answered as the trades were. An error NinjaTrader gives is asked again
+// twice (23+), no answer (or an error while its data connection is down) ten times, 30 s apart. A stretch across
+// contract rolls comes from each contract in turn, switching at NinjaTrader's roll dates, from the one the server
+// charted last (R line) to the one forwarded now. older (20+): history from before anything the server has stored
+// (charts scrolled back, the last year filled in the background), as 1-minute bars, each contract's by NinjaTrader's
+// roll dates however old, none for a time before the first roll date NinjaTrader knows; answered with Y lines and Z as
+// the others.
 // BYE|<reason>: the server has another NinjaTrader's add-on connected (two NinjaTrader instances): this one hangs up,
 // drops what it queued meanwhile (the other sent those trades) and tries again in 30 s; once let in, the gap fill
 // covers the stretch from where the other stopped.
+// V|<version>: the server's version of this wire format (its add-on version, 23+): from 23 it takes a T line's 7th field.
 // W|<root>,<root>,...: the futures in the app's watchlists ("ZN,SR3,NG"); the add-on quotes each one's front month
 // (Q lines only, no trades) and follows its rolls. Roots NinjaTrader does not know are skipped.
 // R|<root>|<volume|dates|MM-yy>|<contract charted last>: how a chart future rolls (Connections > Instruments). volume
@@ -91,13 +102,18 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private const string Token    = "";       // must equal CHART_NT_TOKEN if the server sets one
 		private const int    MaxQueue = 200000;   // lines buffered while the server is down; the oldest are dropped
 		private const long   TickHistoryMaxMs = 3L * 86400000;   // longer gaps come as 1-minute bars
-		private const int    Version  = 22;       // raised with each change; the server's ADDON_VERSION
+		private const int    Version  = 23;       // raised with each change; the server's ADDON_VERSION
+		private const int    MarksFrom = 23;      // a server whose V line says this or later takes a T line's 7th field
 		private const long   QuoteLiveMs = 60000;   // a symbol's Q lines stop once its market data is silent this long
 		private const long   ReplayMs = 20 * 60000; // a trade older than this when it comes is NinjaTrader's replay of its last
 		private const long   StaleMs  = 2 * 60000;  // ...or than this by the market's own clock (Clock), once it is known
 		private const int    ReplayRun = 3;         // ...unless more come in a row, each within ReplayRunMs of the one before:
 		private const long   ReplayRunMs = 5000;    // then it is the PC's clock that is off (replays come one a reconnect)
-		private const int    HistoryRetries = 10;                // 30 s apart, while NinjaTrader's connection comes up
+		private const int    HistoryRetries = 10;                // no answer: 30 s apart, while NinjaTrader's connection comes up
+		private const int    HistoryErrorRetries = 2;            // an error NinjaTrader gives with its data connection up
+		// How long history waits (ms): between tries, for NinjaTrader's answer, and its data connection's checks. Fields,
+		// not constants, only so the tests can make them short.
+		private static int   HistoryRetryMs = 30000, HistoryWaitMs = 5 * 60000, DataWaitMs = 5000;
 		private const long   HeldMs = 5 * 60000;    // its settlement on subscribing, or with its data back, comes within this
 		private const long   SettleLiveMs = 30 * 60000;   // the server's publish grace: a change heard live this recently
 		                                                  // is today's to it; one sent later than this goes held
@@ -131,6 +147,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private readonly ConcurrentDictionary<string, bool> held = new ConcurrentDictionary<string, bool>();
 		private volatile bool heardR;   // an R line on this connection: the server says how each one rolls
 		private volatile int connection;   // counts connections to the server: history asked on an older one is dropped
+		private volatile int serverVersion;   // what this connection's server said in its V line (0: none, a server before 23)
 		private volatile bool turnedAway;  // the server said BYE: another add-on has it
 		// Per symbol, NinjaTrader's time (whole seconds) of the first trade queued since the last connection ended: a
 		// GAP's open end stops there, on the same clock as the history (the server's cut is when trades arrive).
@@ -562,6 +579,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 							SetWatch(p[1].Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries));
 						else if (p.Length >= 3 && p[0] == "R")
 							SetMode(p[1], p[2], p.Length > 3 ? p[3] : "");
+						else if (p.Length >= 2 && p[0] == "V")
+						{
+							int v;
+							if (gen == connection && int.TryParse(p[1], NumberStyles.Integer, Inv, out v)) serverVersion = v;
+						}
 						else if (p.Length >= 2 && p[0] == "BYE")
 						{
 							turnedAway = true;   // the send loop hangs up
@@ -742,9 +764,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				if (!waited) Print("TatankaChartFeed: history for " + sym + " waits for NinjaTrader's data connection");
 				waited = true;
-				Thread.Sleep(5000);
+				Thread.Sleep(DataWaitMs);
 			}
-			if (waited) Thread.Sleep(5000);
+			if (waited) Thread.Sleep(DataWaitMs);
 			return gen == connection;
 		}
 
@@ -755,9 +777,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 			Enqueue("\u0001" + gen.ToString(Inv) + "\u0001" + line);
 		}
 
-		// Writes a queued line, unless it is a history line asked on another connection.
-		private static void Send(StreamWriter w, string line, int gen)
+		// Writes a queued line, unless it is a history line asked on another connection. marks: the server takes a T line's
+		// 7th field (its V line); a trade queued with one goes without it to a server that doesn't.
+		private static void Send(StreamWriter w, string line, int gen, bool marks)
 		{
+			if (line.Length > 0 && line[0] == '\u0003')   // a trade with its own time (OnMarketData)
+			{
+				line = line.Substring(1);
+				if (!marks) line = line.Substring(0, line.LastIndexOf('|'));
+				w.WriteLine(line);
+				return;
+			}
 			if (line.Length > 0 && line[0] == '\u0001')
 			{
 				int end = line.IndexOf('\u0001', 1);
@@ -855,9 +885,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 						if (got < 0) return;   // its connection closed: the server asks again
 						sent += got;
 					}
-					if (ticks && (sent == 0 || error != null))
+					// No tick history here: 1-minute bars, if any could be stored (a stretch with no whole minute in it, the
+					// usual reconnect's, is answered as its trades were: asking again as bars only doubled the tries)
+					if (ticks && (sent == 0 || error != null) && WholeMinute(fromMs, toMs))
 					{
-						ticks = false;   // no tick history here: 1-minute bars
+						ticks = false;
 						continue;
 					}
 					if (!RoomFor(gen)) return;
@@ -878,6 +910,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				EnqueueHistory(gen, "Z|" + sym + "|error|0|" + ex.Message);
 			}
+		}
+
+		// Whether a whole minute [m, m + 60 s] fits in [fromMs, toMs]: 1-minute bars store nothing of a stretch without
+		// one (Fetch sends those closing in it, the server keeps the whole minutes inside it).
+		private static bool WholeMinute(long fromMs, long toMs)
+		{
+			long m = (fromMs + 59999) / 60000 * 60000;
+			return m + 60000 <= toMs;
 		}
 
 		// The contract charted at each time of [fromMs, toMs], oldest first, each with the time it starts: NinjaTrader's
@@ -921,11 +961,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		// [a, b] of one contract from NinjaTrader, its lines queued as they come (waiting for room). The count sent; -1 when
-		// its connection closed; `error` after the retries (30 s apart, while NinjaTrader's connection comes up) failed.
+		// its connection closed; `error` after the retries (30 s apart) failed: an error NinjaTrader gives, twice more (one
+		// that answered every request with Panic until it was restarted had each tried 22 times, as trades then as bars);
+		// no answer, or an error while its data connection is down, ten times more (it may come up meanwhile).
 		private int Fetch(string sym, Instrument instrument, long a, long b, bool ticks, int gen, out string error)
 		{
 			error = null;
-			for (int attempt = 0; ; attempt++)
+			int errors = 0, silent = 0;
+			while (true)
 			{
 				if (!WaitDataUp(gen, sym)) return -1;
 				TimeZoneInfo zone = NtZone();
@@ -945,7 +988,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					ErrorCode code = ErrorCode.NoError;
 					string message = "";
 					req.Request((bars, e, m) => { got = bars; code = e; message = m; answered.Set(); });
-					bool came = answered.Wait(TimeSpan.FromMinutes(5));
+					bool came = answered.Wait(HistoryWaitMs);
 					if (gen != connection) return -1;
 					if (came && code == ErrorCode.NoError && got != null)
 					{
@@ -971,9 +1014,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 						}
 						return sent;
 					}
-					if (attempt >= HistoryRetries)
+					bool failed = came && code != ErrorCode.NoError;
+					if (failed && DataConnected() ? ++errors > HistoryErrorRetries : ++silent > HistoryRetries)
 					{
-						error = came ? code + " " + message : "no answer from NinjaTrader";
+						error = failed ? code + " " + message : "no answer from NinjaTrader";
 						return 0;
 					}
 				}
@@ -982,7 +1026,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					lock (requests) requests.Remove(req);
 					req.Dispose();
 				}
-				Thread.Sleep(30000);
+				Thread.Sleep(HistoryRetryMs);
 			}
 		}
 
@@ -1196,7 +1240,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 				lock (vc) vc.Sent += (long)e.Volume;
 				int side = (e.Ask > 0 && price >= e.Ask) ? 1 : (e.Bid > 0 && price <= e.Bid) ? -1 : 0;
 				lastPrice[sym] = price;
-				Enqueue(string.Format(Inv, "T|{0}|{1}|{2}|{3}|{4}", sym, now, price, e.Volume, side));
+				// Older than the second its history request stops at (firstLive: NinjaTrader's catch-up of recent trades as
+				// it starts mid-session, its last trade first or newest first): that history holds it too. Its own time
+				// goes with it, to a server that takes it (Send), which keeps such a trade once.
+				long first;
+				string t = string.Format(Inv, "T|{0}|{1}|{2}|{3}|{4}", sym, now, price, e.Volume, side);
+				Enqueue(firstLive.TryGetValue(sym, out first) && at < first ? "\u0003" + t + "|" + at.ToString(Inv) : t);
 				lock (ck)
 				{
 					if (ran) ck.Max = long.MinValue;   // measured again from this one on
@@ -1410,6 +1459,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						using (StreamWriter w = new StreamWriter(client.GetStream(), new UTF8Encoding(false)))
 						{
 							w.NewLine = "\n";
+							serverVersion = 0;   // until this server's V line
 							w.WriteLine("HELLO|" + Token + "|" + Version);
 							heardR = false;
 							lock (feeds)   // (Forward and Release queue theirs with it locked)
@@ -1454,8 +1504,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 									string line;
 									if (queue.TryTake(out line, 250, ct))
 									{
-										Send(w, line, gen);
-										while (queue.TryTake(out line)) Send(w, line, gen);
+										bool marks = serverVersion >= MarksFrom;
+										Send(w, line, gen, marks);
+										while (queue.TryTake(out line)) Send(w, line, gen, marks);
 									}
 									DateTime now = DateTime.UtcNow;
 									if (!heardR && !held.IsEmpty && now >= releaseAt)

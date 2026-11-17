@@ -30,22 +30,27 @@ def test_history_fills_only_the_gap(tmp_path, monkeypatch):
     two_weeks = ms(10, 20) - 14 * 86_400_000                     # the others have none: their last 14 days
     assert asked[1:] == [f"GAP|{s}|{two_weeks}|{ms(10, 20)}" for s in m.instruments if s != "ES"] and len(asked) == len(m.instruments)
     m.gapfill.live("ES", ms(10, 19, 40))            # the add-on's buffer starts here: history must stop before it
+    m.on_tick(Tick("ES", ms(10, 19, 40), 7010.5, 4, 1))   # (that first live trade)
     for t, px, size in [(ms(10, 0, 20), 6990, 5),   # before the stored data: dropped
                         (ms(10, 0, 45), 7002.0, 3),  # same minute as the stored data: merged into its bar
                         (ms(10, 5, 0), 7003.0, 1), (ms(10, 5, 30), 7004.25, 2), (ms(10, 5, 59), 7002.5, 1),
-                        (ms(10, 19, 30), 7010.0, 1),  # the live feed's minute: the trade is stored, its bar left alone
+                        (ms(10, 19, 30), 7010.0, 1),  # the live feed's minute: the trade is stored, and in its bar
                         (ms(10, 19, 50), 7011.0, 9)]:  # after the first live trade: dropped
         m.gapfill.tick("ES", t, px, size)
     m.gapfill.done("ES", "ticks", 7, "ok")
     ticks = m.store.db.execute("SELECT ts, price, size FROM ticks WHERE symbol='ES' ORDER BY ts").fetchall()
     assert [tuple(t) for t in ticks] == [(ms(10, 0, 30), 7000.5, 2), (ms(10, 0, 45), 7002.0, 3), (ms(10, 5), 7003.0, 1),
-                                         (ms(10, 5, 30), 7004.25, 2), (ms(10, 5, 59), 7002.5, 1), (ms(10, 19, 30), 7010.0, 1)]
+                                         (ms(10, 5, 30), 7004.25, 2), (ms(10, 5, 59), 7002.5, 1), (ms(10, 19, 30), 7010.0, 1),
+                                         (ms(10, 19, 40), 7010.5, 4)]
     bars = {r[0]: tuple(r[1:]) for r in m.store.db.execute("SELECT t,o,h,l,c,v,n FROM bars_1m WHERE symbol='ES'")}
     assert bars[ms(10, 0)] == (7000, 7002.0, 6999, 7002.0, 13, 5)           # merged with what was stored
     assert bars[ms(10, 5)] == (7003.0, 7004.25, 7002.5, 7002.5, 4, 3)
-    assert ms(10, 19) not in bars and changed == ["ES"]
+    # r23: the live minute holds the history's trade before the live one (before, its bar had the live trades only)
+    assert bars[ms(10, 19)] == (7010.0, 7010.5, 7010.0, 7010.5, 5, 2) and changed == ["ES"]
+    live = m.m1["ES"].last
+    assert (live.t, live.o, live.c, live.v, live.bv, live.n) == (ms(10, 19), 7010.0, 7010.5, 5, 4, 2)   # the live feed's, in place
     st = m.gapfill.health()["ES"]
-    assert st["state"] == "done" and st["stored"] == 5 and st["minutes"] == 2
+    assert st["state"] == "done" and st["stored"] == 5 and st["minutes"] == 3 and st["copies"] == 0
 
 
 def test_minute_bars_when_there_is_no_tick_history(tmp_path, monkeypatch):
@@ -417,6 +422,7 @@ def test_a_gap_fill_cut_short_gets_its_bars_at_the_next_one(tmp_path, monkeypatc
     m, _ = build_market(tmp_path, monkeypatch, feed="ninjatrader")
     monkeypatch.setattr(m, "history_changed", lambda s: None)
     monkeypatch.setattr(gapfill_mod, "CHUNK", 50)
+    monkeypatch.setattr(gapfill_mod, "TAIL", 0, raising=False)   # (a live edge's last TAIL trades wait for its Z)
     stored(m)
     trades = [(ms(10, 1) + k * 5000, 7001.0 + k % 4, 1 + k % 3) for k in range(120)]   # 10:01:00 to 10:10:55
     m.gapfill.requests(ms(12, 0), live=True)
@@ -447,6 +453,7 @@ def test_a_failed_chunk_write_is_tried_again_a_chunk_later(tmp_path, monkeypatch
     m, _ = build_market(tmp_path, monkeypatch, feed="ninjatrader")
     monkeypatch.setattr(m, "history_changed", lambda s: None)
     monkeypatch.setattr(gapfill_mod, "CHUNK", 50)
+    monkeypatch.setattr(gapfill_mod, "TAIL", 0, raising=False)   # (a live edge's last TAIL trades wait for its Z)
     stored(m)
     m.gapfill.requests(ms(12, 0), live=True)
     real, tries = m.store.write, []

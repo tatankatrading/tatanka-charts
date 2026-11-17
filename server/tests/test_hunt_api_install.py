@@ -110,6 +110,8 @@ def _git(cwd, *args):
 
 
 UPDATERS = {"update.sh": ["sh"], "tools/update.ps1": ["pwsh", "-NoProfile", "-NonInteractive", "-File"]}
+CHECK = "compose run --rm chart python -m chartsrv.fix_catchup"
+ONE_UPDATE = ["compose build", f"{CHECK} --update", "compose up -d"]   # (the look since the last one, by itself)
 updaters = pytest.mark.parametrize("script", [
     pytest.param("update.sh", marks=pytest.mark.skipif(not shutil.which("sh"), reason="sh")),
     pytest.param("tools/update.ps1", marks=pytest.mark.skipif(not shutil.which("pwsh"), reason="pwsh")),
@@ -139,7 +141,8 @@ def _install(tmp_path, monkeypatch, files: dict, script: str):
     monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ['PATH']}")
 
     def update():
-        return subprocess.run([*UPDATERS[script], str(me / script)], capture_output=True, text=True, timeout=120)
+        return subprocess.run([*UPDATERS[script], str(me / script)], capture_output=True, text=True, timeout=120,
+                              stdin=subprocess.DEVNULL)   # no one to answer (also under pytest -s in a terminal)
     return up, me, update
 
 
@@ -157,7 +160,7 @@ def test_update_keeps_your_config_edits(tmp_path, monkeypatch, script):
     r = update()
     assert r.returncode == 0, r.stdout + r.stderr
     assert '"a": "my hours"' in mine.read_text() and '"e": "new year"' in mine.read_text()
-    assert (tmp_path / "docker.txt").read_text().startswith("compose up -d --build")
+    assert (tmp_path / "docker.txt").read_text().splitlines() == ONE_UPDATE
 
     days.write_text(days.read_text().replace('"c": "c"', '"c": "fixed"'))
     _git(up, "commit", "-qam", "three")
@@ -166,7 +169,7 @@ def test_update_keeps_your_config_edits(tmp_path, monkeypatch, script):
     assert r.returncode == 0, r.stdout + r.stderr
     assert mine.read_text() == days.read_text() and "config/holidays.json" in r.stdout   # no conflict marks built in
     assert '"c": "mine"' in _git(me, "stash", "show", "-p")
-    assert len((tmp_path / "docker.txt").read_text().splitlines()) == 2
+    assert (tmp_path / "docker.txt").read_text().splitlines() == ONE_UPDATE * 2
 
 
 @updaters
@@ -187,7 +190,7 @@ def test_update_removes_a_file_you_changed(tmp_path, monkeypatch, script):
     r = update()
     assert r.returncode == 0, r.stdout + r.stderr
     assert _git(me, "rev-parse", "HEAD") == _git(up, "rev-parse", "HEAD")
-    assert len((tmp_path / "docker.txt").read_text().splitlines()) == 2
+    assert (tmp_path / "docker.txt").read_text().splitlines() == ONE_UPDATE * 2
 
 
 def test_the_container_log_is_capped():
@@ -198,3 +201,44 @@ def test_the_container_log_is_capped():
     m = re.search(r'\n    logging:[^\n]*\n      driver: json-file\n      options:\n        max-size: "(\d+)m"\n'
                   r'        max-file: "(\d+)"\n', chart)
     assert m and int(m[1]) * int(m[2]) <= 100
+
+
+def _found_some(tmp_path):
+    """The stand-in docker as one whose fix_catchup --update found trades stored twice (exit 3)."""
+    (tmp_path / "bin" / "docker").write_text(f'#!/bin/sh\necho "$@" >> "{tmp_path}/docker.txt"\n'
+                                             'case "$*" in *--update*) exit 3;; esac\n')
+
+
+@updaters
+def test_update_with_no_one_to_answer_asks_nothing_and_remembers_nothing(tmp_path, monkeypatch, script):
+    """Trades stored twice found, but no one there to answer (no terminal; pwsh -NonInteractive): nothing fixed and
+    nothing declined, so the next update asks again; the server starts as always."""
+    up, me, update = _install(tmp_path, monkeypatch, {"config/holidays.json": "{}\n"}, script)
+    _found_some(tmp_path)
+    r = update()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "docker.txt").read_text().splitlines() == ONE_UPDATE
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("sh"), reason="sh and a terminal")
+@pytest.mark.parametrize("answer,then", [
+    ("y", ["compose stop chart", f"{CHECK} --update --yes", "compose up -d"]),
+    (" Y", ["compose stop chart", f"{CHECK} --update --yes", "compose up -d"]),
+    ("n", [f"{CHECK} --decline"]),
+    ("", [f"{CHECK} --decline"]),   # Enter: the [y/N] default
+])
+def test_update_asks_before_fixing_them(tmp_path, monkeypatch, answer, then):
+    """update.sh in a terminal: asked once the new server runs; the found ones fixed with the server stopped and
+    started again (yes), or declined."""
+    import pty
+    up, me, _ = _install(tmp_path, monkeypatch, {"config/holidays.json": "{}\n"}, "update.sh")
+    _found_some(tmp_path)
+    main, tty = pty.openpty()
+    os.write(main, f"{answer}\n".encode())
+    try:
+        r = subprocess.run(["sh", str(me / "update.sh")], stdin=tty, capture_output=True, text=True, timeout=120)
+    finally:
+        os.close(tty)
+        os.close(main)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "docker.txt").read_text().splitlines() == ONE_UPDATE + then

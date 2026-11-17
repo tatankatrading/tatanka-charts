@@ -30,7 +30,7 @@ from .models import Bar, Tick
 from .sessions import SessionClock, session_start
 from .store import connect, iter_bars_1m
 from .studies import RthClock
-from .tpo_service import BarBuilder, chart_bars, session_end
+from .tpo_service import BarBuilder, bar_end, chart_bars, session_end
 
 log = logging.getLogger(__name__)
 ROLL_GAPS = "gap_roll_skip"   # setting: the gaps across a contract roll not alerted, per symbol
@@ -51,12 +51,13 @@ SECONDS_TRADES = 1_000_000    # a seconds chart's run reads at most this many st
 SYMBOL_SWITCHES = "gap_symbol_switches"   # the store's: symbol -> its alert switches (every chart of it has them)
 
 
-def run(s: dict, minutes: int, minute_bars, record: list | None = None, rth: tuple[str, str] | None = None):
-    """Every chart bar through the forming one, once each (rth: an RTH chart's). Returns the engine and each bar's
-    open by index."""
+def run(s: dict, minutes: int, minute_bars, record: list | None = None, rth: tuple[str, str] | None = None,
+        calendar: str | None = None):
+    """Every chart bar through the forming one, once each (rth: an RTH chart's; calendar: the instrument's holiday
+    group, a bar ending at a halt or early close). Returns the engine and each bar's open by index."""
     eng = gaps.engine_for(s)
     opens: list[int] = []
-    for i, (k, close, h, l, _, o, c) in enumerate(chart_bars(minute_bars, minutes, rth)):
+    for i, (k, close, h, l, _, o, c) in enumerate(chart_bars(minute_bars, minutes, rth, calendar)):
         t = ct(close)
         if record is not None:
             record.append((i, t, o, h, l, c))
@@ -83,8 +84,8 @@ class SecondsRun:
     """A seconds chart's Gap Analysis: its own bars, built from the stored trades from its first bar's open on as the
     chart builds them (TimeSeries: from each session's open, an RTH chart's from the RTH open, a bar only where a trade
     printed), each through the engine with its end time (NinjaTrader stamps a bar at its end; the last one of a session
-    ends there) once it is complete, and the forming one as it is now. Kept: an ask reads only the trades stored since
-    the one before (read)."""
+    ends there, or at a holiday's halt or early close) once it is complete, and the forming one as it is now. Kept: an
+    ask reads only the trades stored since the one before (read)."""
 
     def __init__(self, s: dict, spec: BarSpec, inst, rth: bool, start: int):
         self.engine = gaps.engine_for(s)
@@ -92,7 +93,7 @@ class SecondsRun:
         self.series = make_series(spec, inst.tick_size, inst.decimals, 2, inst.rth, studies=False, rth_only=bool(hours),
                                   group=inst.calendar)
         self.period, self.start = spec.size * 1000, start
-        self.clock, self.hours = SessionClock(), RthClock(hours) if hours else None
+        self.clock, self.hours, self.calendar = SessionClock(), RthClock(hours) if hours else None, inst.calendar
         self.opens: list[int] = []   # each bar's open, by index
         self.cur = None              # the forming bar (a Bar the series grows)
         self.after = (start, 0)      # live: (ts, rowid) to read on from (the forming bar's open, the last trade read)
@@ -101,7 +102,7 @@ class SecondsRun:
 
     def _end(self, t: int) -> int:
         e = self.hours.window(sessions.to_ct(t))[1] if self.hours else session_end(self.clock.locate(t))
-        return min(t + self.period, e)
+        return bar_end(t, self.period, e, self.calendar)   # or at a holiday's halt or early close inside it
 
     def _update(self):
         b = self.cur
@@ -193,13 +194,14 @@ def check_hours(s: dict, instruments: dict):
 class GapWatch:
     """One symbol's alerting engine on the bars of the chart its alerts were switched on from (cfg["minutes"], its
     timeframe; cfg["rth"]: its regular hours only), as that chart's Gap table runs it: the same open, RTH close, size,
-    fill and bars to fill. A config from before the timeframe was kept: 1-minute bars."""
+    fill and bars to fill. A config from before the timeframe was kept: 1-minute bars. calendar: the instrument's
+    holiday group (a bar a halt or early close cuts short ends there, as on the chart)."""
 
-    def __init__(self, cfg: dict, rth=None):
+    def __init__(self, cfg: dict, rth=None, calendar: str | None = None):
         self.cfg = cfg
         self.engine = gaps.engine_for(own_hours(gaps.settings({k: cfg[k] for k in gaps.DEFAULTS if k in cfg}), rth))
         self.hours = RthClock(rth) if rth and cfg.get("rth") else None   # a config without the flag: all hours
-        self.bars = BarBuilder(max(1, int(cfg.get("minutes") or 1)), rth if self.hours else None)
+        self.bars = BarBuilder(max(1, int(cfg.get("minutes") or 1)), rth if self.hours else None, calendar)
         self.bar = -1
         self.t: int | None = None
         self.gap_t: int | None = None   # the minute its newest gap opened in
@@ -292,19 +294,24 @@ class GapService:
         split, live = self.m.recent_minutes(sym) if until is None else self.m.recent_minutes(sym, until)
         start = session_start(int(time.time() * 1000) if until is None else until // 60_000 * 60_000) - days * 86_400_000
         db = self.m.store.path
-        hours = self.m.instruments[sym].rth if rth else None
+        inst = self.m.instruments[sym]
+        hours = inst.rth if rth else None
 
         def work():
-            eng, opens = run(s, minutes, chain(iter_bars_1m(db, sym, start, split), live), rth=hours)
+            eng, opens = run(s, minutes, chain(iter_bars_1m(db, sym, start, split), live), rth=hours,
+                             calendar=inst.calendar)
             # the hours it ran on: the chart's RTH times moved to the instrument's own (CL's 0800-1330), as its info says
             return {**payload(eng, opens, minutes), "hours": f"{s['RthStart'] // 100:04d}-{s['RthEnd'] // 100:04d}"}
         return await asyncio.to_thread(work)
 
     async def get_seconds(self, sym: str, spec: BarSpec, s: dict, start: int, rth: bool = False,
                           until: int | None = None) -> dict:
-        """A seconds chart's gaps from its first bar (start, its open) on, or from SECONDS_TRADES trades back. Kept per
-        chart, settings and live or replay: each ask reads the trades since the last; a replay's clock moved back
-        works it out again."""
+        """A seconds chart's gaps from its first bar (start, its open) on, or from SECONDS_TRADES trades back. In bar
+        replay (until, its clock) from the open of the session before the clock's at the latest: the replay's bars hold
+        no RTH close before its day on a 1s-20s chart, and older bars never load in replay, so the run reaches back as
+        NinjaTrader's Playback has the days before it loaded (bars are bucketed from each session's open: the chart's
+        stay the same). Kept per chart, settings and live or replay: each ask reads the trades since the last; a
+        replay's clock moved back works it out again."""
         self.m.flush_for_read()
         inst = self.m.instruments[sym]
         rth = bool(rth and inst.rth)
@@ -315,7 +322,9 @@ class GapService:
         if run is None or until is not None and until < run.upto:
             floor = await asyncio.to_thread(trades_floor, self.m.store.path, sym, until if until is not None else 1 << 62,
                                             SECONDS_TRADES)
-            run = self.seconds[key] = SecondsRun(s, spec, inst, rth, max(start, floor))
+            first = start if until is None else min(start, sessions.previous_session_start(
+                sessions.previous_session_start(until + 1)))   # (replay.build's window for its seconds bars)
+            run = self.seconds[key] = SecondsRun(s, spec, inst, rth, max(first, floor))
             while len(self.seconds) > SECONDS_KEPT:
                 self.seconds.popitem(last=False)
         self.seconds.move_to_end(key)
@@ -410,7 +419,7 @@ class GapService:
                 # off Instruments): left off, the others run
                 try:
                     check_hours(cfg, {sym: inst})
-                    w = GapWatch(cfg, inst.rth)
+                    w = GapWatch(cfg, inst.rth, inst.calendar)
                 except ValueError as e:
                     log.warning("gap alerts for %s not started: %s", sym, e)
                     self.refused[sym] = str(e)

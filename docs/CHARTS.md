@@ -154,10 +154,11 @@ Tabs are remembered per chart and saved in the workspace.
   over it) to zoom in or out; drag left or right on the time axis to zoom time. Both keep the proportions, so the chart
   never needs a pinch. A double-tap (double-click) on the price axis unlocks and fits the data again. On a phone the
   time axis also zooms with one finger when not locked.
-- **Moving the chart up or down** (TradingView's): with auto on, a drag that goes clearly up or down (mouse or one
-  finger) moves the chart and turns auto off; a sideways swipe's wobble doesn't, and neither does a long press (the
-  crosshair) or a pinch. With auto off the chart moves freely; the price range stays where you put it while you
-  scroll or new bars come. A new symbol or timeframe fits itself again (auto on), so a fixed range from another market
+- **Moving the chart up or down** (TradingView's): with auto on, a mouse drag that goes clearly up or down moves the
+  chart and turns auto off; a sideways drag's wobble doesn't. A finger never turns auto off (on a phone nearly every
+  pan goes a little up or down): with auto on it moves the chart sideways only. To move the prices with a finger, turn
+  **auto** off first (or drag the price axis). With auto off the chart moves freely; the price range stays where you
+  put it while you scroll or new bars come. A new symbol or timeframe fits itself again (auto on), so a fixed range from another market
   never leaves the chart empty.
 - **Time axis**: hover the chart for − + ‹ › ⟲ (zoom out/in around the latest bar, scroll, reset the view). **»**
   appears when the latest bar is out of view and jumps back to it. Wheel and drag work as before. Zoomed in, bars stop
@@ -194,7 +195,15 @@ Tabs are remembered per chart and saved in the workspace.
     Apply to all charts (nor RTH/ETH or the scale mode).
   - **Chart:** session-break lines at each 17:00 CT open (zoomed far out, one a week instead; none when even those
     would crowd the chart; also right-click → Hide session breaks); crosshair free or magnet (snaps to
-    open/high/low/close); right margin in bars. **Reset chart settings** puts all of it back.
+    open/high/low/close); right margin. **Reset chart settings** puts all of it back.
+  - **Right margin**, the empty space right of the latest bar: in **bars** (6 by default) or in **% of width** (0-90%
+    of the price pane; 50 puts the latest bar in the middle). In bars, the latest bar moves when you zoom. In % of
+    width it stays at its place while the chart follows the latest bars: on a new symbol or timeframe, Reset view and
+    **»** (or End), as new bars come, after every zoom (wheel, pinch, + −, dragging the time axis) and a resize (the
+    sidebar, a phone turned), in replay and on each chart of a layout. Reset view and a new chart show 163 bars across,
+    the latest at its place. Scrolled back in time, the chart stays where you put it; **»** brings it back. The AMT
+    Toolkit, If/Then and Daily SMA labels still get the room they need when that is more. Saved per tab with the other
+    chart settings, and part of Apply to all charts and chart templates.
   - **Apply to all charts** (bottom of the menu): these settings on every tab of every chart: each chart of the
     layout, every chart position of the workspace, and every other saved workspace.
   - **◑ Chart templates ▾** (bottom of the menu): **Save these settings as…** keeps the look (bars, colors, grid, text,
@@ -207,14 +216,14 @@ Tabs are remembered per chart and saved in the workspace.
   moves the chart. A sideways drag that starts on an alert line pans the chart (up or down moves the alert; a tap
   edits it). The app never zooms as a page (a tap in a number box used to zoom an iPhone's page, which then took
   drags on the chart for itself).
-- **On a phone**, the AMT table starts folded to its title, a small tab in the chart's top-right corner beside the
-  legend (**Tatanka AMT v1.2.4 ▾**); tap it and the rows drop down from that corner (under the legend only when the
+- **On a phone** (upright or turned sideways), the AMT table starts folded to its title, a small tab in the chart's
+  top-right corner beside the legend (**Tatanka AMT v1.2.4 ▾**); tap it and the rows drop down from that corner (under the legend only when the
   legend is too wide, e.g. the studies list open), tap again to fold. Settings and other
   dialogs fill the screen below the status bar, so their ✕ and buttons can always be reached.
 - **On a phone**, as TradingView's app: one page at a time, with a bar at the bottom: **Chart**, **Watchlist**,
   **Alerts**, **Plan** and **More** (Tape, Journal, Calendar). The watchlist's rows are TradingView's: the symbol over
   its name, the price over its change and change %; tap a row for its chart, full screen; long-press for its menu (sort
-  is in **⋯**). The app opens on the chart.
+  is in **⋯**). The app opens on the chart, not on the page it was left on.
 - **⇥** folds the watchlist/alerts panel away; a tab opens it again. Drag the panel's edge to make it wider; a
   double-click on the edge puts it back. Kept per device.
 
@@ -341,14 +350,17 @@ whole bar's room as on the chart (CL's 13:00 1h bar at a 13:30 halt); bars that 
   lets go of the one selected); a new drawing, or one clicked here, shows them all again.
 - **Keys** (TradingView's): **Alt+H** a horizontal line at the pointer's price, **Alt+J** horizontal ray, **Alt+V**
   vertical line, **Alt+T** trend line, **Alt+F** fib retracement, **Alt+Shift+R** rectangle.
-- On a computer the drawing tools are a column beside the chart (they cover none of it); on a phone, a row over its
-  bottom.
+- On a computer the drawing tools are a column beside the chart (they cover none of it), in each chart of a layout
+  too; on a phone, a row over its bottom.
 - **Templates:** the settings panel's **Save this style as…** keeps the tool's style under a name; click a name to
   apply it, right-click (long-press) to delete it. Saved on the server, so every device has them (templates kept in a browser before are
   moved there on its first start). New drawings start with the tool's last style. **Magnet** snaps points to the
   bar's open, high, low or close.
-- **Alerts:** lines, rays and trend lines have an **alert** box (cross, above or below). It goes to Discord and the
-  phone like any alert, follows the line when you move it (and re-arms), and goes when the drawing does. A trend
+- **Alerts:** lines, rays and trend lines have an **alert** box (cross, above or below) and how often it alerts:
+  **once** (the default: it stops after firing), **every time** (at most once a minute), or at most once every 5,
+  15, 30 or 60 minutes or a number you type (**every … min**, 1 to 1440); changing it on a line that fired restarts
+  the alert. It goes to Discord and the phone like any alert, follows the line when you move it (and re-arms, a wait
+  from before included), and goes when the drawing does. A trend
   line alerts at the level the line is drawn at that moment on the chart its alert was switched on from. On a
   seconds, minute or hour chart (ETH) of a future it is straight in that chart's bars, so it moves on only while the
   market trades, not over the 16:00-17:00 CT break, a weekend or a CME holiday (the instrument's holiday group), and
@@ -382,6 +394,8 @@ bar disappears; **▶** plays (½ to 10 bars a second), **⏭** or **Shift+→**
   volume profile. Each is built as it stood at the replay bar (nothing after it counts) and moves on as replay plays.
   - **AMT Toolkit**: the replaying chart gets its own Toolkit, loaded from the 90 days before the replay start (400
     with Profile Period on Yearly; a few seconds on the first bar and after **Jump**). It never alerts.
+  - **Gap Analysis** on a second chart runs from the session before the replay clock's, so the replayed day's gap
+    shows even though older bars do not load in replay.
   - **Daily levels** (and the Toolkit's levels): the app keeps each day's levels as they come (levels file, link or
     pasted line; a change during the day is kept too, with when it was first seen), so replay shows the levels that day
     had. Days from before the app kept them, or with none, show "no daily levels kept for that day". The kept levels

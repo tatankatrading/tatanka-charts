@@ -26,7 +26,7 @@ from chartsrv.amt_runner import ct
 from chartsrv.bars import parse_spec
 from chartsrv.config import Instrument
 from chartsrv.models import Tick
-from chartsrv.sessions import SessionClock, to_ct
+from chartsrv.sessions import CT, SessionClock, to_ct
 from chartsrv.store import Store
 from chartsrv.studies import RthClock
 from chartsrv.tpo_service import session_end
@@ -176,8 +176,9 @@ def test_a_seconds_chart_reads_only_new_trades_and_a_replay_follows_its_clock(tm
         stored = sorted([*ticks, late], key=lambda t: t.ts)
         for until in (ticks[cut // 2].ts, ticks[cut].ts + 1000, ticks[cut // 3].ts):
             until = until // 1000 * 1000
-            got = await svc.get_seconds("ES", sp, s, start, until=until)
-            assert got == payload_of([t for t in stored if t.ts < until], 15, s, start), until
+            got = await svc.get_seconds("ES", sp, s, start, until=until)   # (from the session before its clock's at
+            assert got["from"] <= start, until                              # the latest: the same bars, none stored before)
+            assert {**got, "from": start} == payload_of([t for t in stored if t.ts < until], 15, s, start), until
         assert len(svc.seconds) == 2   # the live run and the replay's
         monkeypatch.setattr(gs, "SECONDS_TRADES", 5000)
         svc.seconds.clear()
@@ -185,6 +186,31 @@ def test_a_seconds_chart_reads_only_new_trades_and_a_replay_follows_its_clock(tm
         floor = stored[-5000].ts
         assert capped["from"] == floor and capped == payload_of([t for t in stored if t.ts >= floor], 15, s, floor)
     asyncio.run(go())
+
+
+
+@pytest.mark.parametrize("size", [1, 5, 15])
+def test_a_replayed_seconds_chart_has_the_gap_of_the_replayed_day(tmp_path, size):
+    """Bar replay at 08:45 on a 1s-15s chart: its bars (replay.build's, the page's start) begin after the RTH close the
+    day before, and older bars never load in replay. The run still starts at the session before the clock's, as
+    NinjaTrader's Playback has the days before it loaded, so the replayed day's gap shows as on the 1-minute chart."""
+    from chartsrv import replay
+    m1, ticks = trades("ES", days=5)
+    m = FakeMarket(tmp_path / "chart.db")
+    m.store.write(ticks, [])
+    svc = gs.GapService.__new__(gs.GapService)
+    svc.m, svc.seconds = m, gs.OrderedDict()
+    s = gs.own_hours(gaps.settings({}), RTHS["ES"])
+    at, rth_open = (int(datetime(2026, 10, 15, h, mi, tzinfo=CT).timestamp() * 1000) for h, mi in ((8, 45), (8, 30)))
+    eng, opens = gs.run(s, 1, [b for b in m1 if b.t < at])
+    want = [(g["dir"], g["open"], g["settle"]) for g in gs.payload(eng, opens, 1)["gaps"] if g["st"] >= rth_open]
+    assert len(want) == 1
+    sp = parse_spec(f"{size}s")
+    bars, _, _ = replay.build(m.store.path, "ES", inst("ES"), sp, at, ticks[-1].ts + 60_000, 2 ** 62)
+    assert bars[0].t > int(datetime(2026, 10, 14, 15, 0, tzinfo=CT).timestamp() * 1000)   # after the RTH close before
+    d = asyncio.run(svc.get_seconds("ES", sp, s, bars[0].t, until=at))
+    assert [(g["dir"], g["open"], g["settle"]) for g in d["gaps"] if g["st"] >= rth_open] == want
+    assert d["t"] < at and d["t"] in {b.t for b in bars}   # the chart's own bars: it fills on from its current one
 
 
 def test_the_api_takes_second_charts_and_refuses_other_bar_types(client):  # noqa: F811

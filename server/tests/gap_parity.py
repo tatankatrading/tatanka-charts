@@ -1,12 +1,15 @@
 """Parity check: chartsrv/gaps.py against the original C# GapEngine (compiled with mono).
 
     tests/gap_csharp/build.sh <tatanka-indicators checkout> <workdir>
-    python tests/gap_parity.py <workdir> [days] [minutes] [seed] [ES|NQ|CL|GC] [settings json] [rth]
+    python tests/gap_parity.py <workdir> [days] [minutes] [seed] [ES|NQ|CL|GC] [settings json] [rth] [holidays]
 
 Generates synthetic 1-minute Globex data, groups it into the chart's bars and records what the indicator
 sees with Calculate.OnPriceChange: each bar several times as it grows, plus SessionKey probes and Snapshot
 calls over random visible ranges. Replays the record through both engines and compares every value.
 rth: an RTH chart's bars (the instrument's regular hours, from the RTH open), as on an RTH trading-hours template.
+holidays: the days generated end on Dec 1 2026, with config/holidays.json's halts and early closes for the root (no
+minutes in them), so they hold Thanksgiving and the day after: a bar a halt or early close cuts short ends there, as
+NinjaTrader ends a partial holiday's session (tpo_service.bar_end).
 Use Instrument Hours (UseInstrumentHours, on by default): the port runs the RTH times at the root's own hours
 (gaps_service.own_hours and check_hours, config/futures.json's), the C# (v1.1.0) moves them itself from the typed ones and
 the root (InstrumentHours.Apply, its own table); both print the times they run, or why they make no session there. A
@@ -22,16 +25,18 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from amt_parity import synth                         # noqa: E402
-from chartsrv import gaps                            # noqa: E402
+from chartsrv import gaps, sessions                  # noqa: E402
 from chartsrv.amt_runner import ct                   # noqa: E402
+from chartsrv.config import load_holidays            # noqa: E402
 from chartsrv.gaps_service import check_hours, own_hours   # noqa: E402
 from chartsrv.sessions import SessionClock, to_ct    # noqa: E402
 from chartsrv.studies import RthClock                # noqa: E402
-from chartsrv.tpo_service import session_end         # noqa: E402
+from chartsrv.tpo_service import bar_end, session_end   # noqa: E402
 
 ROOTS = {"ES": (0.25, 6800.0), "NQ": (0.25, 25000.0), "CL": (0.01, 65.0), "GC": (0.10, 3500.0), "SI": (0.005, 40.0)}
 RTHS = {"ES": ("08:30", "15:00"), "NQ": ("08:30", "15:00"), "CL": ("08:00", "13:30"), "GC": ("07:20", "12:30"),
         "SI": ("07:25", "12:25")}
+CALENDARS = {"ES": "equity", "NQ": "equity", "CL": "energy", "GC": "metals", "SI": "metals"}
 
 
 def D(x):
@@ -42,8 +47,9 @@ def T(t):
     return t.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def record(m1, minutes, s, seed, rth=None, root="ES"):
-    """s: the settings as typed (the C# moves the RTH times itself, given the root and Use Instrument Hours)."""
+def record(m1, minutes, s, seed, rth=None, root="ES", calendar=None):
+    """s: the settings as typed (the C# moves the RTH times itself, given the root and Use Instrument Hours); calendar:
+    the root's holiday group, a bar ending at a halt or early close."""
     rng = random.Random(seed)
     lines = [f"S|{s['RthStart']}|{s['RthEnd']}|{D(s['MinimumGapPoints'])}|{root}|{int(s['UseInstrumentHours'])}"]
     day = datetime(2026, 10, 14)
@@ -62,7 +68,7 @@ def record(m1, minutes, s, seed, rth=None, root="ES"):
         k, s_end = bucket(m.t)
         if k != key:
             i, key, bar = i + 1, k, [m.o, m.h, m.l, m.c]
-            end = ct(min(k + period, s_end))
+            end = ct(bar_end(k, period, s_end, calendar))
         else:
             bar = [bar[0], max(bar[1], m.h), min(bar[2], m.l), m.c]
         last_minute = n + 1 == len(m1) or bucket(m1[n + 1].t)[0] != k
@@ -138,17 +144,21 @@ def same(a, b):
 
 
 def main():
-    argv = [a for a in sys.argv if a != "rth"]
+    argv = [a for a in sys.argv if a not in ("rth", "holidays")]
     work = Path(argv[1])
     days = int(argv[2]) if len(argv) > 2 else 60
     minutes = int(argv[3]) if len(argv) > 3 else 5
     seed = int(argv[4]) if len(argv) > 4 else 7
     root = argv[5] if len(argv) > 5 else "ES"
     s = gaps.settings(json.loads(argv[6]) if len(argv) > 6 else {})
-    rth = RTHS[root] if len(argv) < len(sys.argv) else None
+    rth = RTHS[root] if "rth" in sys.argv else None
     tick, price = ROOTS[root]
-    m1 = synth(days, seed, datetime(2026, 10, 16, 12, 7), tick, price)
-    lines = record(m1, minutes, s, seed, rth, root)
+    calendar = CALENDARS[root] if "holidays" in sys.argv else None
+    m1 = synth(days, seed, datetime(2026, 12, 1, 12, 7) if calendar else datetime(2026, 10, 16, 12, 7), tick, price)
+    if calendar:
+        sessions.set_calendar(load_holidays(Path(__file__).resolve().parents[2] / "config"))
+        m1 = [m for m in m1 if sessions.is_open(m.t, calendar) and not sessions._no_session(m.t)]
+    lines = record(m1, minutes, s, seed, rth, root, calendar)
     rec_path, cs_out = work / "gap_record.txt", work / "gap_cs.txt"
     rec_path.write_text("\n".join(lines) + "\n")
     subprocess.run(["mono", str(work / "harness.exe"), str(rec_path), str(cs_out)], check=True)
@@ -165,7 +175,7 @@ def main():
         print(f"PARITY OK: {root}: refused by both, {py[-1][2:]}")
         return
     hours = (lambda o: f"{o['RthStart']}-{o['RthEnd']}")(own_hours(s, RTHS[root]))
-    print(f"PARITY OK: {root} {minutes}m{' RTH' if rth else ''} RTH {hours} (Use Instrument Hours {'on' if s['UseInstrumentHours'] else 'off'}), {days} days, {count('U') or sum(1 for x in lines if x[0] == 'U')} updates, "
+    print(f"PARITY OK: {root} {minutes}m{' RTH' if rth else ''}{' holidays' if calendar else ''} RTH {hours} (Use Instrument Hours {'on' if s['UseInstrumentHours'] else 'off'}), {days} days, {count('U') or sum(1 for x in lines if x[0] == 'U')} updates, "
           f"{count('H')} gaps ({count('X')} filled), {count('F')} snapshots, {len(py)} lines; every value equal")
 
 

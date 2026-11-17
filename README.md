@@ -92,11 +92,19 @@ Install this site as an app** (or Chrome's install icon). Step by step: [Phone a
 
 ## Updating
 
+To hear about each new version by email, even with the app closed: on
+[the repository](https://github.com/tatankatrading/tatanka-charts), **Watch > Custom > Releases**.
+
 On Windows, double-click **`update.cmd`** in the `tatanka-charts` folder, or run it there (Command Prompt: `update.cmd`;
 PowerShell: `.\update.cmd`; Mac or Linux: `./update.sh`). It gets the newest
-version (`git pull`), rebuilds and restarts the server (`docker compose up -d --build`) and copies the NinjaTrader
+version (`git pull`), rebuilds and restarts the server (`docker compose build`, then `up -d`) and copies the NinjaTrader
 add-on into NinjaTrader, keeping the Host, Port and Token set in your copy. NinjaTrader compiles it by itself when
-its NinjaScript Editor is open; otherwise New > NinjaScript Editor, F5. Your own edits to its files (such as
+its NinjaScript Editor is open; otherwise New > NinjaScript Editor, F5 (the update says so in yellow at the end when
+the add-on changed). Each update also looks for trades a NinjaTrader started mid-session stored twice before add-on
+23, since its last look (the first time, the last 90 days), and asks before fixing any it finds
+([CONNECTIONS.md](docs/CONNECTIONS.md), "Each trade once"). An update runs the update script it starts with, so a
+change to the script itself (as this look, new in v0.10) takes effect from the update after the one that brings it.
+Your own edits to its files (such as
 `config/holidays.json`) are put back on the new version; where the update changed the same lines (or removed the file),
 its version is used and yours is kept (`git stash show -p` shows it).
 
@@ -134,6 +142,7 @@ What happens by itself after that, or whenever something changes:
 | [Alerts and Discord](docs/ALERTS.md) | alerts and where they go; posting charts to Discord |
 | [Market data](docs/DATA.md) | backfill, Databento import, exchange holidays |
 | [Contributing](docs/CONTRIBUTING.md) | code layout, tests and checks, what is not built yet |
+
 
 Charts are drawn with [Lightweight Charts](https://github.com/tradingview/lightweight-charts) 5.1 by TradingView
 (Apache 2.0), vendored in `web/vendor/`.

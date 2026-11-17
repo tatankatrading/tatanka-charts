@@ -8,7 +8,9 @@ what they built between requests (GET /api/vp/{prof|aavp|pvp}).
   as NinjaTrader does (web/studies.js pvpTouches); the first minute after a closed profile whose range holds its POC,
   VAH or VAL (vp.holds) is sent too, for a period that ended before the chart's first loaded bar.
 - SVP (the "prof" study): every trade of each session window, up or down by the tick rule. A finished session is
-  worked out once, in a worker, and kept in the vp_cache table; the current one grows from the trades stored since.
+  worked out once, in a worker, and kept in the vp_cache table; the current one grows from the trades stored since,
+  and so does one that ended less than SVP_SETTLE_MS ago (a trade stamped before its end can be stored a moment after
+  it: a feed's delay, a clock behind this one; NinjaTrader adds every trade of the window by its own time).
   Trades are stored only while a trade feed runs (the NinjaTrader add-on, or a Databento import); a minute of the
   session with no stored trades takes its 1-minute bar instead (gap-filled history is bars only): the bar's volume
   spread evenly over its ticks, up when it closed at or above its open, as the AAVP/PVP read bars. The answer says
@@ -42,7 +44,10 @@ from .studies import RthClock
 log = logging.getLogger(__name__)
 MINUTE = 60_000
 KINDS = ("prof", "aavp", "pvp")
-MAX_BUILDERS = 24
+MAX_BUILDERS = 24           # built series kept however long nobody asks for them; past that, the idle ones go ...
+BUILDER_IDLE_S = 60         # ... once nobody has asked for them this long (a chart asks for each profile every 3 s) ...
+BUILDERS_CAP = 4 * MAX_BUILDERS   # ... and the least recently asked past this many, however recently (memory)
+SVP_SETTLE_MS = 120_000     # a session is kept this long after its end: a trade stamped before it, stored late, still counts
 SVP_LOOKBACK_DAYS = 45       # how far back sessions are looked for (SessionsToKeep of them, weekends skipped), at least
 SVP_MAX_SESSIONS = 100       # Sessions to retain at most (nt_schema.json)
 DAY_MS = 86_400_000
@@ -467,9 +472,10 @@ def svp_json(ticks: dict, begin: int, end: int, last, tick: float, tpr: int, per
 
 class _Entry:
     def __init__(self, state, gen: int):
-        self.state = state
+        self.state = state      # AAVP, PVP: MinuteState; SVP: {window: SvpState} of the windows still taking trades
         self.gen = gen          # the symbol's history it is built from (VpService.gen)
         self.lock = asyncio.Lock()
+        self.used = 0.0         # when it was last asked for (time.monotonic)
         self.ready = False
         self.builds = 0         # bar replay's: built again from the start (it went back), a new build for `have`
         self.dev_task = None    # SVP: finished sessions' per-bar values being worked out (VpService._svp_devs) ...
@@ -482,6 +488,7 @@ class VpService:
         self.entries: OrderedDict = OrderedDict()   # (kind, symbol, settings) -> _Entry
         self.gen: dict[str, int] = {}                # symbol -> times its history changed
         self.boot = secrets.token_hex(4)   # in every build key: a page's key from before a restart (an import) never matches
+        self.capped = False                # said once in the log: more profiles asked for at once than BUILDERS_CAP
         market.store.db.execute(SCHEMA_SQL)
         with market.store.db:   # sessions worked out before minutes without trades took their bars; and ones partly
             market.store.db.execute("DELETE FROM vp_cache WHERE key LIKE 'svp|%'")   # from bars, as an import of
@@ -520,12 +527,26 @@ class VpService:
         return len(old)
 
     def _entry(self, key, make):
+        """The built series of key (made when missing), now the most recently asked. Every chart asks for each of its
+        profiles every 3 seconds, so past MAX_BUILDERS the least recently asked goes only once nobody has asked for it
+        for BUILDER_IDLE_S (by count alone, more profiles on screen than that were each built again at every ask), and
+        past BUILDERS_CAP regardless."""
+        now = time.monotonic()
         e = self.entries.get(key)
         if e is None:
             e = self.entries[key] = _Entry(make(), self.gen.get(key[1], 0))
-            while len(self.entries) > MAX_BUILDERS:
-                self.entries.popitem(last=False)
+        e.used = now
         self.entries.move_to_end(key)
+        while len(self.entries) > MAX_BUILDERS:
+            k, old = next(iter(self.entries.items()))
+            if now - old.used < BUILDER_IDLE_S:
+                if len(self.entries) <= BUILDERS_CAP:
+                    break
+                if not self.capped:
+                    self.capped = True
+                    log.warning("Volume profiles: more than %d asked for at once; the least recently asked are built "
+                                "again when next asked", BUILDERS_CAP)
+            del self.entries[k]
         return e
 
     def build_key(self, key: tuple, gen: int) -> str:
@@ -689,64 +710,74 @@ class VpService:
             tail = f"|rth{rth_hours[0]}-{rth_hours[1]}" if rth_hours else ""
             ckey = lambda b, en: f"svp2|{symbol}|{b}|{en}|{tick!r}{tail}"   # noqa: E731
             dkey = lambda b, en: f"{ckey(b, en)}|{tpr}|{pct!r}|{int(at_least)}"   # noqa: E731
+            # live: the windows still taking trades, grown from those stored since and not kept yet: the forming one and,
+            # outside replay, one that ended less than SVP_SETTLE_MS ago (a trade stamped before its end can be stored a
+            # moment after it); after that, worked out once from storage, in time order, and kept. Replay reads what was
+            # stored before its clock: a session that ended then is finished.
+            live_w = [w for w in windows if w[1] + (0 if replay else SVP_SETTLE_MS) > now]
             done: dict[tuple, dict] = {}
             missing = []
-            for b, en in windows:
-                if en > now or b in have:   # forming, or a finished one the client holds: not read again
+            for w in windows:
+                if w in live_w or w[0] in have:   # taking trades, or a finished one the client holds: not read again
                     continue
-                row = m.store.db.execute("SELECT data FROM vp_cache WHERE key=?", (ckey(b, en),)).fetchone()
+                row = m.store.db.execute("SELECT data FROM vp_cache WHERE key=?", (ckey(*w),)).fetchone()
                 if row:
                     d = json.loads(row[0])
-                    done[(b, en)] = {"ticks": {int(k): v for k, v in d["ticks"]}, "last": d["last"], "approx": d.get("approx", 0)}
+                    done[w] = {"ticks": {int(k): v for k, v in d["ticks"]}, "last": d["last"], "approx": d.get("approx", 0)}
                 else:
-                    missing.append((b, en))
-            cur_w = windows[-1] if windows and windows[-1][1] > now else None
-            cur = e.state
+                    missing.append(w)
+            live = e.state or {}   # window -> SvpState
             if replay:   # its forming session, read to the replay clock: carried forward, or again from its open
-                if cur is not None and ((cur.begin, cur.end) != cur_w or cur.upto > now):
-                    cur = e.state = None
+                cur_w = live_w[-1] if live_w else None
+                cur = live.get(cur_w)
+                live = {}
                 if cur_w is not None:
-                    cur = e.state = await workers.run("chart", svp_upto, m.store.path, symbol, cur or SvpState(*cur_w),
-                                                      now, max_rowid, tick, rth_hours)
-            elif cur is not None and (cur_w is None or (cur.begin, cur.end) != cur_w or not cur.trades
-                                      or max_rowid - cur.rowid > SVP_CATCH_UP):
-                # that session ended (it is worked out again from storage, in time order), or it has no trades yet:
-                # its newest minutes are bars, read again each time; or nobody asked for a while: worked out again
-                # in a worker, not caught up here through every symbol's trades since
-                cur = e.state = None
-            jobs = missing + ([cur_w] if cur_w and cur is None and not replay else [])
+                    live[cur_w] = await workers.run("chart", svp_upto, m.store.path, symbol,
+                                                    cur if cur is not None and cur.upto <= now else SvpState(*cur_w),
+                                                    now, max_rowid, tick, rth_hours)
+            else:
+                # one past its settling (it is worked out again from storage, in time order), or with no trades yet: its
+                # newest minutes are bars, read again each time; or nobody asked for a while: worked out again in a
+                # worker, not caught up here through every symbol's trades since
+                live = {w: st for w, st in live.items() if w in live_w and st.trades and max_rowid - st.rowid <= SVP_CATCH_UP}
+            e.state = live
+            jobs = missing + ([] if replay else [w for w in live_w if w not in live])
             if jobs:
                 t0 = time.perf_counter()
                 built = await workers.run("chart", svp_job, m.store.path, symbol, jobs, max_rowid, tick, now, rth_hours,
-                                          (cur_w,) if cur_w else ())   # the forming one's minutes, for its per-bar values
+                                          tuple(live_w))   # the live ones' minutes, for their per-bar values
                 for st in built:
-                    if (st.begin, st.end) == cur_w:
-                        cur = e.state = st
+                    if (st.begin, st.end) in live_w:
+                        live[(st.begin, st.end)] = st
                     else:
                         done[(st.begin, st.end)] = {"ticks": st.ticks, "last": st.last, "approx": st.approx}
                 # kept only if the history they were read from is still the stored one: a gap fill (forget()) or an
                 # import (another program) that landed meanwhile has them worked out again by the next request
                 if e.gen == self.gen.get(symbol, 0) and m.store.data_version() == dv:
                     rows = [(ckey(st.begin, st.end), json.dumps({"ticks": [[k, v] for k, v in st.ticks.items()], "last": st.last,
-                                                                 "approx": st.approx})) for st in built if (st.begin, st.end) != cur_w]
+                                                                 "approx": st.approx})) for st in built if (st.begin, st.end) not in live_w]
                     try:
                         with m.store.db:
                             m.store.db.executemany("INSERT OR REPLACE INTO vp_cache VALUES (?, ?)", rows)
                     except sqlite3.Error as ex:   # a full disk: answered all the same, worked out again next time
                         log.warning("SVP %s: sessions not kept (%s)", symbol, ex)
                 log.info("SVP %s: %d sessions worked out in %.1fs", symbol, len(jobs), time.perf_counter() - t0)
-            if not replay and cur is not None and cur.rowid < max_rowid:   # the trades stored since, in the order they came
-                for price, size, ts, sym in m.store.db.execute(
-                        "SELECT price, size, ts, symbol FROM ticks WHERE rowid>? AND rowid<=? ORDER BY rowid", (cur.rowid, max_rowid)):
-                    if sym == symbol and cur.begin <= ts < cur.end and (hours is None or hours.day(ts) is not None):
-                        cur.add(price, size, ts, tick)
-                cur.rowid = max_rowid
+            low = min((st.rowid for st in live.values()), default=max_rowid)
+            if not replay and low < max_rowid:   # the trades stored since, in the order they came
+                for price, size, ts, sym, rid in m.store.db.execute(
+                        "SELECT price, size, ts, symbol, rowid FROM ticks WHERE rowid>? AND rowid<=? ORDER BY rowid", (low, max_rowid)):
+                    if sym == symbol and (hours is None or hours.day(ts) is not None):
+                        for st in live.values():
+                            if st.begin <= ts < st.end and rid > st.rowid:
+                                st.add(price, size, ts, tick)
+                for st in live.values():
+                    st.rowid = max_rowid
             # the POC, VAH and VAL at each minute's end (the per-bar values): the finished sessions' kept (sent with the
             # ones the client lacks, and for the ones it holds without them: nodev), or worked out in the background, each
             # read again from storage in a worker (its minutes are kept nowhere: a busy session's are a megabyte), newest
-            # first, the next answers having them; the forming one's carried forward here
-            devs, dev_to = {}, None
-            want = [w for w in windows if w[1] <= now and (w in done or w[0] in nodev)]
+            # first, the next answers having them; the live ones' carried forward here
+            devs, dev_to = {}, {}
+            want = [w for w in windows if w not in live_w and (w in done or w[0] in nodev)]
             for w in want:
                 row = m.store.db.execute("SELECT data FROM vp_cache WHERE key=?", (dkey(*w),)).fetchone()
                 if row:
@@ -755,24 +786,26 @@ class VpService:
             e.dev_want = sk   # a task on another setting stops after its session in hand
             if need and (e.dev_task is None or e.dev_task.done()):
                 e.dev_task = asyncio.create_task(self._svp_devs(e, symbol, need, max_rowid, tick, rth_hours, sk, dkey, dv))
-            if cur is not None:
-                cd = cur.devs.get(sk)
+            for w, st in live.items():
+                cd = st.devs.get(sk)
                 if cd is None:
-                    cd = cur.devs[sk] = await workers.run("chart", _dev_upto, cur.mins, tick, *sk, now)
-                devs[(cur.begin, cur.end)] = list(cd.feed(cur.mins, now).dev)   # (a copy: the state goes on)
-                dev_to = cd.done
+                    cd = st.devs[sk] = await workers.run("chart", _dev_upto, st.mins, tick, *sk, now)
+                devs[w] = list(cd.feed(st.mins, now).dev)   # (a copy: the state goes on)
+                dev_to[w] = cd.done
             out = []
-            for b, en in windows:
-                if (b, en) != cur_w and b in have:
-                    out.append({"start": b, "same": True, **({"dev": devs[(b, en)]} if b in nodev and (b, en) in devs else {})})
+            for w in windows:
+                b, en = w
+                if w not in live_w and b in have:
+                    out.append({"start": b, "same": True, **({"dev": devs[w]} if b in nodev and w in devs else {})})
                     continue
-                d = done.get((b, en)) if (b, en) != cur_w else ({"ticks": cur.ticks, "last": cur.last, "approx": cur.approx} if cur else None)
+                st = live.get(w)
+                d = {"ticks": st.ticks, "last": st.last, "approx": st.approx} if st is not None else done.get(w)
                 if d and (j := svp_json(d["ticks"], b, en, d["last"], tick, tpr, pct, at_least, d["approx"])):
-                    j["done"] = (b, en) != cur_w
-                    if (b, en) in devs:
-                        j["dev"] = devs[(b, en)]
-                        if (b, en) == cur_w:
-                            j["dev_to"] = dev_to   # its minutes so far: the values after them are its latest
+                    j["done"] = w not in live_w
+                    if w in devs:
+                        j["dev"] = devs[w]
+                        if w in dev_to:
+                            j["dev_to"] = dev_to[w]   # its minutes so far: the values after them are its latest
                     out.append(j)
         if zw:   # the window it ran: outside CT the newest session's (each date has its own), today's before any
             hours_text = zw.label(*(datetime.fromtimestamp(x / 1000, zw.tz).replace(tzinfo=None) for x in windows[-1])) if windows \
