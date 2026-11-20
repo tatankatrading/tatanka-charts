@@ -70,10 +70,11 @@ def bottom_px(selector: str, media: str = "") -> int:
 
 # Above the panel: the toast, every menu and dialog, and the chart's own bars and buttons (the draw bar, the replay
 # bar, a drawing's bar and its sheet on a phone, the object tree, Paste levels, the quick symbol box, the go-to-live
-# and nav buttons and the + by the price axis).
+# and nav buttons and the + by the price axis, with its price).
 ABOVE = [("#toast", ""), ("#ctx", ""), (".modal", ""), ("#ask-dlg", ""), ("#login", ""), ("#tz-menu", ""), ("#tf-menu", ""),
          ("#st-menu", ""), ("#cs-menu", ""), ("#ws-menu", ""), ("#draw-edit.full", PHONE), ("#draw-tree", ""), ("#draw-paste", ""),
-         ("#quick", ""), ("#draw-bar", ""), ("#replay-bar", ""), ("#draw-edit", ""), ("#ax-plus", ""), ("#go-live", ""), ("#nav", "")]
+         ("#quick", ""), ("#draw-bar", ""), ("#replay-bar", ""), ("#draw-edit", ""), ("#ax-plus", ""), ("#ax-plus-px", ""), ("#go-live", ""),
+         ("#nav", "")]
 
 
 def test_the_fired_alert_panel_is_under_the_toast_the_menus_the_dialogs_and_the_bars():

@@ -40,6 +40,15 @@ the next start, and the notice comes as the server starts.
   **Add alert at …**: price crossing that level, once. `+ Alert` in the header then a tap (Esc or a right-click
   backs out), or Alt+click, does the same. Phone: hold a finger on the chart until the crosshair shows, lift it, then tap the **+** (it stays 3 s; the crosshair
   ends when the finger lifts, so a drag after it always moves the chart).
+  - **The +'s price** shows on the price axis right beside it, in a tag like the crosshair's. It is the price the
+    menu's alert and horizontal line use. It stays as long as the + does: on the chart, on the +, just past it on
+    the axis, for a moment after the pointer leaves the chart, for 3 s after a finger lifts, and while the menu is
+    open. The menu opens beside the + and its price, not over them, and scrolls in a small layout chart.
+  - If the price scale moves (a new high, a wheel on the axis) while the pointer is on the chart, the + or its
+    price, the + stays under the pointer and shows the price now on that row. With the menu open, or in the moment
+    after the pointer or finger leaves, the + keeps its price and moves with it.
+  - With a magnet crosshair, the crosshair's line snaps to a bar's open, high, low or close and keeps its own price
+    there, so two prices can show: the line's and the +'s. When the line is on the +'s row, only the +'s shows.
 - **Create alert…** (same menu, **Alt+A**, or **+ Create alert** in the Alerts tab) opens the dialog:
   - **Condition**: Price, Session VWAP, RTH VWAP, POC, VAH, VAL, Daily levels, If/Then bands (your If/Then plan,
     below), or an indicator (the **Indicators** groups below them).

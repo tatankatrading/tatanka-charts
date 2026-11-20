@@ -231,7 +231,7 @@ const HELLO = { type: 'hello', instruments: S.instruments, catalog: {}, levels: 
   renderPlanLines(true);
   await loadPlanLevels();   // the page as loaded: ES's saved levels and lines
   draft();
-  onMessage({ type: 'levels', symbol: 'ES', levels: { date: '2026-11-02' } });   // ML levels published for ES
+  onMessage({ type: 'levels', symbol: 'ES', levels: { date: '2026-11-02' } });   // levels published for ES
   await settle();
   r.published = shown();
   onMessage(HELLO);   // a reconnect
@@ -252,8 +252,8 @@ const HELLO = { type: 'hello', instruments: S.instruments, catalog: {}, levels: 
 
 @needs_node
 def test_the_plan_tab_keeps_unsaved_levels_and_level_lines_when_the_page_reconnects_or_ml_levels_come():
-    """A pasted levels line and a Level Lines range and levels typed, not saved, the cursor out of the box: ES's ML
-    levels published and a reconnect (hello) leave them (both put ES's saved ones back); a switch to NQ shows NQ's,
+    """A pasted levels line and a Level Lines range and levels typed, not saved, the cursor out of the box: ES's levels
+    published and a reconnect (hello) leave them (both put ES's saved ones back); a switch to NQ shows NQ's,
     and NQ's newly published levels show in a box with no edits."""
     out = run_app(["markDirty", "fillBox", "LV_ORIGIN", "loadPlanLevels", "renderPlanLevels", "LL_BOXES", "llRangeShown", "renderPlanLines",
                    "llLeft", "renderLlLeft", "onSymbolChanged", "onMessage", "SPEC_RE"], PLAN_JS)

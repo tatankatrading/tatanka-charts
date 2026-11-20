@@ -130,21 +130,28 @@ def test_create_alert_on_a_layouts_page_starts_at_the_active_charts_last_price()
     assert out == [["Create alert on NQ", "25005.25"], ["Create alert on NQ", "25010.50"], ["Create alert on NQ", "25010.50"]]
 
 
-# The chart's crosshairMove handler and alertPlus as written, and a chart of a layout's message handler moving its
-# crosshair to the time another chart's pointer is at. The library tells a crosshair it was asked to move to later, with
-# no pointer event, as it does in a browser.
+# The chart's crosshairMove handler and alertPlus (with the + and its price tag's parts) as written, and a chart of a
+# layout's message handler moving its crosshair to the time another chart's pointer is at. The library tells a
+# crosshair it was asked to move to later, with no pointer event, as it does in a browser.
 XHAIR_JS = """
 const listeners = {}, later = [], noop = () => {};
 const T0 = 1_700_000_000_000, MIN = 60_000;
 const S = { bars: Array.from({ length: 100 }, (_, i) => ({ t: T0 + i * MIN, c: 6800 + i })), inds: [], hoverIdx: -1 };
 const plus = { hidden: true, dataset: {}, style: {}, offsetWidth: 20, offsetHeight: 16, matches: () => false };
-const $ = (s) => (s === '#ax-plus' ? plus : { addEventListener() {}, clientWidth: 800 });
+const tag = { hidden: true, style: {}, textContent: '' };
+let hovered = false;   // the pointer on this chart (#chart:hover)
+const $ = (s) => (s === '#ax-plus' ? plus : s === '#ax-plus-px' ? tag : { addEventListener() {}, clientWidth: 800, matches: () => hovered });
 const priceAt = (y) => 7000 - y, yAt = (price) => 7000 - price;   // the price scale: 1 point a pixel
-const candles = { coordinateToPrice: priceAt }, vol = {};
-let move = null;
+const candles = { coordinateToPrice: priceAt, priceToCoordinate: yAt }, vol = {};
+const px = (p) => p.toFixed(2), snap = (p) => Math.round(p * 4) / 4, plusLook = () => ({ dpr: 1, h: 21, w: 66 }), plusSizeNow = () => '';
+const L = { CrosshairMode: { Normal: 0, Magnet: 1, Hidden: 2, MagnetOHLC: 3 } }, requestAnimationFrame = () => 1, cancelAnimationFrame = noop, plusWatch = noop;
+let move = null, labelVisible = true;
 const chart = {
   subscribeCrosshairMove: (f) => { move = f; },
   priceScale: () => ({ width: () => 60 }),
+  paneSize: () => ({ width: 740, height: 600 }),
+  options: () => ({ crosshair: { mode: 0, horzLine: { labelVisible } } }),
+  applyOptions: (o) => { labelVisible = o.crosshair.horzLine.labelVisible; },
   setCrosshairPosition: (price, time) => later.push({ time, point: { x: 1, y: yAt(price) }, seriesData: new Map([[candles, { close: price }]]) }),
   clearCrosshairPosition: () => {},
 };
@@ -154,23 +161,34 @@ const timeOf = (b) => b.t, barIndexAt = () => 0, barAt = () => null, legend = no
 const location = { origin: 'http://x' }, document = { addEventListener() {} };
 const window = { addEventListener: (t, f) => { listeners[t] = f; }, parent: { postMessage() {} } };
 const TK_CELL = 0, TK_MULTI = false;
-let linkedChange = false, plusHide = 0, plusTouch = false;
+let linkedChange = false, plusHide = 0, plusTouch = false, plusOver = false, plusOnTag = false, plusLabelWas = null, ctxBeside = null;
+let plusY = null, plusBar = null, plusT = null, plusSize = '', plusRaf = 0;
 const setTimeout = (f) => { f(); return 0; }, clearTimeout = noop;   // the + hides at once when the pointer is not on it
 /*APP*/
 const linked = (ms) => listeners.message({ origin: location.origin, data: { tk: true, type: 'xhair', ms } });
 const out = {};
 pointer(200);   // the pointer on this chart (the one focused): its own price
 out.own = [S.hoverPrice, plus.hidden];
+out.ownTag = [tag.hidden, tag.textContent, labelVisible];   // its price beside the +, the chart's own label off
 move({ time: undefined, point: undefined, seriesData: new Map(), sourceEvent: { clientX: 0, clientY: 0 } });   // it leaves
 out.left = [S.hoverPrice, plus.hidden];
-linked(T0 + 40 * MIN); frame();   // the pointer on another chart of the layout
+out.leftTag = [tag.hidden, labelVisible];
+pointer(200);   // the + up again (as in the moment it stays after the pointer leaves, which runs at once here)
+linked(T0 + 40 * MIN); frame();   // the pointer on another chart of the layout: the + left behind goes at once
 out.linked = [S.hoverPrice, plus.hidden];
+out.linkedTag = [tag.hidden, labelVisible];   // the linked crosshair's own label shows
 frame(); later.push({ time: T0, point: { x: 1, y: yAt(6840) }, seriesData: new Map([[candles, { close: 6840 }]]) }); frame();   // a tick redraws it
 out.tick = [S.hoverPrice];
 linked(null);
 out.cleared = [S.hoverPrice];
 pointer(150);   // back on this chart
 out.back = [S.hoverPrice, plus.hidden];
+hovered = true;   // still on it: the other chart's word that its crosshair went, late (it came after the pointer got here)
+linked(null); frame();
+out.late = [S.hoverPrice, plus.hidden, tag.hidden, S.xhairLinked];
+hovered = false; ctxBeside = {};   // its + menu open, the pointer on another chart: its crosshair moves this one's no more
+linked(T0 + 40 * MIN); frame();
+out.menuOpen = [S.hoverPrice, plus.hidden, tag.hidden, S.xhairLinked, later.length];
 console.log(JSON.stringify(out));
 """
 
@@ -180,13 +198,24 @@ def test_a_linked_crosshair_is_not_the_pointers_price():
     """With the crosshair link on, another chart's pointer moved this chart's crosshair to the close of the bar at that
     time, and the crosshair handler took it for the pointer: the + showed at that close and Alt+H / Alt+A in this chart
     (the one focused) put a line or an alert there, at a price never pointed at (also after the linked crosshair went
-    away). A linked crosshair now leaves the pointer's price alone until the pointer is on this chart again."""
-    js = XHAIR_JS.replace("/*APP*/", "\n".join([app_part("alertPlus"), app_lines("chart.subscribeCrosshairMove(", "});"),
+    away). A linked crosshair now leaves the pointer's price alone until the pointer is on this chart again; a + still
+    up here (the moment it stays after the pointer leaves) goes at once, with its price tag, and the chart's own
+    crosshair label (off while the tag showed) is back for the linked crosshair. While the pointer is on this chart (the
+    other's word that its crosshair went can come after the pointer got here), or this chart's + menu is open, another
+    chart's crosshair leaves this one alone."""
+    parts = [app_part(f) for f in ("alertPlus", "plusAt", "plusLabel", "plusOff", "plusLater", "plusXhairOff", "plusCheck", "plusHoldNow",
+                                   "plusLineY")]
+    js = XHAIR_JS.replace("/*APP*/", "\n".join([*parts, app_lines("chart.subscribeCrosshairMove(", "});"),
                                                  app_lines("if (TK_CELL !== null) {", "}")]))
     out = run_app([], js)
     assert out["own"] == [6800, False]
+    assert out["ownTag"] == [False, "6800.00", False]
     assert out["left"] == [None, True]
+    assert out["leftTag"] == [True, True]
     assert out["linked"] == [None, True]
+    assert out["linkedTag"] == [True, True]
     assert out["tick"] == [None]
     assert out["cleared"] == [None]
     assert out["back"] == [6850, False]
+    assert out["late"] == [6850, False, False, False]   # the pointer is here: its + and price stay
+    assert out["menuOpen"] == [6850, False, False, False, 0]

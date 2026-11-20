@@ -68,7 +68,7 @@ def test_amt_alert_runner_rebuilt_in_the_bar_does_not_send_its_notices_again(tmp
 
 
 def test_amt_same_levels_set_again_keep_their_flips():
-    """After every history load and every ML levels poll the hub sets the symbol's levels again, freshly parsed (none
+    """After every history load and every levels poll the hub sets the symbol's levels again, freshly parsed (none
     flipped). The same levels keep the flips history gave them, as NinjaTrader replaces them only when the file
     changes: resistance broken in history, with price still inside the flip band, stays FLIPPED."""
     bars = synth(25, 7, datetime(2026, 10, 2, 12, 0))

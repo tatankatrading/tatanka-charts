@@ -5247,10 +5247,17 @@ $('#al-dlg').addEventListener('keydown', (e) => {   // keys typed here are not c
 
 // ---- menus and small dialogs ------------------------------------------------------------------------------
 // A menu at (cx, cy). items: { label, fn, key, check, disabled }, 'sep', or an element. Opened from a button
-// (owner), a second click on it closes it.
-let ctxOwner = null;
-function closeCtx() { $('#ctx').hidden = true; ctxOwner = null; plusXhairOff(); }
-function showMenu(cx, cy, items, owner = null) {
+// (owner), a second click on it closes it. beside: a box ({ left, top, right, bottom }) it opens next to instead, never
+// over it: its right edge just left of it, top on its row; no room there, under its row (else over it), no taller than
+// the room there (it scrolls). No menu is taller than the window.
+let ctxOwner = null, ctxBeside = null;
+function closeCtx() {
+  const plus = ctxBeside !== null;   // the +'s menu: the + and its price go as the pointer leaves them
+  $('#ctx').hidden = true;
+  ctxOwner = ctxBeside = null;
+  if (plus) plusLeft(); else plusXhairOff();
+}
+function showMenu(cx, cy, items, owner = null, beside = null) {
   const m = $('#ctx');
   if (owner && ctxOwner === owner && !m.hidden) { closeCtx(); return; }
   m.replaceChildren(...items.map((it) => {
@@ -5266,11 +5273,28 @@ function showMenu(cx, cy, items, owner = null) {
     b.onclick = () => { closeCtx(); it.fn(); };
     return b;
   }));
+  m.style.left = m.style.top = '0px';   // measured at its own size, not squeezed against the window's edge
+  Object.assign(m.style, { maxHeight: `${Math.max(0, innerHeight - 8)}px`, overflowX: '', overflowY: '' });
   m.hidden = false;
+  m.scrollTop = 0;
+  const plus = ctxBeside;
   ctxOwner = owner;
-  const r = m.getBoundingClientRect();
+  ctxBeside = beside;
+  if (plus && !beside) plusLeft();   // the + menu replaced by another (a watchlist button's): the + goes, as when it closes
+  let r = m.getBoundingClientRect();
+  if (beside) {
+    const below = innerHeight - 4 - (beside.bottom + 4), above = beside.top - 4 - 4;
+    if (beside.left - 4 - r.width >= 4) { cx = beside.left - 4 - r.width; cy = beside.top; }
+    else {
+      const under = r.height <= below || (r.height > above && below >= above), room = Math.max(0, under ? below : above);
+      if (r.height > room) { m.style.maxHeight = `${room}px`; r = m.getBoundingClientRect(); }   // a short window (a layout's cell)
+      cx = beside.right - r.width; cy = under ? beside.bottom + 4 : beside.top - 4 - r.height;
+    }
+  }
   m.style.left = `${Math.max(4, Math.min(cx, innerWidth - r.width - 4))}px`;
   m.style.top = `${Math.max(4, Math.min(cy, innerHeight - r.height - 4))}px`;
+  const scroll = m.scrollHeight > m.clientHeight + 1;   // taller than its max-height: it scrolls (else as it was)
+  Object.assign(m.style, { overflowX: scroll ? 'hidden' : '', overflowY: scroll ? 'auto' : '' });
 }
 // A name, or a yes/no (input: false): resolves to the text ('' for yes), or null when cancelled. names: the saved
 // ones (templates, presets): a dropdown under the name that narrows as you type (arrows, then Enter or Tab, take one);
@@ -5356,8 +5380,8 @@ function ask({ title, value = '', ok = 'OK', message = '', input = true, danger 
   });
 }
 
-// ---- the chart's menu: right-click (or the + by the price axis) ----------------------------------------------
-function openCtx(cx, cy, price) {
+// ---- the chart's menu: right-click (or the + by the price axis: beside it, the box of the + and its price) --------
+function openCtx(cx, cy, price, beside = null) {
   const p = snap(price), t = px(p);
   showMenu(cx, cy, [
     { label: `Add alert at ${t}`, fn: () => quickAlert(p) },
@@ -5380,7 +5404,7 @@ function openCtx(cx, cy, price) {
     { label: 'Studies…', fn: () => openSt(true), key: '/' },
     { label: 'Chart settings…', fn: () => openCs(true) },
     { label: 'Keyboard shortcuts', fn: () => showKeys(true), key: '?' },
-  ]);
+  ], null, beside);
 }
 // The price axis' own menu, as TradingView's: the scale modes, the lock, and scaling on price only.
 function openScaleCtx(cx, cy) {
@@ -5475,41 +5499,208 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCtx()
 window.addEventListener('blur', closeCtx);
 window.addEventListener('resize', closeCtx);
 
-// The + that follows the crosshair just left of the price axis; it stays a moment after the pointer leaves the
-// chart so it can be clicked. On a phone, long-press the chart for the crosshair, lift, then tap the + (the crosshair
-// ends when the finger lifts, so there the + stays 3 s).
-let plusHide = 0, plusTouch = false;
+// The + that follows the crosshair just left of the price axis, with its price beside it on the axis: the tag the
+// chart's crosshair puts there, kept while the + is up (on the chart, on the +, past it on the axis, the moment it stays
+// after the pointer leaves, the 3 s after a finger lifts, and while its menu is open). The tag stands in for the
+// chart's own crosshair label, which is off while it would be on the tag's row (the setting it had comes back after):
+// one price on that row, the one the menu says, and nothing to blink as the pointer goes from the chart to the + and
+// the axis. In magnet mode the chart's line can be on another row (an open, high, low or close): its label shows there.
+// It stays a moment after the pointer leaves the chart so it can be clicked. On a phone, long-press the chart for the
+// crosshair, lift, then tap the + (the crosshair ends when the finger lifts, so there the + stays 3 s).
+let plusHide = 0, plusTouch = false, plusOver = false, plusOnTag = false, plusLabelWas = null;
+// plusY: the row the + is for (the pointer's, before it is kept inside the pane); plusBar: the bar the crosshair is on;
+// plusT: the time the crosshair is held at; plusSize: the pane and axis it was placed on; plusRaf: its watch, a frame.
+let plusY = null, plusBar = null, plusT = null, plusSize = '', plusRaf = 0;
 $('#chart').addEventListener('pointerdown', (e) => { plusTouch = e.pointerType !== 'mouse'; }, true);
 function alertPlus(p) {
-  const b = $('#ax-plus'), y = p.point && !p.paneIndex ? p.point.y : null;
-  S.hoverPrice = y != null ? candles.coordinateToPrice(y) : null;
-  if (p.time != null) S.hoverTime = p.time;
-  clearTimeout(plusHide);
-  if (S.hoverPrice == null) {
-    plusHide = setTimeout(() => { if (!b.matches(':hover')) b.hidden = true; }, plusTouch ? 3000 : 400);
+  if (ctxBeside) {   // its menu open: the + and its price stay with it, and the crosshair stays held at them, also when
+    // the pointer crosses the plot on its way to the menu, left of the +, or leaves the chart (the line comes back at once)
+    if (p.sourceEvent !== undefined || (S.plusXhair && (!p.point || p.paneIndex))) plusHoldNow();
+    else if (p.point) plusCheck(true);
     return;
   }
-  b.dataset.price = S.hoverPrice;
-  b.hidden = false;
-  b.style.left = `${$('#chart').clientWidth - chart.priceScale('right').width() - b.offsetWidth - 2}px`;
-  b.style.top = `${y - b.offsetHeight / 2}px`;
+  if (S.plusXhair && (plusOver || plusOnTag) && !p.point) { plusHoldNow(); return; }   // onto the + or its tag: held at once
+  if (S.plusXhair && p.point && p.sourceEvent === undefined) {   // the crosshair held for the + (or a tick redrawing it):
+    plusCheck(true);                                              // its price, not one a pixel's rounding gives, where it is now
+    S.hoverPrice = Number($('#ax-plus').dataset.price);
+    return;
+  }
+  const y = p.point && !p.paneIndex ? p.point.y : null;
+  S.hoverPrice = y != null ? candles.coordinateToPrice(y) : null;
+  if (p.time != null) { S.hoverTime = p.time; plusBar = p.logical ?? null; }
+  clearTimeout(plusHide);
+  if (S.hoverPrice == null) {
+    if (p.point) plusOff();   // on a pane below: no + there, and its crosshair has its own label
+    else plusLater(plusTouch ? 3000 : 400);
+    return;
+  }
+  plusAt(y, S.hoverPrice);
 }
-$('#ax-plus').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openCtx(r.right, r.top, Number(e.currentTarget.dataset.price)); };
-// Over the + the pointer has left the chart, which takes its crosshair away: the crosshair is held at the +'s price
-// (on the bar it was last over) while the pointer is on it or its menu is open, so the line and the price tag stay.
-$('#ax-plus').addEventListener('pointerenter', (e) => {
-  if (e.pointerType !== 'mouse' || !S.bars.length) return;
-  const b = e.currentTarget, t = S.hoverTime ?? timeOf(S.bars[S.bars.length - 1]);
+// The + and its tag at row y of the price pane (kept inside it at its top and bottom), for that price.
+function plusAt(y, price) {
+  const b = $('#ax-plus'), tag = $('#ax-plus-px'), text = px(snap(price)), o = chart.options();
+  b.dataset.price = price;
+  b.hidden = tag.hidden = false;
+  if (tag.textContent !== text) tag.textContent = text;
+  const k = plusLook(tag, text, o), pane = chart.paneSize(0), bw = b.offsetWidth, bh = b.offsetHeight, half = Math.max(k.h, bh) / 2;
+  const mid = Math.min(Math.max(y, half), pane.height - half), d = k.dpr;
+  // the label's rows, as the library rounds them to device pixels; within the pane
+  const top = Math.min(Math.max(Math.floor(Math.round(mid * d) - Math.floor(d / 2) + Math.max(1, Math.floor(d)) / 2 - k.h * d / 2) / d, 0), pane.height - k.h);
+  // on the axis; wider than it (a narrow one): over the plot's edge, with the + left of it
+  const left = Math.min(pane.width + chart.priceScale('left').width(), $('#chart').clientWidth - k.w);
+  Object.assign(tag.style, { left: `${left}px`, top: `${top}px`, width: `${k.w}px` });
+  b.style.left = `${left - bw - 1}px`;
+  b.style.top = `${top + k.h / 2 - bh / 2}px`;
+  plusY = y;
+  plusSize = plusSizeNow();
+  plusLabel(Math.abs(plusLineY(y, o) - (top + k.h / 2)) >= k.h);   // the chart's own label: not on the tag's row
+  if (!plusRaf) plusRaf = requestAnimationFrame(plusWatch);
+}
+// The row of the chart's crosshair line for one at row y: y, or in magnet mode the open, high, low or close nearest
+// it of the bar it is on (of the series on the price pane's own scales), as the library picks it.
+function plusLineY(y, o) {
+  const M = L.CrosshairMode, mode = o.crosshair.mode;
+  if ((mode !== M.Magnet && mode !== M.MagnetOHLC) || plusBar == null) return y;
+  let at = y, best = Infinity;
+  for (const s of chart.panes()[0].getSeries()) {
+    const so = s.options();
+    if (!so.visible || !['left', 'right', undefined].includes(so.priceScaleId)) continue;   // not on an overlay scale
+    const v = s.dataByIndex(plusBar);
+    for (const f of mode === M.Magnet ? ['close', 'value'] : ['open', 'high', 'low', 'close', 'value']) {
+      const c = v?.[f] == null ? null : s.priceToCoordinate(v[f]);
+      if (c != null && Math.abs(c - y) < best) { best = Math.abs(c - y); at = c; }
+    }
+  }
+  return at;
+}
+// The pane, the axes, the screen's pixels and the font the + was placed for (a change places it again).
+const plusSizeNow = () => { const p = chart.paneSize(0); return `${p.width} ${p.height} ${chart.priceScale('left').width()} ${devicePixelRatio} ${S.cs.fontSize}`; };
+// The price scale moved under the + (a new high or low, the axis dragged or wheeled, replay playing): with the pointer
+// on the chart, the + or its tag, they stay (under it) and take the price that row has now; with its menu open, or in
+// the moment it stays after the pointer or a finger leaves, they keep their price (the menu's, the one picked) and go
+// to its row. Either way the held line goes with them. again: placed again even if nothing moved.
+function plusCheck(again = false) {
+  const b = $('#ax-plus');
+  if (b.hidden || plusY == null) return;
+  const price = Number(b.dataset.price), y = candles.priceToCoordinate(price), moved = y == null || Math.abs(y - plusY) >= 1;
+  if (!moved && !again && plusSizeNow() === plusSize) return;
+  if (!moved) plusAt(plusY, price);
+  else if (ctxBeside || S.hoverPrice == null) { if (y == null) return; plusAt(y, price); }
+  else {
+    const now = candles.coordinateToPrice(plusY);
+    if (now == null) return;
+    plusAt(plusY, now);
+    S.hoverPrice = now;   // the pointer's price (Alt+A, Alt+H), as the tag says
+  }
+  if (moved && S.plusXhair) chart.setCrosshairPosition(Number(b.dataset.price), plusT, candles);
+}
+function plusWatch() {   // each frame while the + is up
+  plusRaf = $('#ax-plus').hidden ? 0 : requestAnimationFrame(plusWatch);
+  plusCheck();
+}
+// The tag's look is the chart's crosshair price label's, as the library draws it: the layout's font and size, the
+// horizontal line's label color (opaque) with black or white text by its brightness, 4.5/12 of the font size above and
+// below the text, a 5 px tick and 5/12 of the font size before it, 1 px and 5/12 after (the text's width measured with
+// its digits as 0s, as the library does, so the width does not jump about), in whole device pixels.
+let plusLookKey = '', plusLookOf = null, plusMeasure = null;
+function plusLook(tag, text, o = chart.options()) {
+  const fs = o.layout.fontSize, font = `${fs}px ${o.layout.fontFamily}`;
+  const bg = o.crosshair.horzLine.labelBackgroundColor, dpr = window.devicePixelRatio || 1, key = `${font}|${bg}|${dpr}`;
+  if (key !== plusLookKey) {
+    plusLookKey = key;
+    tag.style.backgroundColor = '';
+    tag.style.backgroundColor = bg;
+    const [r = 0, g = 0, b = 0] = (getComputedStyle(tag).backgroundColor.match(/[\d.]+/g) || []).map(Number);
+    let h = Math.round(fs * 1.75 * dpr);
+    if (h % 2 !== Math.max(1, Math.floor(dpr)) % 2) h += 1;
+    plusLookOf = { dpr, fs, h: h / dpr };
+    Object.assign(tag.style, { backgroundColor: `rgb(${r}, ${g}, ${b})`, color: 0.199 * r + 0.687 * g + 0.114 * b > 160 ? 'black' : 'white',
+      font, height: `${h / dpr}px`, lineHeight: `${h / dpr}px`, paddingLeft: `${5 + fs * 5 / 12}px` });
+    plusMeasure ||= document.createElement('canvas').getContext('2d');
+    plusMeasure.font = font;
+  }
+  const { dpr: d, fs: f } = plusLookOf;
+  return { ...plusLookOf, w: Math.round((1 + f * 10 / 12 + Math.ceil(plusMeasure.measureText(text.replace(/[1-9]/g, '0')).width) + 5) * d) / d };
+}
+// The chart's own crosshair price label: off while the tag would cover it (on: the setting it had).
+function plusLabel(on) {
+  if (on === (plusLabelWas === null)) return;
+  if (on) { chart.applyOptions({ crosshair: { horzLine: { labelVisible: plusLabelWas } } }); plusLabelWas = null; }
+  else { plusLabelWas = chart.options().crosshair.horzLine.labelVisible; chart.applyOptions({ crosshair: { horzLine: { labelVisible: false } } }); }
+}
+function plusOff() {
+  clearTimeout(plusHide);
+  cancelAnimationFrame(plusRaf);
+  plusRaf = 0;
+  $('#ax-plus').hidden = $('#ax-plus-px').hidden = true;
+  plusOnTag = false;
+  plusY = null;
+  plusLabel(true);
+  S.hoverPrice = null;   // the pointer is off the chart (its price there, or the one held for the +, gone with it)
+  plusXhairOff();
+}
+// The + goes in a moment, unless the pointer is on it or its tag, or its menu is open, by then.
+function plusLater(ms) {
+  clearTimeout(plusHide);
+  plusHide = setTimeout(() => { if (!plusOver && !plusOnTag && !ctxBeside) plusOff(); }, ms);
+}
+$('#ax-plus').onclick = (e) => {   // the menu beside the + and its tag, not over them
+  const b = e.currentTarget, r = b.getBoundingClientRect(), t = $('#ax-plus-px').hidden ? r : $('#ax-plus-px').getBoundingClientRect();
+  openCtx(r.left, r.top, Number(b.dataset.price), { left: Math.min(r.left, t.left), top: Math.min(r.top, t.top), right: Math.max(r.right, t.right), bottom: Math.max(r.bottom, t.bottom) });
+  if (e.detail) b.blur();   // clicked or tapped (not Enter or Space): no focus ring left on it once the menu goes
+};
+// Over the + (or its tag, past it on the axis) the pointer has left the chart, which takes its crosshair away: the
+// crosshair is held at the +'s price (on the bar it was last over) while the pointer is on them or its menu is open,
+// so the line stays.
+function plusHold() {
+  const b = $('#ax-plus');
+  if (!S.bars.length || b.hidden) return;
+  if (!S.plusXhair) plusT = S.hoverTime ?? timeOf(S.bars[S.bars.length - 1]);
+  clearTimeout(plusHide);
   S.plusXhair = true;
   requestAnimationFrame(() => {   // after the chart's own mouseleave, which takes its crosshair away
-    if (S.plusXhair && (b.matches(':hover') || !$('#ctx').hidden)) chart.setCrosshairPosition(Number(b.dataset.price), t, candles);
+    if (S.plusXhair && (plusOver || plusOnTag || ctxBeside)) plusHoldNow();
   });
+}
+function plusHoldNow() {   // the crosshair at the +'s price now (its price is the hover price)
+  const b = $('#ax-plus');
+  if (!S.bars.length || b.hidden) return;
+  plusT ??= S.hoverTime ?? timeOf(S.bars[S.bars.length - 1]);
+  S.plusXhair = true;
+  S.hoverPrice = Number(b.dataset.price);
+  chart.setCrosshairPosition(S.hoverPrice, plusT, candles);
+}
+function plusXhairOff() { if (S.plusXhair) { S.plusXhair = false; plusT = null; chart.clearCrosshairPosition(); } }
+function plusLeft() {   // off the + and its tag: the hold ends (its menu open: when it closes) and the + goes in a moment
+  if (plusOver || plusOnTag || ctxBeside) return;
+  plusXhairOff();
+  plusLater(400);
+}
+const plusTagAt = (x, y) => {   // the pointer on the tag
+  const t = $('#ax-plus-px');
+  if (t.hidden) return false;
+  const r = t.getBoundingClientRect();
+  return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+};
+function plusTagHover(on) {
+  if (on === plusOnTag) return;
+  plusOnTag = on;
+  if (on) plusHold(); else plusLeft();
+}
+$('#ax-plus').addEventListener('pointerenter', (e) => {
+  if (e.pointerType !== 'mouse') return;
+  plusOver = true;
+  plusHold();
 });
-function plusXhairOff() { if (S.plusXhair) { S.plusXhair = false; chart.clearCrosshairPosition(); } }
-$('#ax-plus').addEventListener('pointerleave', () => {
-  if ($('#ctx').hidden) plusXhairOff();   // its menu open: held until the menu closes
-  plusHide = setTimeout(() => { if (S.hoverPrice == null) $('#ax-plus').hidden = true; }, 400);
+$('#ax-plus').addEventListener('pointerleave', (e) => {
+  if (!plusOver) return;
+  plusOver = false;
+  plusOnTag = plusTagAt(e.clientX, e.clientY);
+  plusLeft();
 });
+// The tag lets the pointer through to the price axis (its drag, wheel and menu); the pointer on it keeps the +.
+$('#chart').addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') plusTagHover(plusTagAt(e.clientX, e.clientY)); }, true);
+$('#chart').addEventListener('pointerleave', (e) => { if (e.relatedTarget !== $('#ax-plus')) plusTagHover(false); });
 
 // ---- alert lines: the current symbol's active price alerts, dashed, with a bell label and an axis tag. Drag one
 // to move the alert (it re-arms); click it to edit. -------------------------------------------------------------
@@ -8759,7 +8950,11 @@ if (TK_CELL !== null) {
     else if (m.type === 'key') quickOpen(m.key);
     else if (m.type === 'journal') journalShow({ symbol: m.symbol, entry_ts: m.entry_ts });   // a trade clicked in the page's Journal
     else if (m.type === 'xhair') {
+      // the pointer is on this chart (another's move as it left that one can come after it got here), on its + or its
+      // + menu: the crosshair here is the pointer's, or the one held at the +
+      if (plusOver || plusOnTag || ctxBeside || (!plusTouch && $('#chart').matches(':hover'))) return;
       S.xhairLinked = true;   // the crosshair moves this makes are not the pointer's (the library tells them later, with no pointer event)
+      plusOff();   // nor is a + left a moment after the pointer: the linked crosshair's label shows
       if (m.ms == null || !S.bars.length) { chart.clearCrosshairPosition(); return; }
       let lo = 0, hi = S.bars.length - 1;   // the bar this chart has at that moment
       if (S.bars[0].t > m.ms) { chart.clearCrosshairPosition(); return; }
